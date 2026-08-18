@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+*.log
+migrations/_tmp*.sql
+coverage/
+playwright-report/
+test-results/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./tsconfig.worker.tsbuildinfo",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["@cloudflare/workers-types", "vitest/globals"]
+  },
+  "include": ["worker", "vitest.worker.config.ts"]
+}

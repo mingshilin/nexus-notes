@@ -1,0 +1,30 @@
+name = "modern-notes-saas"
+main = "worker/index.ts"
+compatibility_date = "2026-05-14"
+workers_dev = false
+preview_urls = false
+routes = [
+  { pattern = "notes.msl88ljctengxun.xyz", custom_domain = true }
+]
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[vars]
+APP_NAME = "Nexus Notes"
+APP_BASE_URL = "https://notes.msl88ljctengxun.xyz"
+EMAIL_FROM = "Nexus Notes <noreply@msl88ljctengxun.xyz>"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "notes_db"
+database_id = "dc2e2ccc-58dc-4b2e-9c46-401d56449bb0"
+
+[[r2_buckets]]
+binding = "AVATARS_BUCKET"
+bucket_name = "nexus-notes-avatars"
+
+[triggers]
+crons = ["*/10 * * * *"]

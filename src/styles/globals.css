@@ -1,0 +1,372 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 24% 96%;
+    --foreground: 222 28% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 28% 11%;
+    --primary: 212 100% 50%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 16% 95%;
+    --secondary-foreground: 223 18% 20%;
+    --muted: 220 18% 95%;
+    --muted-foreground: 222 9% 46%;
+    --accent: 214 25% 91%;
+    --accent-foreground: 222 24% 17%;
+    --destructive: 4 84% 58%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 14% 86%;
+    --input: 220 14% 88%;
+    --ring: 212 100% 50%;
+
+    --radius-sm: 10px;
+    --radius-md: 12px;
+    --radius-lg: 14px;
+    --radius-xl: 18px;
+    --radius-2xl: 22px;
+    --radius-window: 28px;
+
+    --shadow-xs: 0 1px 2px rgba(12, 16, 24, 0.06);
+    --shadow-sm: 0 10px 30px rgba(15, 23, 42, 0.08);
+    --shadow-md: 0 20px 60px rgba(15, 23, 42, 0.14);
+    --shadow-lg: 0 40px 100px rgba(15, 23, 42, 0.24);
+
+    --surface-app: #dfe8f6;
+    --surface-window: rgba(255, 255, 255, 0.62);
+    --surface-sidebar: rgba(255, 255, 255, 0.42);
+    --surface-list: rgba(255, 255, 255, 0.92);
+    --surface-editor: rgba(255, 255, 255, 0.96);
+    --surface-panel: rgba(248, 249, 251, 0.92);
+    --surface-elevated: rgba(255, 255, 255, 0.82);
+    --surface-overlay: rgba(255, 255, 255, 0.78);
+    --border-subtle: rgba(15, 23, 42, 0.08);
+    --border-strong: rgba(15, 23, 42, 0.14);
+    --selection: rgba(10, 132, 255, 0.22);
+    --desktop-wallpaper:
+      radial-gradient(circle at 12% 18%, rgba(255, 255, 255, 0.5), transparent 24%),
+      radial-gradient(circle at 88% 16%, rgba(255, 255, 255, 0.34), transparent 20%),
+      radial-gradient(circle at 78% 88%, rgba(255, 255, 255, 0.22), transparent 24%),
+      linear-gradient(120deg, #ffb6bb 0%, #f5d1f0 34%, #c7dafd 68%, #b0e2ff 100%);
+  }
+
+  .dark {
+    --background: 224 20% 9%;
+    --foreground: 210 18% 94%;
+    --card: 222 18% 12%;
+    --card-foreground: 210 18% 94%;
+    --primary: 209 100% 62%;
+    --primary-foreground: 224 20% 10%;
+    --secondary: 224 14% 14%;
+    --secondary-foreground: 210 18% 92%;
+    --muted: 223 14% 14%;
+    --muted-foreground: 220 10% 68%;
+    --accent: 224 12% 18%;
+    --accent-foreground: 210 18% 94%;
+    --destructive: 4 84% 63%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 8% 20%;
+    --input: 220 8% 20%;
+    --ring: 209 100% 62%;
+
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.28);
+    --shadow-sm: 0 12px 32px rgba(0, 0, 0, 0.28);
+    --shadow-md: 0 24px 72px rgba(0, 0, 0, 0.34);
+    --shadow-lg: 0 44px 120px rgba(0, 0, 0, 0.5);
+
+    --surface-app: #12151f;
+    --surface-window: rgba(21, 24, 33, 0.66);
+    --surface-sidebar: rgba(18, 20, 28, 0.72);
+    --surface-list: rgba(22, 24, 33, 0.92);
+    --surface-editor: rgba(26, 28, 37, 0.95);
+    --surface-panel: rgba(28, 30, 40, 0.92);
+    --surface-elevated: rgba(30, 33, 44, 0.82);
+    --surface-overlay: rgba(24, 26, 35, 0.86);
+    --border-subtle: rgba(255, 255, 255, 0.07);
+    --border-strong: rgba(255, 255, 255, 0.12);
+    --selection: rgba(64, 156, 255, 0.3);
+    --desktop-wallpaper:
+      radial-gradient(circle at 18% 16%, rgba(73, 98, 186, 0.28), transparent 24%),
+      radial-gradient(circle at 82% 14%, rgba(179, 113, 212, 0.18), transparent 18%),
+      radial-gradient(circle at 74% 82%, rgba(44, 160, 176, 0.14), transparent 18%),
+      linear-gradient(145deg, #1a2030 0%, #171b27 34%, #1d2537 68%, #18202f 100%);
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family:
+      -apple-system,
+      BlinkMacSystemFont,
+      "SF Pro Text",
+      "SF Pro Display",
+      "Helvetica Neue",
+      sans-serif;
+    text-rendering: optimizeLegibility;
+    background: var(--desktop-wallpaper);
+    background-color: var(--surface-app);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    letter-spacing: 0;
+  }
+
+  ::selection {
+    background: var(--selection);
+    color: hsl(var(--foreground));
+  }
+
+  ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+}
+
+@layer components {
+  .mac-window {
+    border-radius: var(--radius-window);
+    background: var(--surface-window);
+    border: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(30px) saturate(160%);
+  }
+
+  .mac-glass {
+    background: var(--surface-elevated);
+    border: 1px solid var(--border-subtle);
+    backdrop-filter: blur(24px) saturate(150%);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .mac-section {
+    background: var(--surface-panel);
+    border-color: var(--border-subtle);
+  }
+
+  .glass-toolbar {
+    background: color-mix(in srgb, var(--surface-elevated) 86%, transparent);
+    border-color: var(--border-subtle);
+    backdrop-filter: blur(18px) saturate(150%);
+  }
+
+  .surface-card {
+    background: var(--surface-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .nexus-toast {
+    border-left: 4px solid hsl(var(--border));
+  }
+
+  .nexus-toast-success {
+    border-left-color: #34c759 !important;
+  }
+
+  .nexus-toast-failure {
+    border-left-color: hsl(var(--destructive)) !important;
+  }
+
+  .nexus-toast-permission {
+    border-left-color: #ff9500 !important;
+  }
+
+  .nexus-toast-network {
+    border-left-color: #0a84ff !important;
+  }
+
+  .nexus-toast-configuration {
+    border-left-color: #8e8e93 !important;
+  }
+
+  .nexus-toast-warning {
+    border-left-color: #ffcc00 !important;
+  }
+
+  .nexus-toast-info {
+    border-left-color: #5ac8fa !important;
+  }
+
+  .surface-sidebar {
+    background: var(--surface-sidebar);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-xs);
+  }
+
+  .control-soft {
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-subtle);
+    background: color-mix(in srgb, var(--surface-elevated) 70%, transparent);
+    box-shadow: var(--shadow-xs);
+    transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+  }
+
+  .state-chip {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold;
+    border-radius: 999px;
+    border: 1px solid var(--border-subtle);
+    background: color-mix(in srgb, var(--surface-elevated) 82%, transparent);
+  }
+
+  .state-chip-saving {
+    color: hsl(37 96% 43%);
+    border-color: rgba(245, 158, 11, 0.24);
+    background: rgba(245, 158, 11, 0.12);
+  }
+
+  .state-chip-saved {
+    color: hsl(150 57% 34%);
+    border-color: rgba(34, 197, 94, 0.22);
+    background: rgba(34, 197, 94, 0.1);
+  }
+
+  .state-chip-failed {
+    color: hsl(var(--destructive));
+    border-color: rgba(239, 68, 68, 0.24);
+    background: rgba(239, 68, 68, 0.1);
+  }
+
+  .mac-input-shell {
+    background: color-mix(in srgb, var(--surface-elevated) 82%, transparent);
+    border: 1px solid var(--border-subtle);
+    border-radius: 14px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), var(--shadow-xs);
+    backdrop-filter: blur(18px);
+  }
+
+  .mac-traffic-light {
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  }
+
+  .markdown-preview {
+    @apply text-[0.97rem] leading-8 text-foreground;
+  }
+
+  .markdown-preview h1 {
+    @apply mb-5 mt-8 text-[2rem] font-semibold tracking-normal text-foreground;
+  }
+
+  .markdown-preview h2 {
+    @apply mb-4 mt-8 text-[1.55rem] font-semibold tracking-normal text-foreground;
+  }
+
+  .markdown-preview h3 {
+    @apply mb-3 mt-7 text-[1.2rem] font-semibold tracking-normal text-foreground;
+  }
+
+  .markdown-preview p {
+    @apply mb-5 text-[0.98rem] text-foreground;
+    opacity: 0.88;
+  }
+
+  .markdown-preview ul,
+  .markdown-preview ol {
+    @apply mb-4 pl-6;
+  }
+
+  .markdown-preview ul {
+    @apply list-disc;
+  }
+
+  .markdown-preview ol {
+    @apply list-decimal;
+  }
+
+  .markdown-preview blockquote {
+    @apply my-6 rounded-r-xl py-3 pl-4 pr-4 text-muted-foreground;
+    border-left: 3px solid rgba(10, 132, 255, 0.35);
+    background: rgba(10, 132, 255, 0.06);
+  }
+
+  .markdown-preview code {
+    @apply rounded-md px-1.5 py-0.5 font-mono text-[0.84em] text-foreground;
+    opacity: 0.9;
+    border: 1px solid var(--border-subtle);
+    background: color-mix(in srgb, var(--surface-panel) 65%, rgba(0, 0, 0, 0.04));
+  }
+
+  .markdown-preview pre {
+    @apply mb-6 overflow-x-auto rounded-2xl p-4;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: #1e1e1e;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .markdown-preview pre code {
+    @apply bg-transparent p-0 text-white/90;
+    border: 0;
+  }
+
+  .scrollbar-subtle {
+    scrollbar-width: none;
+  }
+
+  @media (max-width: 767px) {
+    html,
+    body,
+    #root {
+      height: 100%;
+      overflow: hidden;
+    }
+
+    body {
+      background-attachment: scroll;
+      touch-action: manipulation;
+    }
+
+    input,
+    textarea,
+    select {
+      font-size: 16px;
+    }
+
+    .mac-window {
+      border-radius: 0;
+      border-left: 0;
+      border-right: 0;
+      box-shadow: none;
+    }
+
+    .markdown-preview {
+      font-size: 0.95rem;
+      line-height: 1.8;
+    }
+
+    .markdown-preview h1 {
+      font-size: 1.65rem;
+    }
+
+    .markdown-preview h2 {
+      font-size: 1.35rem;
+    }
+  }
+}

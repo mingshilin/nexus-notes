@@ -1,0 +1,17 @@
+{
+  "name": "Nexus Notes",
+  "short_name": "Nexus",
+  "description": "Structured notes, databases, capture and knowledge management.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f8fb",
+  "theme_color": "#0D6EFD",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "64x64",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
