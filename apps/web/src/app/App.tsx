@@ -8,7 +8,8 @@ import {
   Sparkles,
   Users,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
 
 const domains = [
@@ -22,6 +23,15 @@ const domains = [
 export function App() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
+  const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState<ServiceWorkerUpdate | null>(null);
+
+  useEffect(() => {
+    const handleUpdate = (event: Event) => {
+      setServiceWorkerUpdate((event as CustomEvent<ServiceWorkerUpdate>).detail);
+    };
+    window.addEventListener("nexus:service-worker-update", handleUpdate);
+    return () => window.removeEventListener("nexus:service-worker-update", handleUpdate);
+  }, []);
 
   const navigation = (
     <>
@@ -52,7 +62,22 @@ export function App() {
   );
 
   return (
-    <AdaptiveWorkbench
+    <>
+      {serviceWorkerUpdate ? (
+        <div className="update-banner" role="status">
+          <span>新版本已准备好。</span>
+          <button
+            type="button"
+            onClick={() => {
+              navigator.serviceWorker?.addEventListener("controllerchange", () => window.location.reload(), { once: true });
+              serviceWorkerUpdate.activate();
+            }}
+          >
+            更新并重新加载
+          </button>
+        </div>
+      ) : null}
+      <AdaptiveWorkbench
       navigation={navigation}
       contextualList={contextualList}
       inspector={<div className="inspector-content"><small>页面信息</small><h3>Public Beta 重写计划</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
@@ -80,6 +105,7 @@ export function App() {
           <div className="callout"><Sparkles size={18} /><p>视觉风格继续使用原有蓝色强调、玻璃层级和舒适圆角。</p></div>
         </div>
       </article>
-    </AdaptiveWorkbench>
+      </AdaptiveWorkbench>
+    </>
   );
 }
