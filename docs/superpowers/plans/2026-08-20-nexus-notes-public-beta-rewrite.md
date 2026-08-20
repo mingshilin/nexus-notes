@@ -20,7 +20,7 @@
 ---
 
 - [x] Task 1: Create the isolated workspace, npm workspaces, shared configuration, CI, and preview configuration.
-- [ ] Task 2: Add shared `/api/v2` contracts, typed route registry, response envelope, and Beta D1 schema.
+- [x] Task 2: Add shared `/api/v2` contracts, typed route registry, response envelope, and Beta D1 schema.
 - [ ] Task 3: Build the preserved design system and adaptive workbench shell.
 - [ ] Task 4: Add the API transport, normalized cache, IndexedDB persistence, mutation queue, and sync engine.
 - [ ] Task 5: Add authentication, tenant isolation, security controls, and configurable Beta quotas.
