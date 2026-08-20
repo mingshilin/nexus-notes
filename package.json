@@ -4,6 +4,10 @@
   "license": "MIT",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -17,7 +21,10 @@
     "lint": "tsc --noEmit",
     "verify:deploy": "node scripts/verify-deploy-readiness.mjs",
     "verify:deploy:online": "node scripts/verify-deploy-readiness.mjs --online",
-    "smoke:daily-visible": "node scripts/smoke-daily-log-visible.mjs"
+    "smoke:daily-visible": "node scripts/smoke-daily-log-visible.mjs",
+    "beta:lint": "npm run typecheck --workspaces --if-present",
+    "beta:test": "npm run test --workspaces --if-present",
+    "beta:build": "npm run build --workspaces --if-present"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.14",
@@ -28,7 +35,7 @@
     "fflate": "^0.8.2",
     "framer-motion": "^12.12.1",
     "lucide-react": "^0.511.0",
-    "pdfjs-dist": "^5.7.284",
+    "pdfjs-dist": "^6.2.108",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
