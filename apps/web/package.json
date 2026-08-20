@@ -4,14 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "vite",
+    "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests",
-    "build": "tsc -p tsconfig.json --noEmit"
+    "test": "vitest run --config vitest.config.ts",
+    "build": "tsc -p tsconfig.json --noEmit && vite build"
   },
   "dependencies": {
     "@nexus/contracts": "*",
     "@nexus/domain": "*",
     "@nexus/ui": "*",
+    "lucide-react": "^0.511.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   }
