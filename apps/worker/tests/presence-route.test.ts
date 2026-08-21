@@ -47,6 +47,72 @@ function presenceRequest(session: string) {
 }
 
 describe("authenticated Presence proxy", () => {
+  it("accepts native-WebSocket-style query-only workspace selection", async () => {
+    const state = await setup();
+    if (!("rawSession" in state)) return;
+    let forwarded: Request | undefined;
+    const room = { fetch: vi.fn(async (request: Request) => {
+      forwarded = request;
+      return new Response(null, { status: 204 });
+    }) };
+    const namespace = { idFromName: vi.fn(() => "room-ws-1"), get: vi.fn(() => room) };
+    const response = await state.worker.createBetaWorker().fetch(new Request(
+      "https://beta.test/api/v2/presence?workspace_id=ws-1",
+      { headers: { cookie: `nexus_session=${state.rawSession}`, upgrade: "websocket" } },
+    ), {
+      DB: state.db, PRESENCE: namespace, APP_BASE_URL: "https://beta.test", RATE_LIMIT_SECRET: secret,
+      TURNSTILE_SECRET_KEY: "turnstile", RESEND_API_KEY: "resend", EMAIL_FROM: "Nexus <nexus@example.test>",
+    });
+
+    expect(response.status).toBe(204);
+    expect(namespace.idFromName).toHaveBeenCalledWith("ws-1");
+    expect(forwarded?.headers.get("x-presence-user-id")).toBe("user-1");
+  });
+
+  it("rejects unsafe workspace query selection and non-WebSocket requests", async () => {
+    const state = await setup();
+    if (!("rawSession" in state)) return;
+    const env = {
+      DB: state.db, APP_BASE_URL: "https://beta.test", RATE_LIMIT_SECRET: secret,
+      TURNSTILE_SECRET_KEY: "turnstile", RESEND_API_KEY: "resend", EMAIL_FROM: "Nexus <nexus@example.test>",
+    };
+    const request = (url: string, upgrade = "websocket") => new Request(url, {
+      headers: { cookie: `nexus_session=${state.rawSession}`, upgrade },
+    });
+    const worker = state.worker.createBetaWorker();
+
+    const missing = await worker.fetch(request("https://beta.test/api/v2/presence"), env);
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toMatchObject({ error: { code: "WORKSPACE_REQUIRED" } });
+
+    const invalid = await worker.fetch(request("https://beta.test/api/v2/presence?workspace_id=bad%20id"), env);
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({ error: { code: "WORKSPACE_INVALID" } });
+
+    const ambiguous = await worker.fetch(request(
+      "https://beta.test/api/v2/presence?workspace_id=ws-1&workspace_id=ws-2",
+    ), env);
+    expect(ambiguous.status).toBe(400);
+    expect(await ambiguous.json()).toMatchObject({ error: { code: "WORKSPACE_INVALID" } });
+
+    const oversized = await worker.fetch(request(
+      `https://beta.test/api/v2/presence?workspace_id=${"w".repeat(129)}`,
+    ), env);
+    expect(oversized.status).toBe(400);
+    expect(await oversized.json()).toMatchObject({ error: { code: "WORKSPACE_INVALID" } });
+
+    const crossWorkspace = await worker.fetch(request(
+      "https://beta.test/api/v2/presence?workspace_id=ws-2",
+    ), env);
+    expect(crossWorkspace.status).toBe(403);
+
+    const nonWebSocket = await worker.fetch(request(
+      "https://beta.test/api/v2/presence?workspace_id=ws-1", "",
+    ), env);
+    expect(nonWebSocket.status).toBe(426);
+    expect(await nonWebSocket.json()).toMatchObject({ error: { code: "WEBSOCKET_REQUIRED" } });
+  });
+
   it("verifies current membership and forwards only signed derived identity headers", async () => {
     const state = await setup();
     if (!("rawSession" in state)) return;

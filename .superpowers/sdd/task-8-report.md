@@ -243,6 +243,34 @@ An initial full Worker run exposed four compatibility regressions after the firs
 | Initial preload/chunk audit | Root `dist`: 5 initial assets, 4 modulepreloads, 0 forbidden, max 278,944 bytes. Beta Web: 1 initial asset, 0 modulepreloads, 0 forbidden, max 338,687 bytes. |
 | `git diff --check` | Passed after all code/report edits |
 
+## Task 8 Presence Browser Compatibility Fix
+
+Date: 2026-08-22
+Scope: Worker Presence route query fallback, Worker route tests, and this report only.
+
+### TDD Evidence
+
+- RED: `rtk npm test --workspace @nexus/worker -- tests/presence-route.test.ts -t "native-WebSocket-style query-only workspace selection"` failed as expected with `400` (`WORKSPACE_REQUIRED`) before implementation.
+- GREEN: `rtk npm test --workspace @nexus/worker -- tests/presence-route.test.ts` passed `4/4`, including native query-only selection, header compatibility, bounded/ambiguous/missing/cross-workspace/non-WebSocket rejection, signed identity forwarding, and DO failure isolation.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `rtk npm test --workspace @nexus/worker -- tests/presence-route.test.ts tests/presence-room.test.ts tests/collaboration-routes.test.ts --pool=threads --maxWorkers=1 --minWorkers=1` | 3 files, 13/13 passed |
+| `rtk npm run typecheck --workspace @nexus/worker` | passed |
+| `rtk npx vitest run --config vitest.worker.config.ts --pool=threads --maxWorkers=1 --minWorkers=1` | 11 files, 62/62 passed |
+| `rtk npm run beta:build` | passed; Web initial JS 338,687 bytes, no Vite large-chunk warning |
+| `rtk npm run verify:deploy` | passed for root `dist` |
+| `rtk node scripts/verify-deploy-readiness.mjs --dist=apps/web/dist` | passed for Beta Web dist |
+| initial preload audit | root: 5 assets/0 forbidden; Beta Web: 1 asset/0 forbidden |
+| `git diff --check` | passed |
+
+### Result And Concerns
+
+- `/api/v2/presence` retains cookie/session authentication, selects header first and query only when the header is absent, then calls `D1WorkspaceAuthorizer` before forwarding. Query values are bounded, character-validated, and duplicate values are rejected; identity remains server-derived and signed.
+- PresenceRoom, heartbeat/epoch behavior, DO failure isolation, and no-content-storage behavior are unchanged. The three pre-existing untracked Web RED files were preserved and are outside this commit.
+
 ## Scope Audit
 
 Only Worker migrations, Worker source, Worker tests, and this report are changed in this wave. No Web UI, legacy source, deployment, remote resource, or secret files were modified. Explicit staging and final status checks were performed before commit.

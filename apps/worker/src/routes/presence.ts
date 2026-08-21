@@ -1,4 +1,5 @@
 import { SecureTokenService } from "../auth/crypto";
+import { D1WorkspaceAuthorizer } from "../auth/session-tenancy";
 import type { RouteDefinition } from "../http/route-registry";
 
 interface PresenceRegistry<TEnv> {
@@ -21,6 +22,30 @@ class PresenceRouteError extends Error {
   }
 }
 
+const MAX_WORKSPACE_ID_LENGTH = 128;
+const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+
+function validWorkspaceId(value: string) {
+  return value.length <= MAX_WORKSPACE_ID_LENGTH && WORKSPACE_ID_PATTERN.test(value);
+}
+
+function presenceWorkspaceId(request: Request) {
+  const queryValues = new URL(request.url).searchParams.getAll("workspace_id");
+  if (queryValues.length > 1 || queryValues.some((value) => !validWorkspaceId(value))) {
+    throw new PresenceRouteError("WORKSPACE_INVALID", "Workspace identifier is invalid", 400);
+  }
+
+  const headerValue = request.headers.get("x-workspace-id");
+  const workspaceId = headerValue ?? queryValues[0];
+  if (!workspaceId) {
+    throw new PresenceRouteError("WORKSPACE_REQUIRED", "Workspace context is required", 400);
+  }
+  if (!validWorkspaceId(workspaceId)) {
+    throw new PresenceRouteError("WORKSPACE_INVALID", "Workspace identifier is invalid", 400);
+  }
+  return workspaceId;
+}
+
 function identityPayload(workspaceId: string, userId: string, displayName: string, membershipEpoch: number) {
   return `${workspaceId}\n${userId}\n${displayName}\n${membershipEpoch}`;
 }
@@ -40,11 +65,15 @@ export function registerPresenceRoute<TEnv extends PresenceRouteEnv>(registry: P
   registry.register({
     method: "GET",
     path: "/api/v2/presence",
-    auth: "workspace",
-    handler: async ({ request, env, principal, workspace }) => {
+    auth: "session",
+    handler: async ({ request, env, principal }) => {
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
         throw new PresenceRouteError("WEBSOCKET_REQUIRED", "WebSocket upgrade is required", 426);
       }
+      if (!principal) throw new PresenceRouteError("UNAUTHENTICATED", "Authentication is required", 401);
+      const workspaceId = presenceWorkspaceId(request);
+      const workspace = await new D1WorkspaceAuthorizer(env.DB).authorize(principal, workspaceId);
+      if (!workspace) throw new PresenceRouteError("FORBIDDEN", "Workspace permission denied", 403);
       if (!env.PRESENCE) {
         throw new PresenceRouteError("PRESENCE_UNAVAILABLE", "Presence is temporarily unavailable", 503, true);
       }
