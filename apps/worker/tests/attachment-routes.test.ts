@@ -1,0 +1,62 @@
+import { describe, expect, it, vi } from "vitest";
+
+type WorkerExports = Record<string, unknown>;
+
+async function loadWorker() {
+  return (await import("../src")) as WorkerExports;
+}
+
+const workspace = { workspaceId: "ws-1", userId: "user-1", role: "editor", capabilities: new Set<string>() };
+
+function request(path: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  headers.set("x-workspace-id", "ws-1");
+  if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+  return new Request(`https://beta.test${path}`, { ...init, headers });
+}
+
+describe("v2 attachment routes", () => {
+  it("uses workspace authorization for metadata, OCR retry, diagnostics, and private download", async () => {
+    const worker = await loadWorker();
+    expect(worker.registerAttachmentRoutes).toBeTypeOf("function");
+    const attachment = {
+      id: "attachment-1", workspace_id: "ws-1", note_id: null, filename: "scan.pdf", mime_type: "application/pdf",
+      size_bytes: 5, status: "ready", revision: 1, created_at: "2026-08-21T00:00:00.000Z", updated_at: "2026-08-21T00:00:00.000Z",
+    };
+    const service = {
+      listAttachments: vi.fn(async () => ({ items: [attachment], next_cursor: null })),
+      getAttachment: vi.fn(async () => attachment),
+      createUpload: vi.fn(async () => attachment),
+      uploadContent: vi.fn(async () => attachment),
+      deleteAttachment: vi.fn(async () => undefined),
+      retryOcr: vi.fn(async () => ({ queued: ["attachment-1"], ineligible: [], duplicate: [] })),
+      diagnostics: vi.fn(async () => ({ items: [], next_cursor: null })),
+      download: vi.fn(async () => ({ body: new Uint8Array([1, 2, 3]), mime_type: "application/pdf", filename: "scan.pdf" })),
+    };
+    const registry = (worker.createRouteRegistry as any)({
+      requestId: () => "req-attachment",
+      authenticate: vi.fn(async () => ({ userId: "user-1" })),
+      authorizeWorkspace: vi.fn(async () => workspace),
+    });
+    (worker.registerAttachmentRoutes as any)(registry, () => service);
+
+    const download = await registry.fetch(request("/api/v2/attachments/attachment-1/file"), {});
+    const responses = await Promise.all([
+      registry.fetch(request("/api/v2/attachments?mime_type=application%2Fpdf&limit=10"), {}),
+      registry.fetch(request("/api/v2/attachments/attachment-1"), {}),
+      registry.fetch(request("/api/v2/attachments/uploads", { method: "POST", body: JSON.stringify({ filename: "scan.pdf", mime_type: "application/pdf", size_bytes: 5, idempotency_key: "upload-1" }) }), {}),
+      registry.fetch(request("/api/v2/attachments/attachment-1/ocr/retry", { method: "POST", body: JSON.stringify({ attachment_ids: ["attachment-1"] }) }), {}),
+      registry.fetch(request("/api/v2/knowledge/diagnostics?limit=25"), {}),
+      registry.fetch(request("/api/v2/attachments/attachment-1", { method: "DELETE" }), {}),
+    ]);
+
+    expect(responses.map((response: Response) => response.status)).toEqual([200, 200, 201, 200, 200, 200]);
+    expect(service.listAttachments).toHaveBeenCalledWith(workspace, expect.objectContaining({ mime_type: "application/pdf", limit: 10 }));
+    expect(service.retryOcr).toHaveBeenCalledWith(workspace, { attachment_ids: ["attachment-1"] });
+    expect(service.diagnostics).toHaveBeenCalledWith(workspace, { limit: 25 });
+    expect(download.status).toBe(200);
+    expect(download.headers.get("cache-control")).toBe("private, no-store");
+    expect(download.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(download.headers.get("content-disposition")).toContain("attachment");
+  });
+});
