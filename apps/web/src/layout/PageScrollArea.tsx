@@ -1,6 +1,6 @@
 import type { HTMLAttributes } from "react";
 
-export function PageScrollArea({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
+export function PageScrollArea({ className, scrollOwner = true, ...props }: HTMLAttributes<HTMLDivElement> & { scrollOwner?: boolean }) {
   const classes = ["page-scroll-area", className].filter(Boolean).join(" ");
-  return <div {...props} className={classes} data-scroll-owner="page" />;
+  return <div {...props} className={classes} data-scroll-owner={scrollOwner ? "page" : undefined} />;
 }

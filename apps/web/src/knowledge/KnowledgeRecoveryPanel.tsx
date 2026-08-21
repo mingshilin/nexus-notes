@@ -26,7 +26,8 @@ export function KnowledgeRecoveryPanel({
   filters,
   loading,
   refreshing,
-  error,
+  attachmentError,
+  diagnosticError,
   retryFeedback,
   isRetryPending = false,
   attachmentNextCursor,
@@ -43,7 +44,8 @@ export function KnowledgeRecoveryPanel({
   filters: RecoveryFilters;
   loading: boolean;
   refreshing: boolean;
-  error?: string | null;
+  attachmentError?: string | null;
+  diagnosticError?: string | null;
   retryFeedback?: string | null;
   isRetryPending?: boolean;
   attachmentNextCursor?: string | null;
@@ -84,9 +86,10 @@ export function KnowledgeRecoveryPanel({
       </div>
       {loading && empty ? <p className="knowledge-recovery-state" role="status">正在加载附件与诊断…</p> : null}
       {refreshing ? <p className="knowledge-recovery-state" role="status">正在刷新，保留最近可用数据…</p> : null}
-      {error ? <p className="knowledge-recovery-error" role="alert">{error}</p> : null}
+      {attachmentError ? <p className="knowledge-recovery-error" role="alert">{attachmentError}</p> : null}
+      {diagnosticError ? <p className="knowledge-recovery-error" role="alert">{diagnosticError}</p> : null}
       {retryFeedback ? <p className="knowledge-recovery-feedback" aria-live="polite">{retryFeedback}</p> : null}
-      {!loading && empty && !error ? <p className="knowledge-recovery-state">暂无附件或待处理诊断。</p> : null}
+      {!loading && empty && !attachmentError && !diagnosticError ? <p className="knowledge-recovery-state">暂无附件或待处理诊断。</p> : null}
       {failed.map((attachment) => (
         <div className="knowledge-recovery-row" key={attachment.id}>
           <span><strong>{attachment.filename}</strong><small>{attachment.mime_type} · OCR 失败</small></span>

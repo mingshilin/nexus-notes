@@ -299,3 +299,32 @@ Web-only implementation on `codex/public-beta-rewrite` from baseline `4da0c54`. 
 ### Residual Risk
 
 - The Beta auth-session payload currently exposes no workspace selector. The Web surface therefore requires the active workspace id from its existing app/environment integration and deliberately renders a safe no-workspace state instead of querying a demo workspace.
+
+## Task 6C A2.2 Web Review Fix
+
+### Scope
+
+Web-only correction of the three Important findings in `task-6c-a22-review.md`. The separately confirmed active-workspace auth/session gap remains intentionally untouched; no Worker, auth, schema, AI, deployment, or Task 7 code changed.
+
+### TDD RED Evidence
+
+| Command | Valid RED observed before production change |
+| --- | --- |
+| `npm run test --workspace=@nexus/web -- tests/knowledge-recovery-live.test.tsx tests/knowledge-recovery-panel.test.tsx tests/adaptive-workbench.test.tsx` | Successful attachment data disappeared when diagnostics rejected because the initial load used coupled `Promise.all`; the inspector rendered two recovery regions. |
+| Same command after the first implementation pass | Attachment pagination error was written in `catch` then unconditionally cleared in `finally`; the test exposed the state-transition bug before the minimal correction. |
+
+### Implemented
+
+- Initial attachment and diagnostics requests now settle independently. Each successful result updates only its own data/cursor and clears only its own error; a failed peer keeps safe cached data visible with a source-specific degraded error.
+- Attachment/diagnostic pagination appends only fulfilled pages, retains its cursor and existing data after failure, and leaves the failed page retryable.
+- The recovery surface is mounted only in the main canvas. When inspector is open, the background is inert/hidden, its page scroll owner is removed, close control receives focus, and the bounded dialog is the single `inspector` scroll owner.
+- Added behavioral coverage for filter abort, cursor append/failure recovery, partial source failure, batch retry dedupe/disable/refresh, modal focus/390px scroll ownership, and modal background isolation. Static CSS checks remain supplemental only.
+
+### GREEN / Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/web -- tests/knowledge-client.test.ts tests/knowledge-recovery-panel.test.tsx tests/knowledge-recovery-live.test.tsx tests/app-auth-bootstrap.test.tsx tests/adaptive-workbench.test.tsx` | PASS, 22 tests in 5 files. |
+| `npm run typecheck --workspace=@nexus/web` | PASS. |
+| `npm run build --workspace=@nexus/web` | PASS. |
+| `git diff --check` | PASS. |

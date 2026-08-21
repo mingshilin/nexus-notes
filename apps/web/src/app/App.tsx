@@ -65,7 +65,8 @@ function AuthenticatedWorkspace({
   const [diagnosticCursor, setDiagnosticCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(Boolean(workspaceId));
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(workspaceId ? null : "未选择工作区，无法加载恢复数据。");
+  const [attachmentError, setAttachmentError] = useState<string | null>(workspaceId ? null : "未选择工作区，无法加载恢复数据。");
+  const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
   const [retryFeedback, setRetryFeedback] = useState<string | null>(null);
   const [retryingIds, setRetryingIds] = useState<Set<string>>(new Set());
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -99,7 +100,8 @@ function AuthenticatedWorkspace({
       setDiagnosticCursor(null);
       setLoading(false);
       setRefreshing(false);
-      setError("未选择工作区，无法加载恢复数据。");
+      setAttachmentError("未选择工作区，无法加载恢复数据。");
+      setDiagnosticError(null);
       return undefined;
     }
 
@@ -107,23 +109,32 @@ function AuthenticatedWorkspace({
     const hasCachedData = attachments.length > 0 || diagnostics.length > 0;
     setLoading(!hasCachedData);
     setRefreshing(hasCachedData);
-    setError(null);
+    setAttachmentError(null);
+    setDiagnosticError(null);
     const knowledge = new KnowledgeClient(apiClient, workspaceId);
-    void Promise.all([
+    void Promise.allSettled([
       knowledge.listAttachments({
         mime_type: (filters.mimeType as Attachment["mime_type"]) || undefined,
         ocr_status: (filters.ocrStatus as OcrStatus) || undefined,
         limit: 50,
       }, controller.signal),
       knowledge.getKnowledgeDiagnostics({ limit: 50 }, controller.signal),
-    ]).then(([attachmentPage, diagnosticPage]) => {
+    ]).then(([attachmentResult, diagnosticResult]) => {
       if (controller.signal.aborted) return;
-      setAttachments(attachmentPage.items);
-      setDiagnostics(diagnosticPage.items);
-      setAttachmentCursor(attachmentPage.next_cursor);
-      setDiagnosticCursor(diagnosticPage.next_cursor);
-    }).catch((requestError: unknown) => {
-      if (!isAborted(requestError, controller.signal)) setError("附件与诊断暂时无法加载，保留最近可用数据。");
+      if (attachmentResult.status === "fulfilled") {
+        setAttachments(attachmentResult.value.items);
+        setAttachmentCursor(attachmentResult.value.next_cursor);
+        setAttachmentError(null);
+      } else if (!isAborted(attachmentResult.reason, controller.signal)) {
+        setAttachmentError("附件暂时无法加载，保留最近可用数据。");
+      }
+      if (diagnosticResult.status === "fulfilled") {
+        setDiagnostics(diagnosticResult.value.items);
+        setDiagnosticCursor(diagnosticResult.value.next_cursor);
+        setDiagnosticError(null);
+      } else if (!isAborted(diagnosticResult.reason, controller.signal)) {
+        setDiagnosticError("诊断暂时无法加载，保留最近可用数据。");
+      }
     }).finally(() => {
       requestControllers.current.delete(controller);
       if (!controller.signal.aborted) {
@@ -149,8 +160,9 @@ function AuthenticatedWorkspace({
       if (controller.signal.aborted) return;
       setAttachments((current) => [...current, ...page.items]);
       setAttachmentCursor(page.next_cursor);
+      setAttachmentError(null);
     }).catch((requestError: unknown) => {
-      if (!isAborted(requestError, controller.signal)) setError("更多附件暂时无法加载，请稍后重试。");
+      if (!isAborted(requestError, controller.signal)) setAttachmentError("更多附件暂时无法加载，请稍后重试。");
     }).finally(() => {
       requestControllers.current.delete(controller);
       if (!controller.signal.aborted) setRefreshing(false);
@@ -166,8 +178,9 @@ function AuthenticatedWorkspace({
       if (controller.signal.aborted) return;
       setDiagnostics((current) => [...current, ...page.items]);
       setDiagnosticCursor(page.next_cursor);
+      setDiagnosticError(null);
     }).catch((requestError: unknown) => {
-      if (!isAborted(requestError, controller.signal)) setError("更多诊断暂时无法加载，请稍后重试。");
+      if (!isAborted(requestError, controller.signal)) setDiagnosticError("更多诊断暂时无法加载，请稍后重试。");
     }).finally(() => {
       requestControllers.current.delete(controller);
       if (!controller.signal.aborted) setRefreshing(false);
@@ -229,7 +242,8 @@ function AuthenticatedWorkspace({
       filters={filters}
       loading={loading}
       refreshing={refreshing}
-      error={error}
+      attachmentError={attachmentError}
+      diagnosticError={diagnosticError}
       retryFeedback={retryFeedback}
       isRetryPending={retryingIds.size > 0}
       attachmentNextCursor={attachmentCursor}
@@ -260,7 +274,7 @@ function AuthenticatedWorkspace({
       <AdaptiveWorkbench
         navigation={navigation}
         contextualList={contextualList}
-        inspector={<div className="inspector-content"><small>页面信息</small><h3>Public Beta 重写计划</h3><p>属性、版本与协作状态只在需要时显示。</p>{recoveryPanel}</div>}
+        inspector={<div className="inspector-content"><small>页面信息</small><h3>Public Beta 重写计划</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
         inspectorOpen={inspectorOpen}
         activePane={activePane}
         onActivePaneChange={setActivePane}

@@ -54,11 +54,13 @@ describe("adaptive workbench", () => {
       ),
     );
 
-    expect(screen.getByRole("navigation", { name: "主导航" })).toHaveTextContent("Navigation");
-    expect(screen.getByRole("complementary", { name: "上下文列表" })).toHaveTextContent("Notes");
-    expect(screen.getByRole("main")).toHaveTextContent("Editor");
+    expect(container.querySelector(".workbench-rail")).toHaveTextContent("Navigation");
+    expect(container.querySelector(".workbench-context")).toHaveTextContent("Notes");
+    expect(container.querySelector(".workbench-canvas")).toHaveTextContent("Editor");
+    expect(container.querySelector(".workbench-canvas")).toHaveAttribute("aria-hidden", "true");
     expect(screen.getByRole("dialog", { name: "检查器" })).toHaveTextContent("Inspector");
-    expect(container.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-scroll-owner="inspector"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-scroll-owner]')).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("button", { name: "关闭检查器" }));
     expect(close).toHaveBeenCalledOnce();

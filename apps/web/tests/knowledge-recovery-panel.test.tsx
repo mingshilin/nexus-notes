@@ -17,7 +17,7 @@ describe("KnowledgeRecoveryPanel", () => {
       filters={filters}
       loading={false}
       refreshing
-      error="刷新失败"
+      diagnosticError="刷新失败"
       attachmentNextCursor="attachment-cursor"
       diagnosticNextCursor="diagnostic-cursor"
       retryFeedback="已加入 1 项 OCR 重试。"
