@@ -51,7 +51,7 @@ describe("Task 7 database web behavior", () => {
       views: [view("table", "table", { ...config, visible_columns: ["name"] })], paginationStore: store, onRecordsPageRequest: request,
     }));
 
-    await waitFor(() => expect(request).toHaveBeenCalledWith({ cursor: "cursor-2", limit: 2 }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith({ cursor: "cursor-2", limit: 2, viewId: "table" }));
     expect(await screen.findByText("Five")).toBeInTheDocument();
     expect(screen.getByText("Six")).toBeInTheDocument();
     expect(screen.queryByText("One")).not.toBeInTheDocument();
@@ -76,85 +76,89 @@ describe("Task 7 database web behavior", () => {
     await waitFor(() => expect(move).toHaveBeenCalledTimes(1));
     fireEvent.dragStart(screen.getByTestId("board-card-race"));
     fireEvent.drop(screen.getByTestId("board-column-todo"));
-    await waitFor(() => expect(move).toHaveBeenCalledTimes(2));
+    expect(move).toHaveBeenCalledTimes(1);
     failFirst();
+    await waitFor(() => expect(move).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(within(screen.getByTestId("board-column-todo")).getByTestId("board-card-race")).toBeInTheDocument());
   });
 
-  it("uses the typed client for every tools workflow, including CRUD, bulk edit, CSV, comments and permissions", async () => {
+  it("uses typed property and record forms with entity pickers, templates and comments", async () => {
     const { DatabaseWorkbench, DatabaseClient } = await web() as Record<string, any>;
+    const template = { id: "template-1", workspace_id: "ws-1", database_id: "db-1", name: "Launch", default_values: { status: "todo" }, revision: 1, created_at: now, updated_at: now };
     const api = { request: vi.fn(async ({ path }: { path: string }) => {
-      if (path.includes("export/csv")) return { csv: "Name\r\nLaunch", next_cursor: null };
-      if (path.includes("comments") && !path.includes("records")) return { id: "comment-1" };
-      if (path.includes("permissions")) return { permission: { id: "permission-1" } };
-      if (path.includes("templates") && !path.includes("apply")) return { template: { id: "template-1" } };
-      if (path.includes("views")) return { view: { id: "view-1" } };
-      if (path.includes("properties")) return { property: { id: "property-1" } };
-      if (path.includes("records")) return { record: record("record-1", { name: "Launch" }) };
-      return { database };
+      if (path.endsWith("/comments")) return { items: [{ id: "comment-1", body: "Existing note", record_id: "record-1", workspace_id: "ws-1", database_id: "db-1", author_user_id: "user-1", parent_id: null, revision: 1, created_at: now, updated_at: now }] };
+      if (path.includes("properties")) return { property: { ...status, id: "priority" } };
+      if (path.includes("records") && !path.includes("comments")) return { record: record("record-2", { name: "New", status: "todo" }) };
+      return { items: [] };
     }) };
-    const client = new DatabaseClient(api, "ws-1", { createId: () => "operation" });
     render(createElement(DatabaseWorkbench, {
-      database, properties: [name, status, due], records: [record("record-1", { name: "Launch" })],
-      views: [view("table", "table", { ...config, visible_columns: ["name"] })], client,
+      database, properties: [name, status, due], records: [record("record-1", { name: "Launch", status: "todo" })], templates: [template],
+      views: [view("table", "table", { ...config, visible_columns: ["name"] })], client: new DatabaseClient(api, "ws-1", { createId: () => "operation" }),
     }));
     fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
     const drawer = screen.getByRole("dialog", { name: "数据库工具" });
-    const action = within(drawer).getByLabelText("数据库操作");
-    const payload = within(drawer).getByLabelText("操作数据 JSON");
-    const run = async (name: string, value: Record<string, unknown>) => {
-      fireEvent.change(action, { target: { value: name } });
-      fireEvent.change(payload, { target: { value: JSON.stringify(value) } });
-      fireEvent.click(within(drawer).getByRole("button", { name: "执行操作" }));
-      await waitFor(() => expect(api.request).toHaveBeenCalled());
-    };
-    await run("create-property", { name: "Cost", type: "number", config: {}, position: 3, hidden: false, read_only: false });
-    await run("update-property", { id: "name", base_revision: 1, name: "Title" });
-    await run("delete-property", { id: "name", base_revision: 1 });
-    await run("create-record", { values: { name: "New" } });
-    await run("update-record", { id: "record-1", base_revision: 1, values: { name: "Edited" } });
-    await run("delete-record", { id: "record-1", base_revision: 1 });
-    await run("bulk-edit", { mutations: [{ record_id: "record-1", base_revision: 1, values: { status: "done" } }] });
-    await run("create-view", { name: "Board", type: "board", config: { ...config, settings: { segment_size: 10 } } });
-    await run("update-view", { id: "table", base_revision: 1, name: "Table" });
-    await run("delete-view", { id: "table", base_revision: 1 });
-    await run("create-template", { name: "Default", default_values: { status: "todo" } });
-    await run("update-template", { id: "template-1", base_revision: 1, name: "Updated" });
-    await run("delete-template", { id: "template-1", base_revision: 1 });
-    await run("apply-template", { template_id: "template-1", records: [{ record_id: "record-1", base_revision: 1 }] });
-    await run("create-comment", { record_id: "record-1", body: "Note" });
-    await run("update-comment", { id: "comment-1", base_revision: 1, body: "Edited" });
-    await run("delete-comment", { id: "comment-1", base_revision: 1 });
-    await run("set-database-permission", { subject_type: "user", subject_id: "user-2", role: "viewer", base_revision: 1 });
-    await run("set-field-permission", { property_id: "name", subject_type: "user", subject_id: "user-2", can_read: true, can_write: false, base_revision: 1 });
-    await run("import-csv", { csv: "Name\r\nLaunch", header_property_ids: { Name: "name" } });
-    await run("export-csv", { property_ids: ["name"], cursor: null, page_size: 100 });
-    await run("update-database", { base_revision: 1, name: "Renamed" });
-    await run("delete-database", { base_revision: 1 });
-    expect(api.request.mock.calls.map(([request]: any[]) => request.path)).toEqual(expect.arrayContaining([
-      "/api/v2/databases/db-1/properties", "/api/v2/databases/db-1/records/bulk", "/api/v2/databases/db-1/views", "/api/v2/databases/db-1/templates/apply", "/api/v2/databases/db-1/import/csv", "/api/v2/databases/db-1/export/csv", "/api/v2/databases/db-1/permissions",
-    ]));
+    expect(within(drawer).queryByLabelText(/JSON/)).not.toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: "属性" }));
+    fireEvent.change(within(drawer).getByLabelText("属性名称"), { target: { value: "Priority" } });
+    fireEvent.change(within(drawer).getByLabelText("字段类型"), { target: { value: "select" } });
+    fireEvent.change(within(drawer).getByLabelText("选项"), { target: { value: "Low, High" } });
+    fireEvent.click(within(drawer).getByRole("button", { name: "添加属性" }));
+    await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/databases/db-1/properties", body: expect.objectContaining({ name: "Priority", type: "select", config: { options: [{ id: "low", name: "Low", color: "" }, { id: "high", name: "High", color: "" }] } }) })));
+    fireEvent.click(within(drawer).getByRole("button", { name: "记录" }));
+    fireEvent.change(within(drawer).getByLabelText("Name"), { target: { value: "New" } });
+    fireEvent.change(within(drawer).getByLabelText("Status"), { target: { value: "todo" } });
+    fireEvent.click(within(drawer).getByRole("button", { name: "创建记录" }));
+    await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/databases/db-1/records", body: { note_id: null, values: { name: "New", status: "todo" } } })));
+    fireEvent.click(within(drawer).getByRole("button", { name: "模板" }));
+    expect(within(drawer).getByText("Launch")).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: "评论" }));
+    await waitFor(() => expect(within(drawer).getByText("Existing note")).toBeInTheDocument());
   });
 
-  it("loads every bounded page for board and calendar datasets before rendering their segmented cards", async () => {
+  it("previews a bulk edit immediately and restores only its current records when the atomic command fails", async () => {
+    const { DatabaseWorkbench, DatabaseClient } = await web() as Record<string, any>;
+    let rejectBulk!: (reason: Error) => void;
+    const bulk = new Promise<never>((_, reject) => { rejectBulk = reject; });
+    const api = { request: vi.fn(({ path }: { path: string }) => path.endsWith("/records/bulk") ? bulk : Promise.resolve({ items: [] })) };
+    render(createElement(DatabaseWorkbench, {
+      database, properties: [name, status], records: [record("record-1", { name: "Launch", status: "todo" })],
+      views: [view("table", "table", { ...config, visible_columns: ["name", "status"] })], client: new DatabaseClient(api, "ws-1", { createId: () => "bulk" }),
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
+    const drawer = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(drawer).getByRole("button", { name: "批量" }));
+    fireEvent.click(within(drawer).getByRole("checkbox"));
+    fireEvent.change(within(drawer).getByLabelText("字段"), { target: { value: "status" } });
+    fireEvent.change(within(drawer).getByLabelText("新值"), { target: { value: "done" } });
+    fireEvent.click(within(drawer).getByRole("button", { name: "预览并应用" }));
+    expect(await screen.findByText("done")).toBeInTheDocument();
+    rejectBulk(new Error("denied"));
+    await waitFor(() => expect(screen.getByText("todo")).toBeInTheDocument());
+  });
+
+  it("loads one larger bounded board/calendar window instead of draining tiny saved pages", async () => {
     const { DatabaseWorkbench } = await web() as { DatabaseWorkbench: ComponentType<any> };
-    const request = vi.fn(async ({ cursor }: { cursor: string | null }) => cursor === "next" ? { items: [record("late", { name: "Late", status: "done", due: "2026-08-21" })], next_cursor: null } : { items: [], next_cursor: null });
+    const request = vi.fn(async ({ cursor }: { cursor: string | null }) => cursor === "next" ? { items: [record("late", { name: "Late", status: "done", due: "2026-08-21" })], next_cursor: "still-more" } : { items: [], next_cursor: null });
     const { rerender } = render(createElement(DatabaseWorkbench, {
       database, properties: [name, status, due], records: [record("first", { name: "First", status: "todo", due: "2026-08-21" })], recordsNextCursor: "next",
       views: [view("board", "board", { ...config, grouping: { property_id: "status" }, settings: { segment_size: 10 } })], onRecordsPageRequest: request,
     }));
-    await waitFor(() => expect(request).toHaveBeenCalledWith({ cursor: "next", limit: 2 }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith({ cursor: "next", limit: 100, viewId: "board" }));
     expect(await screen.findByTestId("board-card-late")).toBeInTheDocument();
+    expect(request).toHaveBeenCalledTimes(1);
     rerender(createElement(DatabaseWorkbench, {
       database, properties: [name, status, due], records: [record("first", { name: "First", status: "todo", due: "2026-08-21" })], recordsNextCursor: "next",
       views: [view("calendar", "calendar", { ...config, settings: { date_property_id: "due", segment_size: 10 } })], onRecordsPageRequest: request,
     }));
     expect(await screen.findByTestId("calendar-card-late")).toBeInTheDocument();
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the mobile tools action usable at 390px and 200% zoom with the page as the only scroll owner", async () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
     Object.defineProperty(window, "devicePixelRatio", { configurable: true, value: 2 });
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: { height: 500, offsetTop: 0, addEventListener: vi.fn(), removeEventListener: vi.fn() } });
     const { AdaptiveWorkbench, DatabaseWorkbench, DatabaseClient } = await web() as Record<string, any>;
     const api = { request: vi.fn(async () => ({ record: record("mobile", { name: "Mobile" }) })) };
     render(createElement(AdaptiveWorkbench, {
@@ -165,10 +169,15 @@ describe("Task 7 database web behavior", () => {
     })));
     fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
     const drawer = screen.getByRole("dialog", { name: "数据库工具" });
-    fireEvent.change(within(drawer).getByLabelText("操作数据 JSON"), { target: { value: '{"values":{"name":"Mobile"}}' } });
-    fireEvent.click(within(drawer).getByRole("button", { name: "执行操作" }));
+    expect(within(drawer).getByRole("button", { name: "关闭" })).toHaveFocus();
+    expect(document.documentElement.style.getPropertyValue("--database-drawer-keyboard")).toBe("344px");
+    fireEvent.change(within(drawer).getByLabelText("Name"), { target: { value: "Mobile" } });
+    fireEvent.click(within(drawer).getByRole("button", { name: "创建记录" }));
     await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/databases/db-1/records", method: "POST" })));
     expect(document.querySelector('[data-mode="mobile"]')).toBeInTheDocument();
     expect(document.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);
+    fireEvent.keyDown(drawer, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "数据库工具" })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "数据库工具" })).toHaveFocus();
   });
 });

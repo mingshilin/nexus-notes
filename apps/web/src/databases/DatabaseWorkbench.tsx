@@ -1,4 +1,4 @@
-import type { BoardMoveInput, CalendarAssignmentInput, Database, DatabaseProperty, DatabaseRecord, DatabaseView } from "@nexus/contracts";
+import type { BoardMoveInput, CalendarAssignmentInput, Database, DatabaseProperty, DatabaseRecord, DatabaseTemplate, DatabaseView } from "@nexus/contracts";
 import { useEffect, useRef, useState } from "react";
 
 import type { DatabaseClient } from "../data/database-client";
@@ -10,8 +10,9 @@ import { DatabaseToolsDrawer } from "./DatabaseToolsDrawer";
 import { executeView, visibleProperties } from "./database-view-utils";
 
 const memoryStorage = { getItem: () => null, setItem: () => undefined };
+const COLLECTION_FETCH_SIZE = 100;
 type RecordPage = { items: DatabaseRecord[]; next_cursor: string | null };
-export type RecordsPageRequest = (options: { cursor: string | null; limit: number }) => Promise<RecordPage>;
+export type RecordsPageRequest = (options: { cursor: string | null; limit: number; viewId?: string }) => Promise<RecordPage>;
 
 export interface DatabaseWorkbenchProps {
   database: Database;
@@ -19,6 +20,7 @@ export interface DatabaseWorkbenchProps {
   records: DatabaseRecord[];
   recordsNextCursor?: string | null;
   views: DatabaseView[];
+  templates?: DatabaseTemplate[];
   activeViewId?: string;
   paginationStore?: DatabasePaginationStore;
   client?: DatabaseClient;
@@ -31,7 +33,7 @@ export interface DatabaseWorkbenchProps {
 }
 
 export function DatabaseWorkbench({
-  database, properties, records: sourceRecords, recordsNextCursor = null, views, activeViewId, paginationStore, client, onMutation,
+  database, properties, records: sourceRecords, recordsNextCursor = null, views, templates, activeViewId, paginationStore, client, onMutation,
   onBoardMove, onCalendarAssign, onRecordsPageRequest, onTablePageRequest,
 }: DatabaseWorkbenchProps) {
   const [records, setRecords] = useState(sourceRecords);
@@ -45,6 +47,7 @@ export function DatabaseWorkbench({
   const cursors = useRef<Record<number, string | null>>({ 1: null });
   const cachedPages = useRef(new Map<number, RecordPage>());
   const activeRequest = useRef(0);
+  const bulkOperations = useRef(new Map<string, string>());
   const selectedView = views.find((view) => view.id === selectedViewId) ?? views[0];
   const pageSize = selectedView?.config.page_size ?? 50;
   const requestPage: RecordsPageRequest | undefined = onRecordsPageRequest ?? (onTablePageRequest ? ({ cursor }) => onTablePageRequest(cursor) : undefined);
@@ -59,16 +62,17 @@ export function DatabaseWorkbench({
 
   useEffect(() => {
     if (!selectedView) return;
-    const saved = store.read(database.workspace_id, database.id, selectedView.id);
+    const saved = store.read(database.workspace_id, database.id, selectedView.id, selectedView.config.page_size);
     const targetPage = saved?.page ?? 1;
     cursors.current = saved?.cursors ?? { 1: null };
+    cachedPages.current = new Map([[1, { items: sourceRecords, next_cursor: recordsNextCursor }]]);
     setPage(targetPage);
     if (targetPage === 1) { setExactPage(false); return; }
     const cursor = cursors.current[targetPage];
     if (cursor === undefined || !requestPage) { setPage(1); setExactPage(false); return; }
     const requestId = ++activeRequest.current;
     setPageRequestPending(true);
-    void requestPage({ cursor, limit: selectedView.config.page_size }).then((result) => {
+    void requestPage({ cursor, limit: selectedView.config.page_size, viewId: selectedView.id }).then((result) => {
       if (activeRequest.current !== requestId) return;
       cachedPages.current.set(targetPage, result);
       cursors.current[targetPage + 1] = result.next_cursor;
@@ -76,24 +80,20 @@ export function DatabaseWorkbench({
     }).catch(() => { if (activeRequest.current === requestId) { setPage(1); setExactPage(false); } }).finally(() => { if (activeRequest.current === requestId) setPageRequestPending(false); });
   }, [database.id, database.workspace_id, requestPage, selectedView?.id, selectedView?.config.page_size, store]);
 
-  // Board and calendar must not silently omit later cursor pages. Each request stays bounded by the saved view page size.
+  // Board and calendar load a single larger window; never drain an unbounded cursor chain.
   useEffect(() => {
     if (!selectedView || selectedView.type === "table" || !requestPage || !recordsNextCursor) return;
     let cancelled = false;
     const load = async () => {
-      let cursor: string | null = recordsNextCursor;
       const seen = new Set(sourceRecords.map((record) => record.id));
-      while (cursor && !cancelled) {
-        const result = await requestPage({ cursor, limit: selectedView.config.page_size });
-        if (cancelled) return;
-        setRecords((current) => [...current, ...result.items.filter((record) => !seen.has(record.id) && Boolean(seen.add(record.id)))]);
-        cursor = result.next_cursor;
-        setNextCursor(cursor);
-      }
+      const result = await requestPage({ cursor: recordsNextCursor, limit: COLLECTION_FETCH_SIZE, viewId: selectedView.id });
+      if (cancelled) return;
+      setRecords((current) => [...current, ...result.items.filter((record) => !seen.has(record.id) && Boolean(seen.add(record.id)))]);
+      setNextCursor(result.next_cursor);
     };
     void load().catch(() => undefined);
     return () => { cancelled = true; };
-  }, [recordsNextCursor, requestPage, selectedView?.id, selectedView?.type, selectedView?.config.page_size, sourceRecords]);
+  }, [recordsNextCursor, requestPage, selectedView?.id, selectedView?.type, sourceRecords]);
 
   if (!selectedView) return <section className="database-workbench"><p className="database-empty">尚未创建数据库视图。</p></section>;
   const configuredRecords = executeView(records, selectedView);
@@ -116,7 +116,7 @@ export function DatabaseWorkbench({
     cursors.current[nextPage] = cursor;
     const requestId = ++activeRequest.current;
     setPageRequestPending(true);
-    void requestPage({ cursor, limit: pageSize }).then((result) => {
+    void requestPage({ cursor, limit: pageSize, viewId: selectedView.id }).then((result) => {
       if (activeRequest.current !== requestId) return;
       cachedPages.current.set(nextPage, result);
       cursors.current[nextPage + 1] = result.next_cursor;
@@ -125,10 +125,43 @@ export function DatabaseWorkbench({
     }).catch(() => undefined).finally(() => { if (activeRequest.current === requestId) setPageRequestPending(false); });
   };
   const changeView = (viewId: string) => { setSelectedViewId(viewId); setToolsOpen(false); };
+  const previewBulkEdit = async (mutations: { record_id: string; base_revision: number; values: Record<string, unknown> }[]) => {
+    if (!client) return;
+    const original = new Map(records.map((record) => [record.id, record]));
+    const tokens = new Map<string, string>();
+    for (const mutation of mutations) {
+      const token = crypto.randomUUID();
+      tokens.set(mutation.record_id, token);
+      bulkOperations.current.set(mutation.record_id, token);
+    }
+    setRecords((current) => current.map((record) => {
+      const mutation = mutations.find((candidate) => candidate.record_id === record.id);
+      return mutation ? { ...record, revision: record.revision + 1, values: { ...record.values, ...mutation.values } } : record;
+    }));
+    try {
+      const result = await client.bulkEdit(database.id, { mutations });
+      setRecords((current) => current.map((record) => {
+        const saved = result.items.find((item) => item.id === record.id);
+        const token = tokens.get(record.id);
+        if (!saved || !token || bulkOperations.current.get(record.id) !== token) return record;
+        bulkOperations.current.delete(record.id);
+        return saved;
+      }));
+    } catch (error) {
+      setRecords((current) => current.map((record) => {
+        const token = tokens.get(record.id);
+        const snapshot = original.get(record.id);
+        if (!token || !snapshot || bulkOperations.current.get(record.id) !== token) return record;
+        bulkOperations.current.delete(record.id);
+        return snapshot;
+      }));
+      throw error;
+    }
+  };
 
   return <section className="database-workbench">
     <header className="database-workbench-header"><div><p className="eyebrow">STRUCTURED DATABASE</p><h1>{database.name}</h1><p>{database.description}</p></div>
-      <DatabaseToolsDrawer open={toolsOpen} views={views} activeViewId={selectedView.id} databaseId={database.id} client={client} onOpenChange={setToolsOpen} onViewChange={changeView} onMutation={onMutation} />
+      <DatabaseToolsDrawer open={toolsOpen} views={views} activeViewId={selectedView.id} databaseId={database.id} properties={properties} records={records} templates={templates} client={client} onOpenChange={setToolsOpen} onViewChange={changeView} onMutation={onMutation} onBulkPreview={previewBulkEdit} />
     </header>
     <nav className="database-view-tabs" aria-label="数据库视图">{views.map((view) => <button className={view.id === selectedView.id ? "active" : ""} type="button" key={view.id} onClick={() => changeView(view.id)}>{view.name}</button>)}</nav>
     {selectedView.type === "table" ? <DatabaseTableView properties={configuredProperties} records={configuredRecords} page={page} pageSize={pageSize} exactPage={exactPage} onPageChange={changePage} hasNextPage={Boolean(nextCursor && requestPage) && !pageRequestPending} /> : null}

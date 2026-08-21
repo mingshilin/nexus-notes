@@ -60,7 +60,7 @@ describe("DatabaseWorkbench", () => {
     }));
 
     fireEvent.click(screen.getByRole("button", { name: "下一页" }));
-    await waitFor(() => expect(onRecordsPageRequest).toHaveBeenCalledWith({ cursor: "cursor-1", limit: 2 }));
+    await waitFor(() => expect(onRecordsPageRequest).toHaveBeenCalledWith({ cursor: "cursor-1", limit: 2, viewId: "table" }));
     expect(await screen.findByText("3–4 / 4+")).toBeInTheDocument();
     expect(pageStore.read("ws-1", "db-1", "table")).toEqual({ page: 2, pageSize: 2, cursors: { 1: null, 2: "cursor-1", 3: "cursor-2" } });
   });

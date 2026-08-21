@@ -30,6 +30,8 @@ export function DatabaseCalendarView({
   const [error, setError] = useState<string | null>(null);
   const latestRecords = useRef(records);
   const operations = useRef(new Map<string, string>());
+  const queues = useRef(new Map<string, Promise<void>>());
+  const confirmedRecords = useRef(new Map<string, DatabaseRecord>());
   const draggedRecord = useRef<string | null>(null);
   const recordSetKey = records.map((record) => `${record.id}:${record.revision}`).join("|");
   latestRecords.current = records;
@@ -44,32 +46,39 @@ export function DatabaseCalendarView({
     const record = latestRecords.current.find((candidate) => candidate.id === id);
     if (!record) return;
     const optimistic = { ...record, values: { ...record.values, [dateProperty.id]: date }, revision: record.revision + 1 };
-    const input: CalendarAssignmentInput = {
-      record_id: record.id,
-      property_id: dateProperty.id,
-      date,
-      base_revision: record.revision,
-    };
     draggedRecord.current = null;
     setDraggedId(null);
     setError(null);
     const operationId = crypto.randomUUID();
     operations.current.set(record.id, operationId);
+    if (!confirmedRecords.current.has(record.id)) confirmedRecords.current.set(record.id, record);
     const next = replaceRecord(latestRecords.current, optimistic);
     latestRecords.current = next;
     onRecordsChange(next);
-    void (onCalendarAssign?.(input) ?? Promise.resolve(optimistic)).then((saved) => {
-      if (operations.current.get(record.id) !== operationId) return;
-      const committed = replaceRecord(latestRecords.current, saved);
-      latestRecords.current = committed;
-      onRecordsChange(committed);
-    }).catch(() => {
-      if (operations.current.get(record.id) !== operationId) return;
-      const restored = replaceRecord(latestRecords.current, record);
-      latestRecords.current = restored;
-      onRecordsChange(restored);
-      setError("日期分配失败，已恢复原日期。");
-    });
+    const execute = async () => {
+      const confirmed = confirmedRecords.current.get(record.id) ?? record;
+      const input: CalendarAssignmentInput = { record_id: record.id, property_id: dateProperty.id, date, base_revision: confirmed.revision };
+      try {
+        const saved = await (onCalendarAssign?.(input) ?? Promise.resolve({ ...optimistic, revision: confirmed.revision + 1 }));
+        confirmedRecords.current.set(record.id, saved);
+        if (operations.current.get(record.id) !== operationId) return;
+        operations.current.delete(record.id);
+        const committed = replaceRecord(latestRecords.current, saved);
+        latestRecords.current = committed;
+        onRecordsChange(committed);
+      } catch {
+        if (operations.current.get(record.id) !== operationId) return;
+        operations.current.delete(record.id);
+        const restored = replaceRecord(latestRecords.current, confirmed);
+        latestRecords.current = restored;
+        onRecordsChange(restored);
+        setError("日期分配失败，已恢复原日期。");
+      }
+    };
+    const previous = queues.current.get(record.id) ?? Promise.resolve();
+    const queued = previous.catch(() => undefined).then(execute);
+    queues.current.set(record.id, queued);
+    void queued.finally(() => { if (queues.current.get(record.id) === queued) queues.current.delete(record.id); });
   };
 
   const dates = monthDates(records, dateProperty.id);

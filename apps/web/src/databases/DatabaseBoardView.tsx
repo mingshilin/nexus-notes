@@ -29,6 +29,8 @@ export function DatabaseBoardView({
   const [error, setError] = useState<string | null>(null);
   const latestRecords = useRef(records);
   const operations = useRef(new Map<string, string>());
+  const queues = useRef(new Map<string, Promise<void>>());
+  const confirmedRecords = useRef(new Map<string, DatabaseRecord>());
   const draggedRecord = useRef<string | null>(null);
   const recordSetKey = records.map((record) => `${record.id}:${record.revision}`).join("|");
   latestRecords.current = records;
@@ -43,27 +45,39 @@ export function DatabaseBoardView({
     if (!record) return;
     const value = optionId === "__ungrouped" ? null : optionId;
     const optimistic = { ...record, values: { ...record.values, [grouping.id]: value }, revision: record.revision + 1 };
-    const input: BoardMoveInput = { record_id: record.id, property_id: grouping.id, option_id: value, base_revision: record.revision };
     setError(null);
     draggedRecord.current = null;
     setDraggedId(null);
     const operationId = crypto.randomUUID();
     operations.current.set(record.id, operationId);
+    if (!confirmedRecords.current.has(record.id)) confirmedRecords.current.set(record.id, record);
     const next = replaceRecord(latestRecords.current, optimistic);
     latestRecords.current = next;
     onRecordsChange(next);
-    void (onBoardMove?.(input) ?? Promise.resolve(optimistic)).then((saved) => {
-      if (operations.current.get(record.id) !== operationId) return;
-      const committed = replaceRecord(latestRecords.current, saved);
-      latestRecords.current = committed;
-      onRecordsChange(committed);
-    }).catch(() => {
-      if (operations.current.get(record.id) !== operationId) return;
-      const restored = replaceRecord(latestRecords.current, record);
-      latestRecords.current = restored;
-      onRecordsChange(restored);
-      setError("移动失败，已恢复原位置。");
-    });
+    const execute = async () => {
+      const confirmed = confirmedRecords.current.get(record.id) ?? record;
+      const input: BoardMoveInput = { record_id: record.id, property_id: grouping.id, option_id: value, base_revision: confirmed.revision };
+      try {
+        const saved = await (onBoardMove?.(input) ?? Promise.resolve({ ...optimistic, revision: confirmed.revision + 1 }));
+        confirmedRecords.current.set(record.id, saved);
+        if (operations.current.get(record.id) !== operationId) return;
+        operations.current.delete(record.id);
+        const committed = replaceRecord(latestRecords.current, saved);
+        latestRecords.current = committed;
+        onRecordsChange(committed);
+      } catch {
+        if (operations.current.get(record.id) !== operationId) return;
+        operations.current.delete(record.id);
+        const restored = replaceRecord(latestRecords.current, confirmed);
+        latestRecords.current = restored;
+        onRecordsChange(restored);
+        setError("移动失败，已恢复原位置。");
+      }
+    };
+    const previous = queues.current.get(record.id) ?? Promise.resolve();
+    const queued = previous.catch(() => undefined).then(execute);
+    queues.current.set(record.id, queued);
+    void queued.finally(() => { if (queues.current.get(record.id) === queued) queues.current.delete(record.id); });
   };
 
   if (!grouping) return <p className="database-empty">Board view 需要 select 分组字段。</p>;

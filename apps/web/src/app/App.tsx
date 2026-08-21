@@ -74,6 +74,8 @@ function AuthenticatedWorkspace({
   const [databaseLoading, setDatabaseLoading] = useState(false);
   const [databaseError, setDatabaseError] = useState<string | null>(null);
   const [databaseRefreshVersion, setDatabaseRefreshVersion] = useState(0);
+  const [firstDatabaseName, setFirstDatabaseName] = useState("");
+  const [creatingFirstDatabase, setCreatingFirstDatabase] = useState(false);
   const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState<ServiceWorkerUpdate | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [diagnostics, setDiagnostics] = useState<KnowledgeDiagnostic[]>([]);
@@ -262,6 +264,7 @@ function AuthenticatedWorkspace({
     void client.getDatabase(selectedDatabaseId, controller.signal).then(async (bundle) => {
       const page = await client.listRecords(selectedDatabaseId, {
         // The first bounded page must align with the active saved view's cursor chain.
+        viewId: bundle.views[0]?.id,
         limit: bundle.views[0]?.config.page_size ?? 50,
         signal: controller.signal,
       });
@@ -287,14 +290,26 @@ function AuthenticatedWorkspace({
     return () => controller.abort();
   }, [activeDomain, apiClient, databaseRefreshVersion, selectedDatabaseId, workspaceId]);
 
-  const requestDatabasePage = useCallback(({ cursor, limit }: { cursor: string | null; limit: number }) => {
+  const requestDatabasePage = useCallback(({ cursor, limit, viewId }: { cursor: string | null; limit: number; viewId?: string }) => {
     if (!workspaceId || !selectedDatabaseId) return Promise.resolve({ items: [], next_cursor: null });
-    return new DatabaseClient(apiClient, workspaceId).listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, limit })
+    return new DatabaseClient(apiClient, workspaceId).listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, viewId, limit })
       .then((page) => {
         setDatabaseRecordsNextCursor(page.next_cursor);
         return page;
       });
   }, [apiClient, selectedDatabaseId, workspaceId]);
+
+  const createFirstDatabase = () => {
+    if (!workspaceId || !firstDatabaseName.trim() || creatingFirstDatabase) return;
+    setCreatingFirstDatabase(true);
+    setDatabaseError(null);
+    void new DatabaseClient(apiClient, workspaceId).createDatabase({ name: firstDatabaseName.trim(), description: "" }).then((created) => {
+      setDatabases((current) => [...current, created]);
+      setSelectedDatabaseId(created.id);
+      setFirstDatabaseName("");
+    }).catch(() => setDatabaseError("数据库暂时无法创建，请稍后重试。"))
+      .finally(() => setCreatingFirstDatabase(false));
+  };
 
   const loadMoreAttachments = () => {
     if (!workspaceId || !attachmentCursor || loading || refreshing) return;
@@ -448,6 +463,7 @@ function AuthenticatedWorkspace({
         records={databaseRecords}
         recordsNextCursor={databaseRecordsNextCursor}
         views={databaseBundle.views}
+        templates={databaseBundle.templates}
         client={new DatabaseClient(apiClient, workspaceId)}
         onMutation={() => setDatabaseRefreshVersion((version) => version + 1)}
         onRecordsPageRequest={requestDatabasePage}
@@ -459,7 +475,8 @@ function AuthenticatedWorkspace({
     <section className="database-workbench">
       {databaseLoading ? <p className="database-empty" role="status">正在加载数据库内容…</p> : null}
       {databaseError ? <p className="database-operation-error" role="alert">{databaseError}</p> : null}
-      {!databaseLoading && !databaseError ? <p className="database-empty">请选择数据库。</p> : null}
+      {!databaseLoading && databases.length === 0 && workspaceId ? <section className="database-first-create" aria-label="创建第一个数据库"><p className="eyebrow">STRUCTURED DATABASE</p><h1>创建第一个数据库</h1><p>从一个轻量的表格开始，之后可随时添加属性、视图和协作规则。</p><label>数据库名称<input aria-label="数据库名称" value={firstDatabaseName} onChange={(event) => setFirstDatabaseName(event.target.value)} /></label><button type="button" disabled={!firstDatabaseName.trim() || creatingFirstDatabase} onClick={createFirstDatabase}>创建数据库</button></section> : null}
+      {!databaseLoading && !databaseError && databases.length > 0 && !databaseBundle ? <p className="database-empty">请选择数据库。</p> : null}
     </section>
   );
 

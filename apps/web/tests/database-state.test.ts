@@ -44,4 +44,32 @@ describe("database web state", () => {
     expect(state).toEqual([{ id: "record-1", status: "todo" }]);
     expect(restore).toHaveBeenCalledOnce();
   });
+
+  it("keeps cursor chains isolated by page size and removes incompatible chains", async () => {
+    const data = await loadData();
+    const storage = memoryStorage();
+    const store = new data.DatabasePaginationStore(storage);
+    store.write("ws-1", "db-1", "view-1", { page: 2, pageSize: 25, cursors: { 1: null, 2: "page-2" } });
+    store.write("ws-1", "db-1", "view-1", { page: 3, pageSize: 50, cursors: { 1: null, 2: "large-2", 3: "large-3" } });
+
+    expect(store.read("ws-1", "db-1", "view-1", 25)).toBeNull();
+    expect(store.read("ws-1", "db-1", "view-1", 50)).toEqual({ page: 3, pageSize: 50, cursors: { 1: null, 2: "large-2", 3: "large-3" } });
+    expect(store.read("ws-1", "db-1", "view-1", 100)).toBeNull();
+    expect(storage.getItem("nexus:database-pagination:ws-1:db-1:view-1:25")).toBeNull();
+  });
+
+  it("rolls an optimistic bulk preview back atomically only when every token is still current", async () => {
+    const data = await loadData();
+    let records = [{ id: "one", value: "todo" }, { id: "two", value: "todo" }];
+    const coordinator = new data.RecordMutationCoordinator<typeof records[number]>((next: typeof records) => { records = next; });
+    const token = coordinator.preview(records, [
+      { id: "one", next: { id: "one", value: "done" } },
+      { id: "two", next: { id: "two", value: "done" } },
+    ]);
+    coordinator.preview(records, [{ id: "one", next: { id: "one", value: "later" } }]);
+
+    coordinator.rollback(token);
+    expect(records).toEqual([{ id: "one", value: "later" }, { id: "two", value: "todo" }]);
+    expect(coordinator.pendingCount()).toBe(1);
+  });
 });

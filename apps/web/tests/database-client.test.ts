@@ -57,4 +57,17 @@ describe("DatabaseClient", () => {
     expect(api.request.mock.calls.every(([options]) => options.requestClass === "command" && options.policy.retry === 0)).toBe(true);
     expect(new Set(api.request.mock.calls.map(([options]) => options.policy.idempotencyKey)).size).toBe(9);
   });
+
+  it("exports every bounded CSV page without repeating headers", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async ({ body }: { body: { cursor: string | null } }) => {
+      return body.cursor === null
+        ? { csv: "Name\r\nOne\r\nTwo\r\n", next_cursor: "next-1" }
+        : { csv: "Name\r\nThree\r\n", next_cursor: null };
+    }) };
+    const client = new data.DatabaseClient(api, "ws-1", { createId: () => "export" });
+
+    await expect(client.exportAllCsv("db-1", { property_ids: ["name"], page_size: 100 })).resolves.toBe("Name\r\nOne\r\nTwo\r\nThree\r\n");
+    expect(api.request.mock.calls.map(([request]) => request.body.cursor)).toEqual([null, "next-1"]);
+  });
 });

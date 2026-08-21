@@ -140,3 +140,26 @@ The Worker suite still emits the existing `OCR_QUEUE_MESSAGE_INVALID` stderr lin
 ### Remaining Web work
 
 - All Review Fix Wave 2 Web findings remain explicitly for the next agent: typed UI forms, workspace/database/view/page-size cache scoping, incremental board/calendar fetching and virtualization, optimistic bulk preview and per-record rollback serialization, full CSV export pagination, and keyboard/focus-safe tools drawer behavior.
+
+## Task 7 Web Review Fix Wave 2
+
+### RED evidence
+
+- State test: page-size chain was overwritten and record-token coordinator was absent; client test: `DatabaseClient.exportAllCsv` was absent.
+- Web behavior test: raw `操作数据 JSON` remained; later, optimistic bulk had no immediate preview. Empty workspace had no first-database creation flow; same-record moves were concurrent; Escape did not return focus.
+
+### GREEN evidence
+
+- Focused Web: `5/5` files, `21/21` tests passed. Full `@nexus/web`: `21/21` files, `86/86` tests passed.
+- `npm run typecheck --workspace @nexus/web`, `npm run build --workspace @nexus/web`, `npm run beta:build`, and `npm run verify:deploy`: passed.
+- Lazy `DatabaseWorkbench` is `27.38 kB` (`8.66 kB` gzip), no `>500 kB` warning. `apps/web/dist/index.html` has no modulepreload or Markdown/OCR preload.
+
+### Requirement mapping
+
+- Removed the raw JSON console in favor of split typed forms with property editors, entity pickers, validation, browseable templates/comments, and top-level first-database creation.
+- Scoped cursor persistence by workspace/database/view/page-size, used one 100-record board/calendar fetch window, added token-guarded bulk rollback, serialized board/calendar mutations, and completed CSV export pagination.
+- Drawer supports visualViewport/safe-area/keyboard insets, internal scrolling and focus return. Tests cover forms, cache, bounded fetches, stacked failure, bulk rollback, export, and the 390px/2dppx keyboard/focus path. No browser harness is configured.
+
+### Scope audit
+
+- Modified only `apps/web` source/tests and this report; no Worker, domain, contracts, migrations, deployment, remote, secret, plan, or ledger files changed.
