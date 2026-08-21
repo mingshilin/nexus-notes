@@ -14,6 +14,7 @@ describe("knowledge contracts", () => {
     expect(contracts.AttachmentSchema.safeParse({
       id: "attachment-1", workspace_id: "ws-1", note_id: "note-1", filename: "scan.pdf",
       mime_type: "application/pdf", size_bytes: 42, status: "ready", revision: 1,
+      ocr_status: null, ocr_attempt_count: null, ocr_updated_at: null,
       created_at: timestamp, updated_at: timestamp,
     }).success).toBe(true);
     expect(contracts.UploadCompleteInputSchema.parse({ upload_id: "upload-1" })).toEqual({ upload_id: "upload-1" });
@@ -33,6 +34,34 @@ describe("knowledge contracts", () => {
     expect(contracts.KnowledgeDiagnosticSchema.safeParse({
       kind: "failed_ocr", entity_id: "attachment-1", title: "scan.pdf", count: 1,
     }).success).toBe(true);
+  });
+
+  it("exposes only strict, safe OCR recovery metadata and supports OCR list filters", async () => {
+    const contracts = await loadContracts();
+    const timestamp = "2026-08-21T00:00:00.000Z";
+    const attachment = contracts.AttachmentSchema.parse({
+      id: "attachment-1", workspace_id: "ws-1", note_id: null, filename: "scan.pdf",
+      mime_type: "application/pdf", size_bytes: 42, status: "ready", revision: 2,
+      ocr_status: "failed", ocr_attempt_count: 2, ocr_updated_at: timestamp,
+      created_at: timestamp, updated_at: timestamp,
+    });
+
+    expect(attachment).toMatchObject({
+      ocr_status: "failed", ocr_attempt_count: 2, ocr_updated_at: timestamp,
+    });
+    expect(contracts.AttachmentSchema.safeParse({ ...attachment, object_key: "ws-1/attachments/secret" }).success).toBe(false);
+    expect(contracts.AttachmentSchema.safeParse({ ...attachment, ocr_text: "private OCR" }).success).toBe(false);
+    expect(contracts.AttachmentListRequestSchema.parse({ ocr_status: "dead_letter", limit: 10 })).toMatchObject({
+      ocr_status: "dead_letter", limit: 10,
+    });
+    expect(contracts.KnowledgeDiagnosticSchema.parse({
+      kind: "failed_ocr", entity_id: "attachment-1", title: "scan.pdf", count: 2,
+      failure_count: 2, ocr_status: "dead_letter", latest_error: "ocr_attempts_exhausted",
+    })).toMatchObject({ failure_count: 2, ocr_status: "dead_letter", latest_error: "ocr_attempts_exhausted" });
+    expect(contracts.KnowledgeDiagnosticSchema.safeParse({
+      kind: "failed_ocr", entity_id: "attachment-1", title: "scan.pdf", count: 2,
+      ocr_status: "dead_letter", latest_error: "OCR_INTERNAL_STACK_TRACE",
+    }).success).toBe(false);
   });
 
   it("validates tenant-scoped folders, tags, links, and reminders", async () => {

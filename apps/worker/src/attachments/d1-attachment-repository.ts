@@ -3,11 +3,19 @@ import {
   QueueJobSchema,
   type Attachment,
   type AttachmentListRequest,
+  type KnowledgeDiagnostic,
   type KnowledgeDiagnosticsRequest,
   type QueueJob,
 } from "@nexus/contracts";
 
-interface AttachmentRow extends Attachment { object_key: string; user_id: string; idempotency_key: string; }
+interface AttachmentRow extends Omit<Attachment, "ocr_status" | "ocr_attempt_count" | "ocr_updated_at"> {
+  object_key: string;
+  user_id: string;
+  idempotency_key: string;
+  ocr_status?: Attachment["ocr_status"];
+  ocr_attempt_count?: number | null;
+  ocr_updated_at?: string | null;
+}
 
 interface OcrJobRow {
   id: string;
@@ -22,8 +30,25 @@ interface OcrJobRow {
 }
 
 function toAttachment(row: AttachmentRow): Attachment {
-  const { object_key: _objectKey, user_id: _userId, idempotency_key: _idempotencyKey, ...attachment } = row;
-  return attachment;
+  const {
+    object_key: _objectKey,
+    user_id: _userId,
+    idempotency_key: _idempotencyKey,
+    ocr_status = null,
+    ocr_attempt_count = null,
+    ocr_updated_at = null,
+    ...attachment
+  } = row;
+  return { ...attachment, ocr_status, ocr_attempt_count, ocr_updated_at };
+}
+
+function attachmentProjection(alias: string) {
+  return `${alias}.id, ${alias}.workspace_id, ${alias}.user_id, ${alias}.note_id, ${alias}.object_key,
+    ${alias}.filename, ${alias}.mime_type, ${alias}.size_bytes, ${alias}.status, ${alias}.idempotency_key,
+    ${alias}.revision, ${alias}.created_at, ${alias}.updated_at,
+    (SELECT j.status FROM beta_ocr_jobs j WHERE j.workspace_id = ${alias}.workspace_id AND j.attachment_id = ${alias}.id ORDER BY j.updated_at DESC, j.id DESC LIMIT 1) AS ocr_status,
+    (SELECT j.attempt_count FROM beta_ocr_jobs j WHERE j.workspace_id = ${alias}.workspace_id AND j.attachment_id = ${alias}.id ORDER BY j.updated_at DESC, j.id DESC LIMIT 1) AS ocr_attempt_count,
+    (SELECT j.updated_at FROM beta_ocr_jobs j WHERE j.workspace_id = ${alias}.workspace_id AND j.attachment_id = ${alias}.id ORDER BY j.updated_at DESC, j.id DESC LIMIT 1) AS ocr_updated_at`;
 }
 
 function encodeCursor(row: Pick<AttachmentRow, "created_at" | "id">) {
@@ -107,26 +132,30 @@ export class D1AttachmentRepository {
 
   async getAttachment(workspaceId: string, attachmentId: string, includeDeleted: boolean) {
     const row = await this.db.prepare(
-      `SELECT id, workspace_id, user_id, note_id, object_key, filename, mime_type, size_bytes, status, idempotency_key, revision, created_at, updated_at
-       FROM beta_attachments WHERE workspace_id = ? AND id = ? ${includeDeleted ? "" : "AND status != 'deleted'"}`,
+      `SELECT ${attachmentProjection("a")}
+       FROM beta_attachments a WHERE a.workspace_id = ? AND a.id = ? ${includeDeleted ? "" : "AND a.status != 'deleted'"}`,
     ).bind(workspaceId, attachmentId).first<AttachmentRow>();
     return row ? toAttachment(row) : null;
   }
 
   async listAttachments(workspaceId: string, request: AttachmentListRequest) {
-    const conditions = ["workspace_id = ?", "status != 'deleted'"];
+    const conditions = ["a.workspace_id = ?", "a.status != 'deleted'"];
     const values: unknown[] = [workspaceId];
-    if (request.mime_type) { conditions.push("mime_type = ?"); values.push(request.mime_type); }
-    if (request.note_id) { conditions.push("note_id = ?"); values.push(request.note_id); }
-    if (request.status) { conditions.push("status = ?"); values.push(request.status); }
+    if (request.mime_type) { conditions.push("a.mime_type = ?"); values.push(request.mime_type); }
+    if (request.note_id) { conditions.push("a.note_id = ?"); values.push(request.note_id); }
+    if (request.status) { conditions.push("a.status = ?"); values.push(request.status); }
+    if (request.ocr_status) {
+      conditions.push("(SELECT j.status FROM beta_ocr_jobs j WHERE j.workspace_id = a.workspace_id AND j.attachment_id = a.id ORDER BY j.updated_at DESC, j.id DESC LIMIT 1) = ?");
+      values.push(request.ocr_status);
+    }
     if (request.cursor) {
       const cursor = decodeCursor(request.cursor);
-      conditions.push("(created_at < ? OR (created_at = ? AND id < ?))");
+      conditions.push("(a.created_at < ? OR (a.created_at = ? AND a.id < ?))");
       values.push(cursor.createdAt, cursor.createdAt, cursor.id);
     }
     const rows = (await this.db.prepare(
-      `SELECT id, workspace_id, user_id, note_id, object_key, filename, mime_type, size_bytes, status, idempotency_key, revision, created_at, updated_at
-       FROM beta_attachments WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC, id DESC LIMIT ?`,
+      `SELECT ${attachmentProjection("a")}
+       FROM beta_attachments a WHERE ${conditions.join(" AND ")} ORDER BY a.created_at DESC, a.id DESC LIMIT ?`,
     ).bind(...values, request.limit + 1).all<AttachmentRow>()).results ?? [];
     const items = rows.slice(0, request.limit).map(toAttachment);
     return { items, next_cursor: rows.length > request.limit && rows[request.limit - 1] ? encodeCursor(rows[request.limit - 1]!) : null };
@@ -397,15 +426,38 @@ export class D1AttachmentRepository {
   async diagnostics(workspaceId: string, request: KnowledgeDiagnosticsRequest) {
     const cursor = request.cursor ?? "";
     const rows = (await this.db.prepare(
-      `SELECT kind, entity_id, title, count, diagnostic_key FROM (
-         SELECT 'unfiled_note' kind, id entity_id, title, 1 count, 'unfiled_note:' || id diagnostic_key FROM notes WHERE workspace_id = ? AND deleted_at IS NULL AND folder_id IS NULL
-         UNION ALL SELECT 'orphan_note', n.id, n.title, 1, 'orphan_note:' || n.id FROM notes n LEFT JOIN folders f ON f.workspace_id = n.workspace_id AND f.id = n.folder_id WHERE n.workspace_id = ? AND n.deleted_at IS NULL AND n.folder_id IS NOT NULL AND f.id IS NULL
-         UNION ALL SELECT 'duplicate_title', MIN(id), title, COUNT(*), 'duplicate_title:' || lower(trim(title)) FROM notes WHERE workspace_id = ? AND deleted_at IS NULL AND trim(title) != '' GROUP BY lower(trim(title)) HAVING COUNT(*) > 1
-         UNION ALL SELECT 'broken_link', l.id, COALESCE(s.title, ''), 1, 'broken_link:' || l.id FROM note_links l LEFT JOIN notes s ON s.workspace_id = l.workspace_id AND s.id = l.source_note_id LEFT JOIN notes t ON t.workspace_id = l.workspace_id AND t.id = l.target_note_id WHERE l.workspace_id = ? AND (t.id IS NULL OR t.deleted_at IS NOT NULL)
-         UNION ALL SELECT 'failed_ocr', a.id, a.filename, 1, 'failed_ocr:' || a.id FROM beta_ocr_jobs j JOIN beta_attachments a ON a.workspace_id = j.workspace_id AND a.id = j.attachment_id WHERE j.workspace_id = ? AND j.status IN ('failed', 'dead_letter') AND a.status != 'deleted'
+      `SELECT kind, entity_id, title, count, failure_count, ocr_status, latest_error, diagnostic_key FROM (
+         SELECT 'unfiled_note' kind, id entity_id, title, 1 count, NULL failure_count, NULL ocr_status, NULL latest_error, 'unfiled_note:' || id diagnostic_key FROM notes WHERE workspace_id = ? AND deleted_at IS NULL AND folder_id IS NULL
+         UNION ALL SELECT 'orphan_note', n.id, n.title, 1, NULL, NULL, NULL, 'orphan_note:' || n.id FROM notes n LEFT JOIN folders f ON f.workspace_id = n.workspace_id AND f.id = n.folder_id WHERE n.workspace_id = ? AND n.deleted_at IS NULL AND n.folder_id IS NOT NULL AND f.id IS NULL
+         UNION ALL SELECT 'duplicate_title', MIN(id), title, COUNT(*), NULL, NULL, NULL, 'duplicate_title:' || lower(trim(title)) FROM notes WHERE workspace_id = ? AND deleted_at IS NULL AND trim(title) != '' GROUP BY lower(trim(title)) HAVING COUNT(*) > 1
+         UNION ALL SELECT 'broken_link', l.id, COALESCE(s.title, ''), 1, NULL, NULL, NULL, 'broken_link:' || l.id FROM note_links l LEFT JOIN notes s ON s.workspace_id = l.workspace_id AND s.id = l.source_note_id LEFT JOIN notes t ON t.workspace_id = l.workspace_id AND t.id = l.target_note_id WHERE l.workspace_id = ? AND (t.id IS NULL OR t.deleted_at IS NOT NULL)
+         UNION ALL
+         SELECT 'failed_ocr', a.id, a.filename, COUNT(j.id), COUNT(j.id),
+           (SELECT latest.status FROM beta_ocr_jobs latest WHERE latest.workspace_id = a.workspace_id AND latest.attachment_id = a.id AND latest.status IN ('failed', 'dead_letter') ORDER BY latest.updated_at DESC, latest.id DESC LIMIT 1),
+           CASE (SELECT latest.status FROM beta_ocr_jobs latest WHERE latest.workspace_id = a.workspace_id AND latest.attachment_id = a.id AND latest.status IN ('failed', 'dead_letter') ORDER BY latest.updated_at DESC, latest.id DESC LIMIT 1)
+             WHEN 'dead_letter' THEN 'ocr_attempts_exhausted' ELSE 'ocr_failed' END,
+           'failed_ocr:' || a.id
+         FROM beta_ocr_jobs j JOIN beta_attachments a ON a.workspace_id = j.workspace_id AND a.id = j.attachment_id
+         WHERE j.workspace_id = ? AND j.status IN ('failed', 'dead_letter') AND a.status != 'deleted'
+         GROUP BY a.workspace_id, a.id, a.filename
        ) WHERE diagnostic_key > ? ORDER BY diagnostic_key LIMIT ?`,
-    ).bind(workspaceId, workspaceId, workspaceId, workspaceId, workspaceId, cursor, request.limit + 1).all<{ kind: "unfiled_note" | "orphan_note" | "duplicate_title" | "broken_link" | "failed_ocr"; entity_id: string; title: string; count: number; diagnostic_key: string }>()).results ?? [];
+    ).bind(workspaceId, workspaceId, workspaceId, workspaceId, workspaceId, cursor, request.limit + 1).all<{
+      kind: "unfiled_note" | "orphan_note" | "duplicate_title" | "broken_link" | "failed_ocr";
+      entity_id: string;
+      title: string;
+      count: number;
+      failure_count: number | null;
+      ocr_status: "failed" | "dead_letter" | null;
+      latest_error: "ocr_failed" | "ocr_attempts_exhausted" | null;
+      diagnostic_key: string;
+    }>()).results ?? [];
     const page = rows.slice(0, request.limit);
-    return { items: page.map(({ diagnostic_key: _key, ...item }) => item), nextCursor: rows.length > request.limit ? page.at(-1)?.diagnostic_key ?? null : null };
+    return {
+      items: page.map(({ diagnostic_key: _key, failure_count, ocr_status, latest_error, ...item }) => ({
+        ...item,
+        ...(item.kind === "failed_ocr" ? { failure_count: failure_count!, ocr_status, latest_error } : {}),
+      })) as KnowledgeDiagnostic[],
+      nextCursor: rows.length > request.limit ? page.at(-1)?.diagnostic_key ?? null : null,
+    };
   }
 }

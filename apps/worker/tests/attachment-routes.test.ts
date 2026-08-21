@@ -19,6 +19,13 @@ function request(path: string, init: RequestInit = {}) {
   return new Request(`https://beta.test${path}`, { ...init, headers });
 }
 
+function workspaceRequest(workspaceId: string, path: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  headers.set("x-workspace-id", workspaceId);
+  if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+  return new Request(`https://beta.test${path}`, { ...init, headers });
+}
+
 describe("v2 attachment routes", () => {
   it("uses workspace authorization for metadata, OCR retry, diagnostics, and private download", async () => {
     const worker = await loadWorker();
@@ -179,6 +186,98 @@ describe("v2 attachment routes", () => {
       expect((await metadata.json()).error.code).toBe("ATTACHMENT_NOT_FOUND");
       expect((await file.json()).error.code).toBe("ATTACHMENT_NOT_FOUND");
       expect(objects).toHaveProperty("size", 0);
+    } finally {
+      await testD1.dispose();
+    }
+  });
+
+  it("keeps the real D1 and fake private R2 lifecycle tenant-scoped, filtered, and cleanup-safe", async () => {
+    const testD1 = await createTestD1();
+    try {
+      await seedTenants(testD1.db);
+      const worker = await loadWorker();
+      const objects = new Map<string, Uint8Array>();
+      const files = {
+        async put(key: string, value: ArrayBuffer | ArrayBufferView) {
+          const bytes = value instanceof ArrayBuffer
+            ? new Uint8Array(value)
+            : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+          objects.set(key, bytes.slice());
+        },
+        async get(key: string) {
+          const bytes = objects.get(key);
+          return bytes ? { body: new Response(bytes).body! } : null;
+        },
+        async delete(key: string) { objects.delete(key); },
+      };
+      let nextId = 0;
+      const repository = new (worker.D1AttachmentRepository as any)(testD1.db, () => `attachment-${++nextId}`);
+      const service = new (worker.AttachmentService as any)(repository, files, { clock: () => new Date("2026-08-21T00:00:00.000Z") });
+      const context = { workspaceId: "ws-1", userId: "user-1" };
+      const signatures = [
+        ["application/pdf", "scan.pdf", [0x25, 0x50, 0x44, 0x46, 0x2d]],
+        ["image/jpeg", "photo.jpg", [0xff, 0xd8, 0xff, 0x00]],
+        ["image/png", "image.png", [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]],
+        ["image/webp", "image.webp", [0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]],
+        ["text/plain", "notes.txt", [0x68, 0x65, 0x6c, 0x6c, 0x6f]],
+      ] as const;
+      const attachments: any[] = [];
+      for (const [mimeType, filename, bytes] of signatures) {
+        const attachment = await service.createUpload(context, {
+          filename,
+          mime_type: mimeType,
+          size_bytes: bytes.length,
+          idempotency_key: `upload-${filename}`,
+        });
+        attachments.push(await service.uploadContent(context, attachment.id, new Uint8Array(bytes)));
+      }
+      const invalid = await service.createUpload(context, {
+        filename: "bad.pdf", mime_type: "application/pdf", size_bytes: 5, idempotency_key: "bad-pdf",
+      });
+      await expect(service.uploadContent(context, invalid.id, new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x00]))).rejects.toMatchObject({
+        code: "ATTACHMENT_SIGNATURE_MISMATCH",
+      });
+      expect(objects).toHaveProperty("size", signatures.length);
+
+      const pdf = attachments[0]!;
+      const job = await repository.ensureOcrJob("ws-1", "user-1", pdf.id, "2026-08-21T00:00:00.000Z");
+      const pending = await repository.listPendingOcrOutbox("2026-08-21T00:00:00.000Z", 1, [job.outbox_id]);
+      await repository.claimOcrJob(pending[0].message, "2026-08-21T00:00:00.000Z");
+      await repository.failOcrJob("ws-1", job.job_id, "OCR_PROVIDER_TIMEOUT", "2026-08-21T00:00:00.000Z");
+      await testD1.db.prepare(
+        "INSERT INTO search_documents (id, workspace_id, entity_type, entity_id, title, ocr_text, revision, updated_at) VALUES (?, 'ws-1', 'attachment', ?, 'scan.pdf', 'private OCR text', 2, ?)",
+      ).bind(`attachment:${pdf.id}`, pdf.id, "2026-08-21T00:00:00.000Z").run();
+
+      const list = await service.listAttachments(context, { mime_type: "application/pdf", ocr_status: "failed", limit: 10 });
+      expect(list.items).toMatchObject([{ id: pdf.id, ocr_status: "failed", ocr_attempt_count: 1 }]);
+      expect(JSON.stringify(list.items)).not.toContain("private OCR text");
+      expect(JSON.stringify(list.items)).not.toContain(`/attachments/${pdf.id}`);
+      await expect(service.getAttachment({ workspaceId: "ws-2", userId: "user-2" }, pdf.id)).rejects.toMatchObject({ code: "ATTACHMENT_NOT_FOUND" });
+      await expect(service.download({ workspaceId: "ws-2", userId: "user-2" }, pdf.id)).rejects.toMatchObject({ code: "ATTACHMENT_NOT_FOUND" });
+      await expect(service.retryOcr({ workspaceId: "ws-2", userId: "user-2" }, { attachment_ids: [pdf.id] })).resolves.toMatchObject({ queued: [] });
+
+      const registry = (worker.createRouteRegistry as any)({
+        requestId: () => "req-real-lifecycle",
+        authenticate: vi.fn(async ({ request }: { request: Request }) => ({ userId: request.headers.get("x-workspace-id") === "ws-2" ? "user-2" : "user-1" })),
+        authorizeWorkspace: vi.fn(async (_principal: unknown, workspaceId: string) => workspaceId === "ws-1"
+          ? workspace
+          : { workspaceId: "ws-2", userId: "user-2", role: "editor", capabilities: new Set<string>() }),
+      });
+      (worker.registerAttachmentRoutes as any)(registry, () => service);
+      const metadataPath = `/api/v2/attachments/${pdf.id}`;
+      expect((await registry.fetch(workspaceRequest("ws-2", metadataPath), {})).status).toBe(404);
+      expect((await registry.fetch(workspaceRequest("ws-2", `${metadataPath}/file`), {})).status).toBe(404);
+      expect((await registry.fetch(workspaceRequest("ws-2", metadataPath, { method: "DELETE" }), {})).status).toBe(404);
+      expect((await registry.fetch(workspaceRequest("ws-2", `${metadataPath}/ocr/retry`, {
+        method: "POST", body: JSON.stringify({ attachment_ids: [pdf.id] }),
+      }), {})).status).toBe(200);
+      expect((await registry.fetch(workspaceRequest("ws-1", metadataPath, { method: "DELETE" }), {})).status).toBe(200);
+
+      expect(objects.has(`ws-1/attachments/${pdf.id}`)).toBe(false);
+      expect(await testD1.db.prepare("SELECT 1 FROM beta_ocr_jobs WHERE workspace_id = 'ws-1' AND attachment_id = ?").bind(pdf.id).first()).toBeNull();
+      expect(await testD1.db.prepare("SELECT 1 FROM search_documents WHERE workspace_id = 'ws-1' AND entity_id = ?").bind(pdf.id).first()).toBeNull();
+      const diagnostics = await service.diagnostics(context, { limit: 20 });
+      expect(diagnostics.items.some((item: { entity_id: string }) => item.entity_id === pdf.id)).toBe(false);
     } finally {
       await testD1.dispose();
     }

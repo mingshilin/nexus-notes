@@ -15,6 +15,8 @@ export const SUPPORTED_ATTACHMENT_MIME_TYPES = [
 ] as const;
 
 export const AttachmentStatusSchema = z.enum(["uploading", "ready", "deleted"]);
+export const OcrJobStatusSchema = z.enum(["pending", "processing", "completed", "failed", "dead_letter"]);
+export const SafeOcrDiagnosticErrorSchema = z.enum(["ocr_failed", "ocr_attempts_exhausted"]);
 export const AttachmentSchema = z.object({
   id: EntityIdSchema,
   workspace_id: EntityIdSchema,
@@ -23,10 +25,13 @@ export const AttachmentSchema = z.object({
   mime_type: z.enum(SUPPORTED_ATTACHMENT_MIME_TYPES),
   size_bytes: z.number().int().positive().max(MAX_WORKSPACE_ATTACHMENT_BYTES),
   status: AttachmentStatusSchema,
+  ocr_status: OcrJobStatusSchema.nullable(),
+  ocr_attempt_count: z.number().int().min(0).nullable(),
+  ocr_updated_at: TimestampSchema.nullable(),
   revision: RevisionSchema,
   created_at: TimestampSchema,
   updated_at: TimestampSchema,
-});
+}).strict();
 export type Attachment = z.infer<typeof AttachmentSchema>;
 
 export const CreateAttachmentUploadInputSchema = z.object({
@@ -47,12 +52,12 @@ export const AttachmentListRequestSchema = z.object({
   mime_type: z.enum(SUPPORTED_ATTACHMENT_MIME_TYPES).optional(),
   note_id: EntityIdSchema.optional(),
   status: AttachmentStatusSchema.optional(),
+  ocr_status: OcrJobStatusSchema.optional(),
   cursor: CursorSchema.optional(),
   limit: z.number().int().min(1).max(100).default(50),
 });
 export type AttachmentListRequest = z.infer<typeof AttachmentListRequestSchema>;
 
-export const OcrJobStatusSchema = z.enum(["pending", "processing", "completed", "failed", "dead_letter"]);
 export const OcrJobSchema = z.object({
   id: EntityIdSchema,
   workspace_id: EntityIdSchema,
@@ -85,7 +90,10 @@ export const KnowledgeDiagnosticSchema = z.object({
   entity_id: EntityIdSchema,
   title: z.string().max(255),
   count: z.number().int().positive(),
-});
+  failure_count: z.number().int().positive().optional(),
+  ocr_status: OcrJobStatusSchema.nullable().optional(),
+  latest_error: SafeOcrDiagnosticErrorSchema.nullable().optional(),
+}).strict();
 export type KnowledgeDiagnostic = z.infer<typeof KnowledgeDiagnosticSchema>;
 
 export const KnowledgeDiagnosticsRequestSchema = z.object({

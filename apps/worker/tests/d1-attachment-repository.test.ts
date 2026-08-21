@@ -74,4 +74,44 @@ describe("D1AttachmentRepository attachment quota", () => {
     expect(rows).toEqual([{ workspace_id: "ws-2", value: 2048 }]);
     expect(await repository.getAttachment("ws-2", other.id, false)).not.toBeNull();
   });
+
+  it("groups historical failed OCR by attachment with stable unique diagnostic cursors and safe summaries", async () => {
+    const { db, repository } = await fixture();
+    const first = await repository.reserveUpload(upload("ws-1", "user-1", "first-failure", 1024));
+    const second = await repository.reserveUpload(upload("ws-1", "user-1", "second-failure", 1024));
+    const other = await repository.reserveUpload(upload("ws-2", "user-2", "other-failure", 1024));
+    await repository.markUploaded("ws-1", first.id, now);
+    await repository.markUploaded("ws-1", second.id, now);
+    await repository.markUploaded("ws-2", other.id, now);
+    await db.batch([
+      db.prepare(
+        `INSERT INTO beta_ocr_jobs (id, workspace_id, user_id, attachment_id, source_revision, status, idempotency_key, attempt_count, deadline, last_error_code, revision, created_at, updated_at)
+         VALUES (?, 'ws-1', 'user-1', ?, ?, ?, ?, 1, ?, ?, 1, ?, ?)`,
+      ).bind("first-old", first.id, 1, "failed", "ocr:first-old", now, "OCR_INTERNAL_STACK_TRACE", "2026-08-20T00:00:00.000Z", "2026-08-20T00:00:00.000Z"),
+      db.prepare(
+        `INSERT INTO beta_ocr_jobs (id, workspace_id, user_id, attachment_id, source_revision, status, idempotency_key, attempt_count, deadline, last_error_code, revision, created_at, updated_at)
+         VALUES (?, 'ws-1', 'user-1', ?, ?, ?, ?, 3, ?, ?, 1, ?, ?)`,
+      ).bind("first-latest", first.id, 2, "dead_letter", "ocr:first-latest", now, "OCR_ATTEMPTS_EXHAUSTED", "2026-08-21T00:00:00.000Z", "2026-08-21T00:00:00.000Z"),
+      db.prepare(
+        `INSERT INTO beta_ocr_jobs (id, workspace_id, user_id, attachment_id, source_revision, status, idempotency_key, attempt_count, deadline, last_error_code, revision, created_at, updated_at)
+         VALUES (?, 'ws-1', 'user-1', ?, ?, ?, ?, 1, ?, ?, 1, ?, ?)`,
+      ).bind("second-only", second.id, 2, "failed", "ocr:second-only", now, "OCR_PROVIDER_TIMEOUT", "2026-08-21T00:00:00.000Z", "2026-08-21T00:00:00.000Z"),
+      db.prepare(
+        `INSERT INTO beta_ocr_jobs (id, workspace_id, user_id, attachment_id, source_revision, status, idempotency_key, attempt_count, deadline, last_error_code, revision, created_at, updated_at)
+         VALUES ('other-tenant', 'ws-2', 'user-2', ?, 2, 'failed', 'ocr:other', 1, ?, 'OCR_PROVIDER_TIMEOUT', 1, ?, ?)`,
+      ).bind(other.id, now, now, now),
+    ]);
+
+    const pageOne = await repository.diagnostics("ws-1", { limit: 1 });
+    const pageTwo = await repository.diagnostics("ws-1", { limit: 1, cursor: pageOne.nextCursor! });
+    const diagnostics = [...pageOne.items, ...pageTwo.items].filter((item) => item.kind === "failed_ocr");
+
+    expect(diagnostics).toHaveLength(2);
+    expect(new Set(diagnostics.map((item) => item.entity_id)).size).toBe(2);
+    expect(diagnostics.find((item) => item.entity_id === first.id)).toMatchObject({
+      count: 2, failure_count: 2, ocr_status: "dead_letter", latest_error: "ocr_attempts_exhausted",
+    });
+    expect(JSON.stringify(diagnostics)).not.toContain("OCR_INTERNAL_STACK_TRACE");
+    expect(JSON.stringify(diagnostics)).not.toContain("OCR_PROVIDER_TIMEOUT");
+  });
 });

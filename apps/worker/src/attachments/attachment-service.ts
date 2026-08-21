@@ -3,6 +3,7 @@ import {
   SUPPORTED_ATTACHMENT_MIME_TYPES,
   type Attachment,
   type CreateAttachmentUploadInput,
+  type KnowledgeDiagnostic,
   type KnowledgeDiagnosticsRequest,
   type OcrRetryInput,
   type UploadCompleteInput,
@@ -35,7 +36,7 @@ export interface AttachmentRepository {
     outbox_ids: string[];
   }>;
   diagnostics(workspaceId: string, request: KnowledgeDiagnosticsRequest): Promise<{
-    items: Array<{ kind: "unfiled_note" | "orphan_note" | "duplicate_title" | "broken_link" | "failed_ocr"; entity_id: string; title: string; count: number }>;
+    items: KnowledgeDiagnostic[];
     nextCursor: string | null;
   }>;
 }

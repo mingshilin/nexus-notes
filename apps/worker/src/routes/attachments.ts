@@ -37,6 +37,7 @@ function listRequest(request: Request) {
     mime_type: params.get("mime_type") ?? undefined,
     note_id: params.get("note_id") ?? undefined,
     status: params.get("status") ?? undefined,
+    ocr_status: params.get("ocr_status") ?? undefined,
     cursor: params.get("cursor") ?? undefined,
     limit: Number.isInteger(rawLimit) ? rawLimit : 50,
   });
