@@ -626,3 +626,34 @@ This is the consumer/outcome half of B2 only. It does not change `Env`, bootstra
 | `git diff --check` | PASS. |
 
 Commit: independent B2.1 commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C Fix B2.1 Review Fix: Poison-Safe Outcomes
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm exec vitest run --config vitest.config.ts tests/ocr-consumer.test.ts` | RED: null queue body threw before validation; an unknown `INTERNAL_PROVIDER_SECRET` was persisted; poison or claim exceptions rejected the complete batch. |
+| Same focused command after the review fix | GREEN: PASS, 15 tests. |
+
+### Implemented
+
+- Queue input is normalized as `unknown` before any property access. Null, primitives, arrays, wrong kinds, and malformed payloads return a terminal safe ack without reaching D1 or extraction.
+- Persisted OCR codes now use an explicit allowlist. Unknown exception `code` and message values collapse to `OCR_EXTRACTION_FAILED`.
+- Every `consume()` invocation contains claim, extraction, and persistence failures. Unexpected failures return a bounded retry outcome before exhaustion or safe ack at exhaustion, so `consumeBatch()` cannot reject or alter a successful peer.
+- Real D1 tests cover attempt-two delay, retry-state re-claim using the same persisted message, attempt-three dead-letter, and safe stored errors. Fake message/repository tests cover poison input plus ack/retry and exception/success batch isolation.
+
+### Scope
+
+No B2.2 Queue retry invocation, Cloudflare binding, Env, bootstrap, health, Wrangler, Web, legacy, deployment, or Task 7 changes were made.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| OCR/D1 focused Worker suite | PASS, 47 tests. |
+| Worker full suite | PASS, 153 tests. |
+| `npm run typecheck` in `apps/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+Commit: independent B2.1 review-fix commit containing this report section; SHA is recorded in the final handoff.

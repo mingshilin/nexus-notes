@@ -11,7 +11,7 @@ class FakeMessage {
   readonly ack = vi.fn();
   readonly retry = vi.fn();
 
-  constructor(readonly body: QueueJob, readonly attempts = 1) {}
+  constructor(readonly body: unknown, readonly attempts = 1) {}
 }
 
 async function fixture() {
@@ -85,28 +85,49 @@ describe("OcrConsumer outcomes", () => {
     expect(await db.prepare("SELECT 1 found FROM search_documents WHERE entity_type = 'attachment'").first()).toBeNull();
   });
 
-  it("acks a malformed OCR delivery before it can reach the repository or extractor", async () => {
+  it.each([null, 42, "ocr", [], { kind: "ocr" }, { kind: "other" }, { kind: "ocr", payload: null }])(
+    "acks poison queue body %# before it can reach the repository or extractor",
+    async (body) => {
     const { OcrConsumer, repository } = await fixture();
     const extractor = { extract: vi.fn(async () => "unexpected") };
-    const message = new FakeMessage({ kind: "ocr" } as QueueJob);
+      const message = new FakeMessage(body);
 
-    await expect(consumer(OcrConsumer, repository, extractor).consume(message)).resolves.toEqual({ outcome: "ack" });
+      await expect(consumer(OcrConsumer, repository, extractor).consume(message)).resolves.toEqual({ outcome: "ack" });
 
-    expect(message.ack).toHaveBeenCalledOnce();
-    expect(extractor.extract).not.toHaveBeenCalled();
-  });
+      expect(message.ack).toHaveBeenCalledOnce();
+      expect(extractor.extract).not.toHaveBeenCalled();
+    },
+  );
 
-  it("persists a retryable failure and returns a bounded retry outcome without acknowledging", async () => {
+  it("persists a retryable attempt-two failure, returns its bounded delay, and re-claims the same persisted message", async () => {
     const { OcrConsumer, db, repository, job } = await fixture();
     const extractor = { extract: vi.fn(async () => { throw Object.assign(new Error("OCR_TIMEOUT"), { retryable: true }); }) };
-    const message = new FakeMessage(job, 1);
+    const message = new FakeMessage(job, 2);
 
-    await expect(consumer(OcrConsumer, repository, extractor).consume(message)).resolves.toEqual({ outcome: "retry", delaySeconds: 1 });
+    await expect(consumer(OcrConsumer, repository, extractor).consume(message)).resolves.toEqual({ outcome: "retry", delaySeconds: 2 });
 
     expect(message.retry).not.toHaveBeenCalled();
     expect(message.ack).not.toHaveBeenCalled();
     expect(await db.prepare("SELECT status, last_error_code FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first())
       .toEqual({ status: "pending", last_error_code: "OCR_TIMEOUT" });
+
+    const reclaimer = new FakeMessage(job, 2);
+    const recovered = { extract: vi.fn(async () => "# Reclaimed") };
+    await expect(consumer(OcrConsumer, repository, recovered).consume(reclaimer)).resolves.toEqual({ outcome: "ack" });
+    expect(reclaimer.ack).toHaveBeenCalledOnce();
+    expect(await db.prepare("SELECT status FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first()).toEqual({ status: "completed" });
+  });
+
+  it("maps unknown extractor details to the generic persisted OCR error", async () => {
+    const { OcrConsumer, db, repository, job } = await fixture();
+    const extractor = { extract: vi.fn(async () => { throw Object.assign(new Error("INTERNAL_PROVIDER_SECRET"), { code: "INTERNAL_PROVIDER_SECRET" }); }) };
+    const message = new FakeMessage(job);
+
+    await expect(consumer(OcrConsumer, repository, extractor).consume(message)).resolves.toEqual({ outcome: "ack" });
+
+    expect(message.ack).toHaveBeenCalledOnce();
+    expect(await db.prepare("SELECT status, last_error_code FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first())
+      .toEqual({ status: "failed", last_error_code: "OCR_EXTRACTION_FAILED" });
   });
 
   it("acks terminal failures and dead-letters an exhausted retryable delivery", async () => {
@@ -143,5 +164,64 @@ describe("OcrConsumer outcomes", () => {
     expect(duplicate.ack).toHaveBeenCalledOnce();
     expect(extractor.extract).toHaveBeenCalledOnce();
     expect(await db.prepare("SELECT status FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first()).toEqual({ status: "completed" });
+  });
+
+  it("isolates safe ack and retry outcomes in the same real-D1 batch", async () => {
+    const { OcrConsumer, db, repository, job } = await fixture();
+    const extractor = { extract: vi.fn(async () => { throw Object.assign(new Error("OCR_TIMEOUT"), { retryable: true }); }) };
+    const invalid = new FakeMessage(null);
+    const retryable = new FakeMessage(job);
+
+    await expect(consumer(OcrConsumer, repository, extractor).consumeBatch([invalid, retryable]))
+      .resolves.toEqual([{ outcome: "ack" }, { outcome: "retry", delaySeconds: 1 }]);
+
+    expect(invalid.ack).toHaveBeenCalledOnce();
+    expect(retryable.ack).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT status, last_error_code FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first())
+      .toEqual({ status: "pending", last_error_code: "OCR_TIMEOUT" });
+  });
+
+  it("isolates claim and persistence exceptions from a successful batch peer", async () => {
+    const { OcrConsumer } = await fixture();
+    const deadline = "2026-08-21T00:10:00.000Z";
+    const queueJob = (jobId: string): QueueJob => ({
+      job_id: jobId, kind: "ocr", idempotency_key: `ocr:${jobId}`, attempt: 1, deadline,
+      payload: { workspace_id: "ws-1", attachment_id: `${jobId}-attachment`, source_revision: 1 },
+    });
+    const repository = {
+      claimOcrJob: async (job: QueueJob) => {
+        if (job.job_id === "claim-throws") throw new Error("D1_UNAVAILABLE");
+        return {
+          id: job.job_id, workspace_id: "ws-1", attachment_id: job.payload.attachment_id,
+          attempt_count: 1, deadline, object_key: job.job_id, filename: "scan.pdf", mime_type: "application/pdf", size_bytes: 5,
+        };
+      },
+      completeOcrJob: async (_workspaceId: string, jobId: string) => {
+        if (jobId === "persist-throws") throw new Error("D1_WRITE_FAILED");
+        return true;
+      },
+      retryOcrJob: async () => { throw new Error("D1_RETRY_WRITE_FAILED"); },
+      failOcrJob: async () => { throw new Error("D1_FAILURE_WRITE_FAILED"); },
+    };
+    const extractor = {
+      extract: async (input: { objectKey: string }) => {
+        if (input.objectKey === "persist-throws") throw Object.assign(new Error("OCR_TIMEOUT"), { retryable: true });
+        return "# OCR";
+      },
+    };
+    const claimFailure = new FakeMessage(queueJob("claim-throws"));
+    const persistenceFailure = new FakeMessage(queueJob("persist-throws"));
+    const success = new FakeMessage(queueJob("success"));
+
+    await expect(consumer(OcrConsumer, repository, extractor as any).consumeBatch([claimFailure, persistenceFailure, success]))
+      .resolves.toEqual([
+        { outcome: "retry", delaySeconds: 1 },
+        { outcome: "retry", delaySeconds: 1 },
+        { outcome: "ack" },
+      ]);
+
+    expect(success.ack).toHaveBeenCalledOnce();
+    expect(claimFailure.ack).not.toHaveBeenCalled();
+    expect(persistenceFailure.ack).not.toHaveBeenCalled();
   });
 });

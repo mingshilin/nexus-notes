@@ -30,7 +30,7 @@ interface LegacyOcrExtractor {
 }
 
 export interface OcrQueueMessage {
-  body: QueueJob;
+  body: unknown;
   attempts: number;
   ack(): void;
 }
@@ -39,17 +39,82 @@ export type OcrConsumerOutcome = { outcome: "ack" } | { outcome: "retry"; delayS
 
 const MAX_QUEUE_DELIVERY_ATTEMPTS = 3;
 const MAX_RETRY_DELAY_SECONDS = 60;
+const GENERIC_OCR_ERROR_CODE = "OCR_EXTRACTION_FAILED";
+const PERSISTED_OCR_ERROR_CODES = new Set([
+  "OCR_AI_FORMAT_ERROR",
+  "OCR_AI_INVALID_RESPONSE",
+  "OCR_AI_REQUEST_FAILED",
+  "OCR_AI_UNAVAILABLE",
+  "OCR_ATTEMPTS_EXHAUSTED",
+  "OCR_CANCELLED",
+  "OCR_DEADLINE_EXCEEDED",
+  "OCR_EMPTY_RESULT",
+  "OCR_FILE_NOT_FOUND",
+  "OCR_INPUT_TOO_LARGE",
+  "OCR_OBJECT_NOT_FOUND",
+  "OCR_OBJECT_READ_FAILED",
+  "OCR_OUTPUT_TOO_LARGE",
+  "OCR_SOURCE_STALE",
+  "OCR_TEXT_DECODE_FAILED",
+  "OCR_TIMEOUT",
+  GENERIC_OCR_ERROR_CODE,
+]);
+
+interface SafeMessage {
+  body: unknown;
+  attempts: number;
+  ack(): void;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function safeAck(message: SafeMessage) {
+  try {
+    message.ack();
+  } catch {
+    // An acknowledgement failure must not poison unrelated batch messages.
+  }
+}
+
+function attemptsFrom(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 1;
+}
+
+function toSafeMessage(input: unknown): SafeMessage {
+  if (isRecord(input) && "body" in input) {
+    const acknowledge = input.ack;
+    return {
+      body: input.body,
+      attempts: attemptsFrom(input.attempts),
+      ack: typeof acknowledge === "function" ? () => acknowledge() : () => undefined,
+    };
+  }
+  return {
+    body: input,
+    attempts: attemptsFrom(isRecord(input) ? input.attempt : undefined),
+    ack: () => undefined,
+  };
+}
+
+function isOcrJob(value: unknown): value is QueueJob {
+  return isRecord(value) && value.kind === "ocr" && isRecord(value.payload)
+    && typeof value.payload.workspace_id === "string" && typeof value.payload.attachment_id === "string";
+}
 
 function errorCode(error: unknown) {
-  if (error && typeof error === "object" && "code" in error && typeof error.code === "string" && /^[A-Z0-9_]+$/.test(error.code)) {
-    return error.code;
+  const candidate = isRecord(error) && typeof error.code === "string"
+    ? error.code
+    : error instanceof Error ? error.message : undefined;
+  if (candidate && PERSISTED_OCR_ERROR_CODES.has(candidate)) {
+    return candidate;
   }
-  if (error instanceof Error && /^[A-Z0-9_]+$/.test(error.message)) return error.message;
-  return "OCR_EXTRACTION_FAILED";
+  return GENERIC_OCR_ERROR_CODE;
 }
 
 function isRetryable(error: unknown) {
-  return Boolean(error && typeof error === "object" && "retryable" in error && error.retryable === true);
+  return isRecord(error) && error.retryable === true;
 }
 
 function retryDelaySeconds(attempts: number) {
@@ -98,20 +163,30 @@ export class OcrConsumer {
 
   async consume(message: OcrQueueMessage): Promise<OcrConsumerOutcome>;
   async consume(job: QueueJob): Promise<OcrConsumerOutcome>;
-  async consume(messageOrJob: OcrQueueMessage | QueueJob): Promise<OcrConsumerOutcome> {
-    const message: OcrQueueMessage = "body" in messageOrJob
-      ? messageOrJob
-      : { body: messageOrJob, attempts: messageOrJob.attempt, ack: () => undefined };
+  async consume(message: unknown): Promise<OcrConsumerOutcome>;
+  async consume(messageOrJob: unknown): Promise<OcrConsumerOutcome> {
+    const message = toSafeMessage(messageOrJob);
+    try {
+      return await this.consumeMessage(message);
+    } catch {
+      if (message.attempts < MAX_QUEUE_DELIVERY_ATTEMPTS) {
+        return { outcome: "retry", delaySeconds: retryDelaySeconds(message.attempts) };
+      }
+      safeAck(message);
+      return { outcome: "ack" };
+    }
+  }
+
+  private async consumeMessage(message: SafeMessage): Promise<OcrConsumerOutcome> {
     const job = message.body;
-    if (job.kind !== "ocr" || !job.payload || typeof job.payload !== "object"
-      || typeof job.payload.workspace_id !== "string" || typeof job.payload.attachment_id !== "string") {
-      message.ack();
+    if (!isOcrJob(job)) {
+      safeAck(message);
       return { outcome: "ack" };
     }
     const now = this.clock().toISOString();
     const claimed = await this.repository.claimOcrJob(job, now);
     if (!claimed) {
-      message.ack();
+      safeAck(message);
       return { outcome: "ack" };
     }
     try {
@@ -127,16 +202,16 @@ export class OcrConsumer {
       if (completed === false) {
         await this.repository.failOcrJob(claimed.workspace_id, claimed.id, "OCR_SOURCE_STALE", this.clock().toISOString());
       }
-      message.ack();
+      safeAck(message);
       return { outcome: "ack" };
     } catch (error) {
       const code = errorCode(error);
-      const attempts = Math.max(1, Math.floor(message.attempts));
+      const attempts = message.attempts;
       const beforeDeadline = Date.parse(claimed.deadline) > this.clock().getTime();
       if (isRetryable(error) && attempts < MAX_QUEUE_DELIVERY_ATTEMPTS && beforeDeadline) {
         const persisted = await this.repository.retryOcrJob(claimed.workspace_id, claimed.id, code, this.clock().toISOString());
         if (persisted) return { outcome: "retry", delaySeconds: retryDelaySeconds(attempts) };
-        message.ack();
+        safeAck(message);
         return { outcome: "ack" };
       }
       const exhausted = isRetryable(error) && attempts >= MAX_QUEUE_DELIVERY_ATTEMPTS;
@@ -147,12 +222,12 @@ export class OcrConsumer {
         this.clock().toISOString(),
         { deadLetter: exhausted },
       );
-      message.ack();
+      safeAck(message);
       return { outcome: "ack" };
     }
   }
 
-  async consumeBatch(messages: readonly OcrQueueMessage[]) {
+  async consumeBatch(messages: readonly unknown[]) {
     return Promise.all(messages.map((message) => this.consume(message)));
   }
 }
