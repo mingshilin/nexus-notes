@@ -63,4 +63,13 @@ describe("database property value normalization", () => {
       expect(() => normalizeDatabaseValues(properties, values, { writablePropertyIds: writable })).toThrow(expect.objectContaining({ code }));
     }
   });
+
+  it("accepts calendar dates but rejects unsupported date-time values", async () => {
+    const { normalizeDatabaseValues } = await loadDomain() as { normalizeDatabaseValues: Function };
+    const properties = [property("due", "date")];
+
+    expect(normalizeDatabaseValues(properties, { due: "2026-08-21" })).toEqual({ due: "2026-08-21" });
+    expect(() => normalizeDatabaseValues(properties, { due: "2026-08-21T12:30:00.000Z" }))
+      .toThrow(expect.objectContaining({ code: "INVALID_FIELD_VALUE", propertyId: "due" }));
+  });
 });

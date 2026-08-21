@@ -21,6 +21,7 @@ export function recordSearchOptions(request: Request) {
   const requested = Number(params.get("limit") ?? 50);
   return {
     query: params.get("q")?.trim() ?? "",
+    cursor: params.get("cursor"),
     limit: Number.isInteger(requested) && requested > 0 ? Math.min(requested, 100) : 50,
   };
 }

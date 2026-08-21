@@ -83,10 +83,11 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
     this.assertViewFields(config, fields.properties);
     const now = this.now();
     const updated = { ...view, name: input.name ?? view.name, config, position: input.position ?? view.position, revision: view.revision + 1, updated_at: now };
-    await this.db.prepare(
+    const result = await this.db.prepare(
       `UPDATE database_views SET name = ?, config_json = ?, position = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
     ).bind(updated.name, JSON.stringify(config), updated.position, now, context.workspaceId, databaseId, viewId, input.base_revision).run();
+    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     return updated;
   }
 
@@ -94,9 +95,10 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
     await this.access.assert(context, databaseId, "write");
     const view = await this.view(context.workspaceId, databaseId, viewId);
     assertRevision(view.revision, input.base_revision);
-    await this.db.prepare(
+    const result = await this.db.prepare(
       "DELETE FROM database_views WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?",
     ).bind(context.workspaceId, databaseId, viewId, input.base_revision).run();
+    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     return { id: viewId };
   }
 
@@ -124,10 +126,11 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
       : this.normalize(fields.properties, input.default_values, fields.writable);
     const now = this.now();
     const updated = { ...template, name: input.name ?? template.name, default_values: defaults, revision: template.revision + 1, updated_at: now };
-    await this.db.prepare(
+    const result = await this.db.prepare(
       `UPDATE database_templates SET name = ?, default_values_json = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
     ).bind(updated.name, JSON.stringify(defaults), now, context.workspaceId, databaseId, templateId, input.base_revision).run();
+    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     return updated;
   }
 
@@ -135,9 +138,10 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
     await this.access.assert(context, databaseId, "write");
     const template = await this.template(context.workspaceId, databaseId, templateId);
     assertRevision(template.revision, input.base_revision);
-    await this.db.prepare(
+    const result = await this.db.prepare(
       "DELETE FROM database_templates WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?",
     ).bind(context.workspaceId, databaseId, templateId, input.base_revision).run();
+    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     return { id: templateId };
   }
 

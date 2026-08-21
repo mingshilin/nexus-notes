@@ -104,11 +104,12 @@ export class DatabaseClient {
     );
   }
 
-  searchRecords(databaseId: string, query: string, options: { limit?: number; signal?: AbortSignal } = {}) {
+  searchRecords(databaseId: string, query: string, options: { cursor?: string; limit?: number; signal?: AbortSignal } = {}) {
     const params = new URLSearchParams({ q: query, limit: String(options.limit ?? 50) });
+    if (options.cursor) params.set("cursor", options.cursor);
     return this.query<{ items: DatabaseRecord[]; next_cursor: string | null }>(
       `${this.databasePath(databaseId)}/records/search?${params}`,
-      `database-search:${this.workspaceId}:${databaseId}:${query}:${options.limit ?? 50}`,
+      `database-search:${this.workspaceId}:${databaseId}:${query}:${options.cursor ?? "first"}:${options.limit ?? 50}`,
       options.signal,
     );
   }

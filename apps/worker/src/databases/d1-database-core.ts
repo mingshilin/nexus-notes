@@ -18,6 +18,30 @@ import {
   toDatabase,
 } from "./database-model";
 
+function databaseRevisionGuard(
+  db: D1Database,
+  context: WorkspaceContext,
+  databaseId: string,
+  expectedRevision: number,
+  state: "expected" | "deleted",
+) {
+  const condition = state === "expected"
+    ? "NOT EXISTS (SELECT 1 FROM databases WHERE workspace_id = ? AND id = ? AND revision = ?)"
+    : "EXISTS (SELECT 1 FROM databases WHERE workspace_id = ? AND id = ?)";
+  const bindings = state === "expected"
+    ? [context.workspaceId, databaseId, expectedRevision]
+    : [context.workspaceId, databaseId];
+  return db.prepare(
+    `INSERT INTO workspaces (id, owner_user_id, slug, name, revision, created_at, updated_at)
+     SELECT id, owner_user_id, slug, name, revision, created_at, updated_at
+     FROM workspaces WHERE id = ? AND ${condition}`,
+  ).bind(context.workspaceId, ...bindings);
+}
+
+function isDatabaseRevisionGuardError(error: unknown) {
+  return error instanceof Error && error.message.includes("UNIQUE constraint failed:");
+}
+
 export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
   async listDatabases(context: WorkspaceContext) {
     const result = await this.db.prepare(
@@ -47,10 +71,11 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
     const name = input.name ?? database.name;
     const description = input.description ?? database.description;
     const now = this.now();
-    await this.db.prepare(
+    const result = await this.db.prepare(
       `UPDATE databases SET name = ?, description = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND id = ? AND revision = ?`,
     ).bind(name, description, now, context.workspaceId, databaseId, input.base_revision).run();
+    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     return { ...database, name, description, revision: database.revision + 1, updated_at: now };
   }
 
@@ -58,7 +83,9 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
     const { database } = await this.access.assert(context, databaseId, "manage");
     assertRevision(database.revision, input.base_revision);
     const now = this.now();
-    await this.db.batch([
+    const statements: D1PreparedStatement[] = [databaseRevisionGuard(
+      this.db, context, databaseId, input.base_revision, "expected",
+    ),
       this.db.prepare(
         `UPDATE notes SET database_id = NULL, revision = revision + 1, updated_at = ?
          WHERE workspace_id = ? AND database_id = ?`,
@@ -76,12 +103,19 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
       this.db.prepare(
         "DELETE FROM databases WHERE workspace_id = ? AND id = ? AND revision = ?",
       ).bind(context.workspaceId, databaseId, input.base_revision),
-    ]);
+      databaseRevisionGuard(this.db, context, databaseId, input.base_revision, "deleted"),
+    ];
+    try {
+      await this.db.batch(statements);
+    } catch (error) {
+      if (!isDatabaseRevisionGuardError(error)) throw error;
+      throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    }
     return { id: databaseId };
   }
 
   async createProperty(context: WorkspaceContext, databaseId: string, input: CreateDatabasePropertyInput) {
-    await this.access.assert(context, databaseId, "write");
+    await this.access.assert(context, databaseId, "manage");
     const candidate = {
       ...input, config: input.config ?? {}, position: input.position ?? 0,
       hidden: input.hidden ?? false, read_only: input.read_only ?? false,
@@ -89,6 +123,7 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
     if (!CreateDatabasePropertyInputSchema.safeParse(candidate).success) {
       throw new DatabaseRepositoryError("INVALID_PROPERTY", "Database property is invalid", 400);
     }
+    await this.assertRelationTarget(context, candidate);
     const now = this.now();
     const property: DatabaseProperty = {
       id: this.id(), workspace_id: context.workspaceId, database_id: databaseId,
@@ -108,8 +143,11 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
   }
 
   async updateProperty(context: WorkspaceContext, databaseId: string, propertyId: string, input: UpdateDatabasePropertyInput) {
-    const fields = await this.access.fields(context, databaseId, "write");
+    const fields = await this.access.fields(context, databaseId, "manage");
     const property = this.access.findProperty(fields.properties, propertyId);
+    if (!fields.writable.has(property.id)) {
+      throw new DatabaseRepositoryError("FIELD_WRITE_DENIED", "Field write denied", 403, { property_id: property.id });
+    }
     assertRevision(property.revision, input.base_revision);
     const candidate = {
       name: input.name ?? property.name, type: property.type, config: input.config ?? property.config,
@@ -119,8 +157,9 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
     if (!CreateDatabasePropertyInputSchema.safeParse(candidate).success) {
       throw new DatabaseRepositoryError("INVALID_PROPERTY", "Database property is invalid", 400);
     }
+    await this.assertRelationTarget(context, candidate);
     const now = this.now();
-    await this.db.prepare(
+    const result = await this.db.prepare(
       `UPDATE database_properties SET name = ?, config_json = ?, position = ?, is_hidden = ?, is_read_only = ?,
        revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
@@ -128,16 +167,33 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
       candidate.name, JSON.stringify(candidate.config), candidate.position, Number(candidate.hidden), Number(candidate.read_only),
       now, context.workspaceId, databaseId, propertyId, input.base_revision,
     ).run();
+    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     return { ...property, ...candidate, revision: property.revision + 1, updated_at: now };
   }
 
   async deleteProperty(context: WorkspaceContext, databaseId: string, propertyId: string, input: { base_revision: number }) {
-    const fields = await this.access.fields(context, databaseId, "write");
+    const fields = await this.access.fields(context, databaseId, "manage");
     const property = this.access.findProperty(fields.properties, propertyId);
+    if (!fields.writable.has(property.id)) {
+      throw new DatabaseRepositoryError("FIELD_WRITE_DENIED", "Field write denied", 403, { property_id: property.id });
+    }
     assertRevision(property.revision, input.base_revision);
-    await this.db.prepare(
+    const result = await this.db.prepare(
       "DELETE FROM database_properties WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?",
     ).bind(context.workspaceId, databaseId, propertyId, input.base_revision).run();
+    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     return { id: propertyId };
+  }
+
+  private async assertRelationTarget(
+    context: WorkspaceContext,
+    property: Pick<DatabaseProperty, "type" | "config">,
+  ) {
+    if (property.type !== "relation") return;
+    const targetId = (property.config as Record<string, unknown>).target_database_id;
+    const target = typeof targetId === "string"
+      ? await this.db.prepare("SELECT id FROM databases WHERE workspace_id = ? AND id = ?").bind(context.workspaceId, targetId).first()
+      : null;
+    if (!target) throw new DatabaseRepositoryError("INVALID_RELATION_TARGET", "Relation target is not in this workspace", 400);
   }
 }

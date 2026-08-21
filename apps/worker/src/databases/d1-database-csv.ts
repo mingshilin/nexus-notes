@@ -37,6 +37,26 @@ function displayCsvValue(value: unknown) {
   return String(value);
 }
 
+const JSON_BATCH_BYTES = 700_000;
+
+function splitJsonBatches<T>(items: readonly T[]) {
+  const batches: T[][] = [];
+  let current: T[] = [];
+  let bytes = 2;
+  for (const item of items) {
+    const itemBytes = new TextEncoder().encode(JSON.stringify(item)).byteLength + 1;
+    if (current.length > 0 && bytes + itemBytes > JSON_BATCH_BYTES) {
+      batches.push(current);
+      current = [];
+      bytes = 2;
+    }
+    current.push(item);
+    bytes += itemBytes;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
 export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
   async importCsv(context: WorkspaceContext, databaseId: string, input: CsvImportInput) {
     const fields = await this.access.fields(context, databaseId, "write");
@@ -57,18 +77,49 @@ export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
     if (new Set(mapped.map((property) => property.id)).size !== mapped.length) {
       throw new DatabaseRepositoryError("CSV_DUPLICATE_PROPERTY", "CSV headers map to duplicate properties", 400);
     }
-    const normalizedRows = parsed.rows.map((row) => this.normalize(
-      fields.properties,
-      Object.fromEntries(mapped.map((property, index) => [property.id, coerceCsvValue(property, row[index] ?? "")])),
-      fields.writable,
-    ));
+    const normalizedRows: Record<string, unknown>[] = [];
+    for (const row of parsed.rows) {
+      const values = this.normalize(
+        fields.properties,
+        Object.fromEntries(mapped.map((property, index) => [property.id, coerceCsvValue(property, row[index] ?? "")])),
+        fields.writable,
+      );
+      await this.validateReferences(context, fields.properties, values);
+      normalizedRows.push(values);
+    }
     const now = this.now();
     const records = normalizedRows.map((values) => ({
       id: this.id(), workspace_id: context.workspaceId, database_id: databaseId, note_id: null,
       values, created_by: context.userId, updated_by: context.userId,
       revision: 1, created_at: now, updated_at: now,
     } satisfies DatabaseRecord));
-    await this.db.batch(records.flatMap((record) => this.createRecordStatements(record)));
+    const recordRows = records.map((record) => ({
+      id: record.id, workspace_id: record.workspace_id, database_id: record.database_id, note_id: record.note_id,
+      created_by: record.created_by, updated_by: record.updated_by, created_at: record.created_at, updated_at: record.updated_at,
+    }));
+    const valueRows = records.flatMap((record) => Object.entries(record.values).map(([propertyId, value]) => ({
+      id: this.id(), workspace_id: record.workspace_id, database_id: record.database_id, record_id: record.id,
+      property_id: propertyId, value_json: JSON.stringify(value), updated_at: record.updated_at,
+    })));
+    const statements: D1PreparedStatement[] = [
+      ...splitJsonBatches(recordRows).map((rows) => this.db.prepare(
+        `INSERT INTO database_records
+         (id, workspace_id, database_id, note_id, created_by, updated_by, revision, created_at, updated_at)
+         SELECT json_extract(value, '$.id'), json_extract(value, '$.workspace_id'), json_extract(value, '$.database_id'),
+           json_extract(value, '$.note_id'), json_extract(value, '$.created_by'), json_extract(value, '$.updated_by'),
+           1, json_extract(value, '$.created_at'), json_extract(value, '$.updated_at')
+         FROM json_each(?)`,
+      ).bind(JSON.stringify(rows))),
+      ...splitJsonBatches(valueRows).map((rows) => this.db.prepare(
+        `INSERT INTO record_values
+         (id, workspace_id, database_id, record_id, property_id, value_json, revision, updated_at)
+         SELECT json_extract(value, '$.id'), json_extract(value, '$.workspace_id'), json_extract(value, '$.database_id'),
+           json_extract(value, '$.record_id'), json_extract(value, '$.property_id'), json_extract(value, '$.value_json'),
+           1, json_extract(value, '$.updated_at')
+         FROM json_each(?)`,
+      ).bind(JSON.stringify(rows))),
+    ];
+    if (statements.length > 0) await this.db.batch(statements);
     return { items: records, imported_count: records.length };
   }
 

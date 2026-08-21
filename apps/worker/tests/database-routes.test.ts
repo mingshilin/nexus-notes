@@ -90,7 +90,7 @@ describe("v2 structured database routes", () => {
 
     expect(responses.every((response: Response) => response.status >= 200 && response.status < 300)).toBe(true);
     expect(repository.listRecords).toHaveBeenCalledWith(workspace, "db-1", { cursor: "next", limit: 25 });
-    expect(repository.searchRecords).toHaveBeenCalledWith(workspace, "db-1", { query: "alpha", limit: 20 });
+    expect(repository.searchRecords).toHaveBeenCalledWith(workspace, "db-1", { query: "alpha", cursor: null, limit: 20 });
     expect(repository.createComment).toHaveBeenCalledWith(workspace, "db-1", { record_id: "record-1", body: "Review" });
   });
 

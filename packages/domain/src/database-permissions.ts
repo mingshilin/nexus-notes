@@ -11,14 +11,13 @@ export function resolveFieldAccess(
   databaseRole: DatabaseAccessRole,
   permission?: { can_read: boolean; can_write: boolean },
 ) {
-  if (databaseRole === "owner") return { canRead: true, canWrite: true };
   const defaults = databaseRole === "editor"
     ? { canRead: true, canWrite: true }
-    : { canRead: true, canWrite: false };
+    : databaseRole === "owner" ? { canRead: true, canWrite: true } : { canRead: true, canWrite: false };
   if (!permission) return defaults;
   return {
     canRead: permission.can_read,
-    canWrite: permission.can_read && permission.can_write && databaseRole === "editor",
+    canWrite: permission.can_read && permission.can_write && databaseRole !== "viewer",
   };
 }
 

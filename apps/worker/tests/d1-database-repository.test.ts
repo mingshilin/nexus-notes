@@ -14,11 +14,11 @@ const now = "2026-08-21T00:00:00.000Z";
 let dispose: (() => Promise<void>) | undefined;
 let db: D1Database;
 
-async function createRepository() {
+async function createRepository(repositoryDb: D1Database = db) {
   const worker = await import("../src/index") as Record<string, any>;
   expect(worker.D1DatabaseRepository).toBeTypeOf("function");
   let nextId = 0;
-  return new worker.D1DatabaseRepository(db, {
+  return new worker.D1DatabaseRepository(repositoryDb, {
     createId: () => `generated-${String(++nextId).padStart(4, "0")}`,
     clock: () => new Date(now),
   });
@@ -107,6 +107,84 @@ describe("D1 structured database repository", () => {
     expect(await repository.listComments(owner, database.id, record.id)).toEqual([]);
   });
 
+  it("requires database manage permission for property schema mutations", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const editor = context("user-2", "editor");
+    const database = await repository.createDatabase(owner, { name: "Permissions", description: "" });
+    const property = await repository.createProperty(owner, database.id, { name: "Name", type: "text", config: {}, position: 0 });
+
+    await expect(repository.updateProperty(editor, database.id, property.id, { base_revision: 1, hidden: true }))
+      .rejects.toMatchObject({ code: "DATABASE_MANAGE_DENIED", status: 403 });
+    await expect(repository.deleteProperty(editor, database.id, property.id, { base_revision: 1 }))
+      .rejects.toMatchObject({ code: "DATABASE_MANAGE_DENIED", status: 403 });
+  });
+
+  it("does not let a managed subject mutate a field without field write authorization", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const managed = context("user-2", "editor");
+    const database = await repository.createDatabase(owner, { name: "Field permissions", description: "" });
+    const property = await repository.createProperty(owner, database.id, { name: "Name", type: "text", config: {}, position: 0 });
+    await repository.setDatabasePermission(owner, database.id, {
+      subject_type: "user", subject_id: managed.userId, role: "owner", base_revision: 1,
+    });
+    await repository.setFieldPermission(owner, database.id, property.id, {
+      subject_type: "user", subject_id: managed.userId, can_read: true, can_write: false, base_revision: 1,
+    });
+
+    await expect(repository.updateProperty(managed, database.id, property.id, { base_revision: 1, hidden: true }))
+      .rejects.toMatchObject({ code: "FIELD_WRITE_DENIED", status: 403 });
+    await expect(repository.deleteProperty(managed, database.id, property.id, { base_revision: 1 }))
+      .rejects.toMatchObject({ code: "FIELD_WRITE_DENIED", status: 403 });
+  });
+
+  it("uses revision CAS for database and field permission upserts", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Permission CAS", description: "" });
+    const property = await repository.createProperty(owner, database.id, { name: "Name", type: "text", config: {}, position: 0 });
+
+    await repository.setDatabasePermission(owner, database.id, {
+      subject_type: "user", subject_id: "user-2", role: "viewer", base_revision: 1,
+    });
+    const databaseWrites = await Promise.allSettled([
+      repository.setDatabasePermission(owner, database.id, { subject_type: "user", subject_id: "user-2", role: "editor", base_revision: 1 }),
+      repository.setDatabasePermission(owner, database.id, { subject_type: "user", subject_id: "user-2", role: "owner", base_revision: 1 }),
+    ]);
+    expect(databaseWrites.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(databaseWrites.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(databaseWrites.find((result) => result.status === "rejected")).toMatchObject({ reason: { code: "REVISION_CONFLICT" } });
+
+    await repository.setFieldPermission(owner, database.id, property.id, {
+      subject_type: "user", subject_id: "user-2", can_read: true, can_write: false, base_revision: 1,
+    });
+    const fieldWrites = await Promise.allSettled([
+      repository.setFieldPermission(owner, database.id, property.id, { subject_type: "user", subject_id: "user-2", can_read: true, can_write: true, base_revision: 1 }),
+      repository.setFieldPermission(owner, database.id, property.id, { subject_type: "user", subject_id: "user-2", can_read: false, can_write: false, base_revision: 1 }),
+    ]);
+    expect(fieldWrites.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(fieldWrites.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(fieldWrites.find((result) => result.status === "rejected")).toMatchObject({ reason: { code: "REVISION_CONFLICT" } });
+  });
+
+  it("validates member membership and relation targets within the workspace", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "References", description: "" });
+    const target = await repository.createDatabase(owner, { name: "Target", description: "" });
+    const member = await repository.createProperty(owner, database.id, { name: "Assignee", type: "member", config: {}, position: 0 });
+    const relation = await repository.createProperty(owner, database.id, { name: "Related", type: "relation", config: { target_database_id: target.id }, position: 1 });
+    const targetRecord = await repository.createRecord(owner, target.id, { note_id: null, values: {} });
+
+    await expect(repository.createRecord(owner, database.id, { note_id: null, values: { [member.id]: "missing-user" } }))
+      .rejects.toMatchObject({ code: "INVALID_MEMBER_REFERENCE", status: 400 });
+    await expect(repository.createRecord(owner, database.id, { note_id: null, values: { [relation.id]: "missing-record" } }))
+      .rejects.toMatchObject({ code: "INVALID_RELATION_REFERENCE", status: 400 });
+    await expect(repository.createRecord(owner, database.id, { note_id: null, values: { [relation.id]: targetRecord.id } }))
+      .resolves.toMatchObject({ values: { [relation.id]: targetRecord.id } });
+  });
+
   it("detaches notes before database deletion and preserves note content", async () => {
     const repository = await createRepository();
     const owner = context("user-1");
@@ -124,6 +202,33 @@ describe("D1 structured database repository", () => {
       database_id: null, title: "Keep", content: "Preserved body", revision: 2,
     });
     expect(await db.prepare("SELECT COUNT(*) AS count FROM database_records WHERE database_id = ?").bind(database.id).first()).toEqual({ count: 0 });
+  });
+
+  it("rolls back note and record detachments when the database delete conflicts in the transaction", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Conflict", description: "" });
+    await db.prepare(
+      `INSERT INTO notes
+       (id, workspace_id, database_id, created_by, updated_by, title, content, created_at, updated_at)
+       VALUES ('note-conflict', 'ws-1', ?, 'user-1', 'user-1', 'Keep', 'Preserved body', ?, ?)`,
+    ).bind(database.id, now, now).run();
+    await repository.createRecord(owner, database.id, { note_id: "note-conflict", values: {} });
+    await db.prepare(
+      `CREATE TRIGGER database_delete_conflict BEFORE DELETE ON databases
+       WHEN OLD.id = '${database.id}'
+       BEGIN
+         UPDATE databases SET revision = revision + 1 WHERE id = OLD.id;
+         SELECT RAISE(IGNORE);
+       END;`,
+    ).run();
+
+    await expect(repository.deleteDatabase(owner, database.id, { base_revision: 1 }))
+      .rejects.toMatchObject({ code: "REVISION_CONFLICT", status: 409 });
+    expect(await db.prepare("SELECT database_id, content, revision FROM notes WHERE id = 'note-conflict'").first()).toEqual({
+      database_id: database.id, content: "Preserved body", revision: 1,
+    });
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM database_records WHERE database_id = ?").bind(database.id).first()).toEqual({ count: 1 });
   });
 
   it("rolls back bulk, board, calendar, and template application when any record fails", async () => {
@@ -161,6 +266,41 @@ describe("D1 structured database repository", () => {
     await repository.calendarAssign(owner, database.id, { record_id: second.id, property_id: due.id, date: "2026-08-22", base_revision: 1 });
   });
 
+  it("rolls back stale concurrent record values when only one revision update wins", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Concurrent", description: "" });
+    const title = await repository.createProperty(owner, database.id, { name: "Title", type: "text", config: {}, position: 0 });
+    const record = await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "Initial" } });
+
+    const results = await Promise.allSettled([
+      repository.updateRecord(owner, database.id, record.id, { base_revision: 1, values: { [title.id]: "Winner A" } }),
+      repository.updateRecord(owner, database.id, record.id, { base_revision: 1, values: { [title.id]: "Winner B" } }),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect((await repository.getRecord(owner, database.id, record.id)).values[title.id]).toMatch(/^Winner [AB]$/u);
+    expect((await repository.getRecord(owner, database.id, record.id)).revision).toBe(2);
+  });
+
+  it("searches with deterministic keyset cursors", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Search", description: "" });
+    const title = await repository.createProperty(owner, database.id, { name: "Title", type: "text", config: {}, position: 0 });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "alpha one" } });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "alpha two" } });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "alpha three" } });
+
+    const first = await repository.searchRecords(owner, database.id, { query: "alpha", limit: 1, cursor: null } as any);
+    expect(first.items).toHaveLength(1);
+    expect(first.next_cursor).toBeTypeOf("string");
+    const second = await repository.searchRecords(owner, database.id, { query: "alpha", limit: 1, cursor: first.next_cursor } as any);
+    expect(second.items).toHaveLength(1);
+    expect(second.items[0]?.id).not.toBe(first.items[0]?.id);
+  });
+
   it("imports CSV atomically and exports only readable fields with formula escaping", async () => {
     const repository = await createRepository();
     const owner = context("user-1");
@@ -191,5 +331,46 @@ describe("D1 structured database repository", () => {
     expect(exported.csv).not.toContain("Secret");
     expect(exported.csv).not.toContain("hidden");
     expect(exported.csv).toContain("'=SUM(1,2)");
+  });
+
+  it("imports 500 many-column rows with bounded statements and rolls back invalid batches", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Large import", description: "" });
+    const properties = [];
+    for (let index = 0; index < 8; index += 1) {
+      properties.push(await repository.createProperty(owner, database.id, {
+        name: `Column ${index}`, type: index === 1 ? "number" : "text", config: {}, position: index,
+      }));
+    }
+    const header = properties.map((property: any) => property.name).join(",");
+    const rows = Array.from({ length: 500 }, (_, index) => properties.map((_: any, propertyIndex: number) => propertyIndex === 1 ? String(index) : `Row ${index}-${propertyIndex}`).join(","));
+    const csv = `${header}\r\n${rows.join("\r\n")}`;
+    let prepareCount = 0;
+    const countedDb = new Proxy(db as unknown as object, {
+      get(target, property, receiver) {
+        if (property === "prepare") {
+          return (...args: unknown[]) => {
+            prepareCount += 1;
+            return (target as D1Database).prepare.bind(target)(...args as [string]);
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as D1Database;
+    const countedRepository = await createRepository(countedDb);
+
+    await expect(countedRepository.importCsv(owner, database.id, {
+      csv, header_property_ids: Object.fromEntries(properties.map((property: any) => [property.name, property.id])),
+    })).resolves.toMatchObject({ imported_count: 500 });
+    expect(prepareCount).toBeLessThanOrEqual(12);
+
+    const invalidRows = rows.slice();
+    invalidRows[499] = invalidRows[499]!.replace(",499,", ",not-a-number,");
+    await expect(countedRepository.importCsv(owner, database.id, {
+      csv: `${header}\r\n${invalidRows.join("\r\n")}`,
+      header_property_ids: Object.fromEntries(properties.map((property: any) => [property.name, property.id])),
+    })).rejects.toMatchObject({ code: "INVALID_FIELD_VALUE" });
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM database_records WHERE database_id = ?").bind(database.id).first()).toEqual({ count: 500 });
   });
 });

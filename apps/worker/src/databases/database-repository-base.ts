@@ -73,6 +73,41 @@ export abstract class DatabaseRepositoryBase {
     }
   }
 
+  protected async validateReferences(
+    context: WorkspaceContext,
+    properties: readonly DatabaseProperty[],
+    values: Readonly<Record<string, unknown>>,
+  ) {
+    for (const property of properties) {
+      if (property.type !== "member" && property.type !== "relation") continue;
+      const value = values[property.id];
+      if (value === null || value === undefined) continue;
+      const ids = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+      if (ids.length === 0) continue;
+      if (property.type === "member") {
+        const members = await this.db.prepare(
+          `SELECT user_id FROM workspace_members WHERE workspace_id = ? AND user_id IN (${placeholders(ids.length)})`,
+        ).bind(context.workspaceId, ...ids).all<{ user_id: string }>();
+        if ((members.results ?? []).length !== ids.length) {
+          throw new DatabaseRepositoryError("INVALID_MEMBER_REFERENCE", "Member is not in this workspace", 400, { property_id: property.id });
+        }
+        continue;
+      }
+      const targetId = (property.config as Record<string, unknown>).target_database_id;
+      const target = typeof targetId === "string"
+        ? await this.db.prepare("SELECT id FROM databases WHERE workspace_id = ? AND id = ?").bind(context.workspaceId, targetId).first()
+        : null;
+      if (!target) throw new DatabaseRepositoryError("INVALID_RELATION_TARGET", "Relation target is not in this workspace", 400, { property_id: property.id });
+      const records = await this.db.prepare(
+        `SELECT id FROM database_records
+         WHERE workspace_id = ? AND database_id = ? AND deleted_at IS NULL AND id IN (${placeholders(ids.length)})`,
+      ).bind(context.workspaceId, targetId, ...ids).all<{ id: string }>();
+      if ((records.results ?? []).length !== ids.length) {
+        throw new DatabaseRepositoryError("INVALID_RELATION_REFERENCE", "Relation record is not in the target database", 400, { property_id: property.id });
+      }
+    }
+  }
+
   protected createRecordStatements(record: DatabaseRecord) {
     const statements: D1PreparedStatement[] = [this.db.prepare(
       `INSERT INTO database_records

@@ -70,6 +70,14 @@ describe("structured database contracts", () => {
     expect(pageSchema.safeParse({ items: [], next_cursor: "" }).success).toBe(false);
   });
 
+  it("does not advertise unsupported date-time configuration", async () => {
+    const contracts = await loadContracts();
+    const schema = contracts.CreateDatabasePropertyInputSchema as Schema;
+
+    expect(schema.safeParse({ name: "Due", type: "date", config: { include_time: true }, position: 0 }).success).toBe(false);
+    expect(schema.safeParse({ name: "Due", type: "date", config: {}, position: 0 }).success).toBe(true);
+  });
+
   it("exports strict CRUD, permission, atomic mutation, board, calendar, template, and CSV inputs", async () => {
     const contracts = await loadContracts();
     const fixtures: Array<[string, unknown, unknown]> = [

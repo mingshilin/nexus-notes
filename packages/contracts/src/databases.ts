@@ -39,7 +39,7 @@ const propertyConfigSchemas: Record<DatabasePropertyType, z.ZodType> = {
   checkbox: EmptyConfigSchema,
   select: z.object({ options: z.array(DatabaseSelectOptionSchema).max(100) }).strict(),
   multi_select: z.object({ options: z.array(DatabaseSelectOptionSchema).max(100) }).strict(),
-  date: z.object({ include_time: z.boolean().optional() }).strict(),
+  date: EmptyConfigSchema,
   url: EmptyConfigSchema,
   email: EmptyConfigSchema,
   member: z.object({ allow_multiple: z.boolean().optional() }).strict(),

@@ -58,10 +58,11 @@ export class D1DatabaseCommentRepository extends DatabaseRepositoryBase {
     assertRevision(comment.revision, input.base_revision);
     const now = this.now();
     const updated = { ...comment, body: input.body.trim(), revision: comment.revision + 1, updated_at: now };
-    await this.db.prepare(
+    const result = await this.db.prepare(
       `UPDATE comments SET body = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND id = ? AND revision = ?`,
     ).bind(updated.body, now, context.workspaceId, commentId, input.base_revision).run();
+    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     return updated;
   }
 
@@ -73,10 +74,11 @@ export class D1DatabaseCommentRepository extends DatabaseRepositoryBase {
     }
     assertRevision(comment.revision, input.base_revision);
     const now = this.now();
-    await this.db.prepare(
+    const result = await this.db.prepare(
       `UPDATE comments SET deleted_at = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND id = ? AND revision = ?`,
     ).bind(now, now, context.workspaceId, commentId, input.base_revision).run();
+    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     return { id: commentId };
   }
 

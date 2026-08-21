@@ -15,13 +15,13 @@ describe("DatabaseClient", () => {
     await client.listDatabases(signal);
     await client.getDatabase("db-1", signal);
     await client.listRecords("db-1", { cursor: "cursor-1", limit: 25, signal });
-    await client.searchRecords("db-1", "alpha beta", { limit: 20, signal });
+    await client.searchRecords("db-1", "alpha beta", { cursor: "search-next", limit: 20, signal });
 
     expect(api.request.mock.calls.map(([options]) => options.path)).toEqual([
       "/api/v2/databases",
       "/api/v2/databases/db-1",
       "/api/v2/databases/db-1/records?cursor=cursor-1&limit=25",
-      "/api/v2/databases/db-1/records/search?q=alpha+beta&limit=20",
+      "/api/v2/databases/db-1/records/search?q=alpha+beta&limit=20&cursor=search-next",
     ]);
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
     expect(api.request.mock.calls.every(([options]) => options.policy.dedupeKey && options.policy.signal === signal)).toBe(true);

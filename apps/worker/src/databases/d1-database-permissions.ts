@@ -20,14 +20,16 @@ export class D1DatabasePermissionRepository extends DatabaseRepositoryBase {
     else assertRevision(1, input.base_revision);
     const now = this.now();
     const id = current?.id ?? this.id();
-    await this.db.prepare(
+    const result = await this.db.prepare(
       `INSERT INTO database_permissions
        (id, workspace_id, database_id, subject_type, subject_id, can_read, can_write, revision, updated_at, access_level)
        VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?, ?)
        ON CONFLICT(database_id, subject_type, subject_id) DO UPDATE SET
          can_read = 1, can_write = excluded.can_write, access_level = excluded.access_level,
-         revision = database_permissions.revision + 1, updated_at = excluded.updated_at`,
-    ).bind(id, context.workspaceId, databaseId, input.subject_type, input.subject_id, Number(input.role !== "viewer"), now, input.role).run();
+         revision = database_permissions.revision + 1, updated_at = excluded.updated_at
+       WHERE database_permissions.revision = ?`,
+    ).bind(id, context.workspaceId, databaseId, input.subject_type, input.subject_id, Number(input.role !== "viewer"), now, input.role, input.base_revision).run();
+    if (result.meta.changes !== 1) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     const permission: DatabasePermission = {
       id, workspace_id: context.workspaceId, database_id: databaseId,
       subject_type: input.subject_type, subject_id: input.subject_id, role: input.role,
@@ -48,14 +50,16 @@ export class D1DatabasePermissionRepository extends DatabaseRepositoryBase {
     if (input.can_write && !input.can_read) throw new DatabaseRepositoryError("INVALID_FIELD_PERMISSION", "Writable fields must be readable", 400);
     const now = this.now();
     const id = current?.id ?? this.id();
-    await this.db.prepare(
+    const result = await this.db.prepare(
       `INSERT INTO field_permissions
        (id, workspace_id, database_id, property_id, subject_type, subject_id, can_read, can_write, revision, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
        ON CONFLICT(property_id, subject_type, subject_id) DO UPDATE SET
          can_read = excluded.can_read, can_write = excluded.can_write,
-         revision = field_permissions.revision + 1, updated_at = excluded.updated_at`,
-    ).bind(id, context.workspaceId, databaseId, propertyId, input.subject_type, input.subject_id, Number(input.can_read), Number(input.can_write), now).run();
+         revision = field_permissions.revision + 1, updated_at = excluded.updated_at
+       WHERE field_permissions.revision = ?`,
+    ).bind(id, context.workspaceId, databaseId, propertyId, input.subject_type, input.subject_id, Number(input.can_read), Number(input.can_write), now, input.base_revision).run();
+    if (result.meta.changes !== 1) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     const permission: FieldPermission = {
       id, workspace_id: context.workspaceId, database_id: databaseId, property_id: propertyId,
       subject_type: input.subject_type, subject_id: input.subject_id,
