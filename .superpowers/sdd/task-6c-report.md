@@ -847,3 +847,33 @@ This final B2.2b minor follow-up changes only native test fixtures and preview-c
 | `git diff --check` | PASS. |
 
 Commit: independent B2.2b minor commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C B2.2 Re-review: Typed Health Capability Fakes
+
+### Scope
+
+This correction changes only the Worker OCR health test and this report. No Worker runtime behavior, deployment, Web, legacy, Task 7, schema, secrets, or generated artifacts changed.
+
+### TDD / Type-driven RED to GREEN
+
+| Command | Result |
+| --- | --- |
+| `npx tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,WebWorker --types @cloudflare/workers-types --strict --skipLibCheck tests/health-ocr.test.ts` with the D1 fake removed | RED: `TS2739`, `{}` is missing `D1Database.prepare`, `batch`, `exec`, `withSession`, and `dump`. This explicit test compile is required because the project Worker typecheck includes only `src`. |
+| Same explicit Workers test compile with `FakeD1Database` restored | GREEN: PASS. It type-checks the test's `implements D1Database`, `D1DatabaseSession`, `D1PreparedStatement`, `R2Bucket`, `R2Object`, `R2ObjectBody`, and `R2MultipartUpload` fakes. |
+
+### Implemented and Self-review
+
+- Replaced the empty D1 and whole-Env escape casts with a complete typed D1 fake and a directly constructed `BetaWorkerEnv`.
+- Added complete typed R2 object, body, multipart, and bucket fakes plus a typed callable OCR AI fake. There are no `as any`, `as unknown`, D1, R2, or `BetaWorkerEnv` casts in `health-ocr.test.ts`.
+- Preserved the original five health capability regressions: absent FILES, partial/non-callable FILES, complete FILES with absent AI, complete FILES with non-callable AI, and fully callable FILES plus AI. Partial deployment misconfiguration is simulated only after constructing complete typed fakes with `Object.defineProperty`.
+- Self-review confirms this change is test-only and the health response retains exact safe data and envelope key assertions.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/health-ocr.test.ts tests/native-queue.test.ts` | PASS, 13 tests in 2 files. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+Commit: independent B2.2 re-review commit containing this report section; SHA is recorded in the final handoff.
