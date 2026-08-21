@@ -59,3 +59,28 @@ Verification-test commit: `d3dfd5bfb9ab4f6a64073536eaadaa7b2673add1`.
 
 - The Queue message lifecycle is persisted and retry-safe, but this repository has no configured OCR extractor or Queue consumer implementation that can transition a pending job through `processing` to `completed` and write OCR text. The current slice therefore does not claim actual OCR recognition; an extractor/consumer must be supplied before production enablement.
 - `KnowledgeRecoveryPanel` is an exported embedded recovery surface with real client callback shapes, but the current static Beta demo app has no active workspace selection/data-loading composition point to bind it to a live `KnowledgeClient`. It needs integration when the authenticated workspace shell receives live workspace data.
+
+## Review-Fix Attempt
+
+### RED/GREEN
+
+| RED command | Failure | GREEN command | Result |
+| --- | --- | --- | --- |
+| `npm run test --workspace=@nexus/contracts -- tests/knowledge-contracts.test.ts` | completion schema required undefined `signature` | same | PASS, 5 tests |
+| `npm run test --workspace=@nexus/worker -- tests/ocr-consumer.test.ts tests/attachment-routes.test.ts` | `OcrConsumer` missing; single retry accepted a different body id | same | PASS, 4 focused tests after consumer and path guard |
+| `npm run test --workspace=@nexus/worker -- tests/d1-attachment-repository.test.ts` | `claimOcrJob` missing | same plus consumer | PASS, repository claim/complete integration test |
+| `npm run test --workspace=@nexus/worker -- tests/attachment-service.test.ts` | Queue message used a generated rather than persisted job id | same | PASS, 5 tests |
+| `npm run test --workspace=@nexus/web -- tests/app-auth-bootstrap.test.tsx` | live recovery UI was not mounted | same | PASS, 3 tests |
+
+Focused final verification: Worker attachment/repository/consumer tests PASS (10 tests); contracts PASS (5); Worker and Web typechecks PASS.
+
+### Implemented
+
+- Removed the unused upload-completion signature contract field.
+- Added OCR Queue consumer with workspace-scoped conditional claim, success-only `search_documents.ocr_text` write, recoverable fail/dead-letter transition, and Beta Worker queue handler.
+- Enforced single-retry path/body identity and used repository-persisted job id/attempt/deadline in completion queue messages.
+- Mounted recovery UI in the authenticated workspace with injected live `ApiClient`/workspace binding and failure-safe loading.
+
+### Remaining Blockers
+
+The review's remaining Critical/Important requirements are not complete in this attempt: atomic 1 GB D1 reservation plus streaming upload body limit, persistent queue outbox/recovery, unique workspace/attachment/source-revision migration and retry CAS, full image/PDF extractor configuration, aggregated failed-OCR diagnostics cursor changes, and the exhaustive requested real-D1 concurrency/cross-tenant/MIME test matrix. Full Beta/legacy/build/audit/readiness/preload gates were intentionally not claimed or rerun after this partial fix attempt.

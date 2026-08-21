@@ -16,9 +16,7 @@ describe("knowledge contracts", () => {
       mime_type: "application/pdf", size_bytes: 42, status: "ready", revision: 1,
       created_at: timestamp, updated_at: timestamp,
     }).success).toBe(true);
-    expect(contracts.UploadCompleteInputSchema.safeParse({
-      upload_id: "upload-1", signature: "25504446",
-    }).success).toBe(true);
+    expect(contracts.UploadCompleteInputSchema.parse({ upload_id: "upload-1" })).toEqual({ upload_id: "upload-1" });
     expect(contracts.AttachmentListRequestSchema.parse({ mime_type: "application/pdf", limit: 10 })).toMatchObject({
       mime_type: "application/pdf", limit: 10,
     });

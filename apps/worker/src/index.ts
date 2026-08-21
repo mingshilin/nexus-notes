@@ -24,6 +24,7 @@ export { D1TaxonomyRepository } from "./knowledge/d1-taxonomy-repository";
 export { KnowledgeService, KnowledgeServiceError } from "./knowledge/knowledge-service";
 export { AttachmentService, AttachmentServiceError } from "./attachments/attachment-service";
 export { D1AttachmentRepository } from "./attachments/d1-attachment-repository";
+export { OcrConsumer } from "./attachments/ocr-consumer";
 export { registerAuthRoutes } from "./routes/auth";
 export { registerKnowledgeRoutes } from "./routes/knowledge";
 export { registerGraphRoutes } from "./routes/graph";

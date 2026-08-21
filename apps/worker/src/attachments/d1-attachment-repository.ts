@@ -89,7 +89,37 @@ export class D1AttachmentRepository {
       `INSERT INTO beta_ocr_jobs (id, workspace_id, user_id, attachment_id, status, idempotency_key, attempt_count, deadline, revision, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, 1, ?, ?) ON CONFLICT(workspace_id, user_id, idempotency_key) DO NOTHING`,
     ).bind(id, workspaceId, userId, attachmentId, idempotencyKey, new Date(Date.parse(now) + 10 * 60_000).toISOString(), now, now).run();
-    return { created: Number(result.meta.changes ?? 0) > 0, idempotency_key: idempotencyKey };
+    return { created: Number(result.meta.changes ?? 0) > 0, job_id: id, attempt: 0, deadline: new Date(Date.parse(now) + 10 * 60_000).toISOString(), idempotency_key: idempotencyKey };
+  }
+
+  async claimOcrJob(workspaceId: string, jobId: string, now: string) {
+    return this.db.prepare(
+      `UPDATE beta_ocr_jobs SET status = 'processing', attempt_count = attempt_count + 1, revision = revision + 1, updated_at = ?
+       WHERE workspace_id = ? AND id = ? AND status = 'pending' AND deadline > ?
+       RETURNING id, workspace_id, attachment_id, attempt_count, deadline`,
+    ).bind(now, workspaceId, jobId, now).first<{ id: string; workspace_id: string; attachment_id: string; attempt_count: number; deadline: string }>();
+  }
+
+  async completeOcrJob(workspaceId: string, jobId: string, text: string, now: string) {
+    await this.db.prepare(
+      `UPDATE beta_ocr_jobs SET status = 'completed', last_error_code = NULL, revision = revision + 1, updated_at = ?
+       WHERE workspace_id = ? AND id = ? AND status = 'processing'`,
+    ).bind(now, workspaceId, jobId).run();
+    await this.db.prepare(
+      `INSERT INTO search_documents (id, workspace_id, entity_type, entity_id, title, ocr_text, revision, updated_at)
+       SELECT 'attachment:' || a.id, a.workspace_id, 'attachment', a.id, a.filename, ?, a.revision, ?
+       FROM beta_ocr_jobs j JOIN beta_attachments a ON a.workspace_id = j.workspace_id AND a.id = j.attachment_id
+       WHERE j.workspace_id = ? AND j.id = ? AND j.status = 'completed' AND a.status = 'ready'
+       ON CONFLICT(workspace_id, entity_type, entity_id) DO UPDATE SET ocr_text = excluded.ocr_text, revision = excluded.revision, updated_at = excluded.updated_at`,
+    ).bind(text, now, workspaceId, jobId).run();
+  }
+
+  async failOcrJob(workspaceId: string, jobId: string, code: string, now: string) {
+    await this.db.prepare(
+      `UPDATE beta_ocr_jobs SET status = CASE WHEN attempt_count >= 3 THEN 'dead_letter' ELSE 'failed' END,
+       last_error_code = ?, revision = revision + 1, updated_at = ?
+       WHERE workspace_id = ? AND id = ? AND status = 'processing'`,
+    ).bind(code, now, workspaceId, jobId).run();
   }
 
   async deleteAttachment(workspaceId: string, attachmentId: string, now: string) {

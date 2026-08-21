@@ -11,6 +11,8 @@ import {
 import { useEffect, useState } from "react";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient } from "../data/api-client";
+import { KnowledgeClient } from "../data/knowledge-client";
+import { KnowledgeRecoveryPanel } from "../knowledge/KnowledgeRecoveryPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
 
@@ -29,10 +31,23 @@ function resetTokenFromLocation() {
   return new URLSearchParams(window.location.search).get("reset_token") ?? undefined;
 }
 
-function AuthenticatedWorkspace() {
+function AuthenticatedWorkspace({ apiClient, workspaceId }: { apiClient: ApiClient; workspaceId: string }) {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
   const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState<ServiceWorkerUpdate | null>(null);
+  const [attachments, setAttachments] = useState<any[]>([]);
+  const [diagnostics, setDiagnostics] = useState<any[]>([]);
+
+  const loadRecovery = () => {
+    const knowledge = new KnowledgeClient(apiClient, workspaceId);
+    return Promise.all([
+      knowledge.listAttachments({ limit: 50 }),
+      knowledge.getKnowledgeDiagnostics({ limit: 50 }),
+    ]).then(([attachmentPage, diagnosticPage]) => {
+      setAttachments(attachmentPage.items);
+      setDiagnostics(diagnosticPage.items);
+    });
+  };
 
   useEffect(() => {
     const handleUpdate = (event: Event) => {
@@ -41,6 +56,7 @@ function AuthenticatedWorkspace() {
     window.addEventListener("nexus:service-worker-update", handleUpdate);
     return () => window.removeEventListener("nexus:service-worker-update", handleUpdate);
   }, []);
+  useEffect(() => { void loadRecovery().catch(() => undefined); }, [workspaceId]);
 
   const navigation = (
     <>
@@ -89,7 +105,7 @@ function AuthenticatedWorkspace() {
       <AdaptiveWorkbench
       navigation={navigation}
       contextualList={contextualList}
-      inspector={<div className="inspector-content"><small>页面信息</small><h3>Public Beta 重写计划</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
+      inspector={<div className="inspector-content"><small>页面信息</small><h3>Public Beta 重写计划</h3><p>属性、版本与协作状态只在需要时显示。</p><KnowledgeRecoveryPanel attachments={attachments} diagnostics={diagnostics} onRetry={(id) => { void new KnowledgeClient(apiClient, workspaceId).retryAttachmentOcr(id).then(loadRecovery); }} onBatchRetry={(ids) => { void new KnowledgeClient(apiClient, workspaceId).retryAttachmentOcrBatch(ids).then(loadRecovery); }} onRecover={() => setActivePane("context")} /></div>}
       inspectorOpen={inspectorOpen}
       activePane={activePane}
       onActivePaneChange={setActivePane}
@@ -112,6 +128,7 @@ function AuthenticatedWorkspace() {
           <h2>自适应工作台</h2>
           <p>导航保持轻量，列表按需出现，主画布获得最多空间，检查器不再永久挤压编辑区域。</p>
           <div className="callout"><Sparkles size={18} /><p>视觉风格继续使用原有蓝色强调、玻璃层级和舒适圆角。</p></div>
+          <KnowledgeRecoveryPanel attachments={attachments} diagnostics={diagnostics} onRetry={(id) => { void new KnowledgeClient(apiClient, workspaceId).retryAttachmentOcr(id).then(loadRecovery).catch(() => undefined); }} onBatchRetry={(ids) => { void new KnowledgeClient(apiClient, workspaceId).retryAttachmentOcrBatch(ids).then(loadRecovery).catch(() => undefined); }} onRecover={() => setActivePane("context")} />
         </div>
       </article>
       </AdaptiveWorkbench>
@@ -121,16 +138,20 @@ function AuthenticatedWorkspace() {
 
 export function App({
   authClient = defaultAuthClient,
+  apiClient = new ApiClient(),
+  workspaceId = import.meta.env.VITE_WORKSPACE_ID ?? "default-workspace",
   turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "",
   resetToken = resetTokenFromLocation(),
 }: {
   authClient?: AuthClient;
+  apiClient?: ApiClient;
+  workspaceId?: string;
   turnstileSiteKey?: string;
   resetToken?: string;
 } = {}) {
   return (
     <AuthGate client={authClient} turnstileSiteKey={turnstileSiteKey} resetToken={resetToken}>
-      <AuthenticatedWorkspace />
+      <AuthenticatedWorkspace apiClient={apiClient} workspaceId={workspaceId} />
     </AuthGate>
   );
 }

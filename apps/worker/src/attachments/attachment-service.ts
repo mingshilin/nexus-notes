@@ -21,7 +21,7 @@ export interface AttachmentRepository {
   listAttachments?(workspaceId: string, request: import("@nexus/contracts").AttachmentListRequest): Promise<{ items: Attachment[]; next_cursor: string | null }>;
   markUploaded?(workspaceId: string, attachmentId: string, now: string): Promise<void>;
   deleteAttachment?(workspaceId: string, attachmentId: string, now: string): Promise<void>;
-  ensureOcrJob?(workspaceId: string, userId: string, attachmentId: string, now: string): Promise<{ created: boolean; idempotency_key: string } | null>;
+  ensureOcrJob?(workspaceId: string, userId: string, attachmentId: string, now: string): Promise<{ created: boolean; job_id: string; attempt: number; deadline: string; idempotency_key: string } | null>;
   retryOcr(workspaceId: string, userId: string, attachmentIds: string[], now: string): Promise<{
     queued: string[];
     ineligible: string[];
@@ -155,8 +155,8 @@ export class AttachmentService {
     const job = await this.repository.ensureOcrJob?.(context.workspaceId, context.userId, attachmentId, this.clock().toISOString());
     if (job?.created) {
       await this.queue?.send?.({
-        job_id: crypto.randomUUID(), kind: "ocr", idempotency_key: job.idempotency_key, attempt: 1,
-        deadline: new Date(this.clock().getTime() + 10 * 60_000).toISOString(),
+        job_id: job.job_id, kind: "ocr", idempotency_key: job.idempotency_key, attempt: job.attempt,
+        deadline: job.deadline,
         payload: { workspace_id: context.workspaceId, attachment_id: attachmentId },
       });
     }

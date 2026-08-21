@@ -28,4 +28,12 @@ describe("App authentication bootstrap", () => {
     expect(await screen.findByRole("heading", { name: "Public Beta 重写计划", level: 1 })).toBeInTheDocument();
     expect(authClient.session).toHaveBeenCalledOnce();
   });
+
+  it("mounts live attachment recovery for the active workspace", async () => {
+    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" } })) };
+    const apiClient = { request: vi.fn(async (request: { path: string }) => request.path.startsWith("/api/v2/attachments") ? { items: [{ id: "attachment-1", filename: "scan.pdf", mime_type: "application/pdf", ocr_status: "failed" }], next_cursor: null } : { items: [], next_cursor: null }) };
+    render(<App authClient={authClient as any} apiClient={apiClient as any} workspaceId="ws-1" turnstileSiteKey="test" />);
+    expect(await screen.findByRole("button", { name: "重试 scan.pdf" })).toBeInTheDocument();
+    expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ headers: { "x-workspace-id": "ws-1" } }));
+  });
 });

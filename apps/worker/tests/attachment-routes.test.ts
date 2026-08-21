@@ -59,4 +59,13 @@ describe("v2 attachment routes", () => {
     expect(download.headers.get("x-content-type-options")).toBe("nosniff");
     expect(download.headers.get("content-disposition")).toContain("attachment");
   });
+
+  it("rejects a single-retry body that names a different attachment", async () => {
+    const worker = await loadWorker();
+    const registry = (worker.createRouteRegistry as any)({ requestId: () => "req", authenticate: vi.fn(async () => ({ userId: "user-1" })), authorizeWorkspace: vi.fn(async () => workspace) });
+    (worker.registerAttachmentRoutes as any)(registry, () => ({ retryOcr: vi.fn() }));
+    const response = await registry.fetch(request("/api/v2/attachments/attachment-1/ocr/retry", { method: "POST", body: JSON.stringify({ attachment_ids: ["attachment-2"] }) }), {});
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("OCR_RETRY_PATH_MISMATCH");
+  });
 });

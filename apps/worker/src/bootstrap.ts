@@ -27,6 +27,7 @@ import { D1RateLimiter } from "./security/rate-limit";
 import { D1AttachmentRepository } from "./attachments/d1-attachment-repository";
 import { AttachmentService } from "./attachments/attachment-service";
 import { registerAttachmentRoutes } from "./routes/attachments";
+import { OcrConsumer } from "./attachments/ocr-consumer";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -105,6 +106,10 @@ function createAttachmentService(env: BetaWorkerEnv) {
   return new AttachmentService(new D1AttachmentRepository(env.DB), env.FILES, { queue: env.JOBS });
 }
 
+function createTextExtractor() {
+  return { async extract(body: ReadableStream) { return new TextDecoder().decode(await new Response(body).arrayBuffer()); } };
+}
+
 function allowedOrigins(env: BetaWorkerEnv) {
   const origins = new Set<string>();
   if (env.APP_BASE_URL) origins.add(new URL(env.APP_BASE_URL).origin);
@@ -147,6 +152,10 @@ export function createBetaWorker() {
   return {
     fetch(request: Request, env: BetaWorkerEnv) {
       return createSecureGateway({ allowedOrigins: allowedOrigins(env), handler: registry }).fetch(request, env);
+    },
+    async queue(batch: MessageBatch<import("@nexus/contracts").QueueJob>, env: BetaWorkerEnv) {
+      const consumer = new OcrConsumer(new D1AttachmentRepository(env.DB), env.FILES, createTextExtractor());
+      await Promise.all(batch.messages.map(async (message) => consumer.consume(message.body)));
     },
   };
 }

@@ -60,7 +60,7 @@ describe("AttachmentService", () => {
     const attachment = { id: "attachment-1", workspace_id: "ws-1", note_id: null, filename: "scan.pdf", mime_type: "application/pdf", size_bytes: 5, status: "ready", revision: 2, created_at: now, updated_at: now };
     const repository = {
       getAttachment: vi.fn(async () => attachment),
-      ensureOcrJob: vi.fn(async () => ({ created: true, idempotency_key: "ocr:attachment-1:2" })),
+      ensureOcrJob: vi.fn(async () => ({ created: true, job_id: "job-1", attempt: 1, deadline: "2026-08-21T00:10:00.000Z", idempotency_key: "ocr:attachment-1:2" })),
     };
     const queue = { send: vi.fn(async () => undefined) };
     const service = new (worker.AttachmentService as new (...args: any[]) => any)(repository, {}, { clock: () => new Date(now), queue });
@@ -68,7 +68,7 @@ describe("AttachmentService", () => {
     await expect(service.completeUpload(context, "attachment-1", { upload_id: "attachment-1", signature: "25504446" })).resolves.toEqual(attachment);
     expect(repository.getAttachment).toHaveBeenCalledWith("ws-1", "attachment-1", false);
     expect(repository.ensureOcrJob).toHaveBeenCalledWith("ws-1", "user-1", "attachment-1", now);
-    expect(queue.send).toHaveBeenCalledWith(expect.objectContaining({ kind: "ocr", idempotency_key: "ocr:attachment-1:2" }));
+    expect(queue.send).toHaveBeenCalledWith(expect.objectContaining({ job_id: "job-1", kind: "ocr", attempt: 1, deadline: "2026-08-21T00:10:00.000Z", idempotency_key: "ocr:attachment-1:2" }));
   });
 
   it("retries only failed OCR jobs and reports deterministic workspace diagnostics", async () => {

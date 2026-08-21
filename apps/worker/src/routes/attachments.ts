@@ -7,6 +7,7 @@ import {
 } from "@nexus/contracts";
 
 import type { RouteDefinition } from "../http/route-registry";
+import { AttachmentServiceError } from "../attachments/attachment-service";
 
 interface AttachmentRegistry<TEnv> {
   register<TBody, TData>(definition: RouteDefinition<TEnv, TBody, TData>): void;
@@ -105,7 +106,12 @@ export function registerAttachmentRoutes<TEnv>(
   registry.register({
     method: "POST", path: "/api/v2/attachments/:attachmentId/ocr/retry", auth: "workspace", minimumRole: "editor",
     body: OcrRetryInputSchema,
-    handler: async ({ env, workspace, body }) => ({ data: await createService(env).retryOcr(workspace!, body) }),
+    handler: async ({ env, workspace, params, body }) => {
+      if (body.attachment_ids.length !== 1 || body.attachment_ids[0] !== params.attachmentId) {
+        throw new AttachmentServiceError("OCR_RETRY_PATH_MISMATCH", "Retry body must match the attachment path", 400);
+      }
+      return { data: await createService(env).retryOcr(workspace!, body) };
+    },
   });
   registry.register({
     method: "POST", path: "/api/v2/attachments/ocr/retry", auth: "workspace", minimumRole: "editor",

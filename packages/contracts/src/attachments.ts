@@ -40,7 +40,6 @@ export type CreateAttachmentUploadInput = z.infer<typeof CreateAttachmentUploadI
 
 export const UploadCompleteInputSchema = z.object({
   upload_id: EntityIdSchema,
-  signature: z.string().trim().min(2).max(64),
 });
 export type UploadCompleteInput = z.infer<typeof UploadCompleteInputSchema>;
 
