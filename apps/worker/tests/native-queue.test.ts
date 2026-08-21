@@ -10,6 +10,7 @@ const disposals: Array<() => Promise<void>> = [];
 const executionContext: ExecutionContext = {
   waitUntil() {},
   passThroughOnException() {},
+  props: undefined,
 };
 
 class FakeNativeMessage<T> implements Message<T> {
@@ -85,7 +86,7 @@ class FakeR2ObjectBody extends FakeR2Object implements R2ObjectBody {
   async arrayBuffer() { return pdfBytes.buffer.slice(0); }
   async bytes() { return pdfBytes; }
   async text() { return new TextDecoder().decode(pdfBytes); }
-  async json<T>() { throw new Error(`No JSON body for ${this.key}`); }
+  async json<T>(): Promise<T> { throw new Error(`No JSON body for ${this.key}`); }
   async blob() { return new Blob([pdfBytes], { type: "application/pdf" }); }
 }
 
@@ -201,7 +202,9 @@ describe("native Cloudflare OCR queue wiring", () => {
   it("acknowledges stale delivery and dead-letters a terminal native delivery without retrying either", async () => {
     const { createBetaWorker, db, job } = await fixture();
     const ai: OcrAiBinding = { async toMarkdown() { throw Object.assign(new Error("OCR_TIMEOUT"), { retryable: true }); } };
-    const stale = new FakeNativeMessage<unknown>({ ...job, payload: { ...job.payload, source_revision: job.payload.source_revision + 1 } });
+    const sourceRevision = job.payload.source_revision;
+    if (typeof sourceRevision !== "number") throw new Error("Expected numeric source revision");
+    const stale = new FakeNativeMessage<unknown>({ ...job, payload: { ...job.payload, source_revision: sourceRevision + 1 } });
     const terminal = new FakeNativeMessage<unknown>(job, 3);
 
     await createBetaWorker().queue(new FakeNativeBatch([stale, terminal]), queueEnv(db, { ai }), executionContext);
@@ -247,7 +250,8 @@ describe("native Cloudflare OCR queue wiring", () => {
   it.each(["AI", "FILES"] as const)("safely acknowledges an OCR-only missing %s binding", async (binding) => {
     const { createBetaWorker, db, job } = await fixture();
     const env = queueEnv(db);
-    delete (env as Record<string, unknown>)[binding];
+    if (binding === "AI") env.AI = undefined;
+    else env.FILES = undefined;
     const message = new FakeNativeMessage<unknown>(job);
 
     await createBetaWorker().queue(new FakeNativeBatch([message]), env, executionContext);

@@ -877,3 +877,33 @@ This correction changes only the Worker OCR health test and this report. No Work
 | `git diff --check` | PASS. |
 
 Commit: independent B2.2 re-review commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C B2.2 Second Re-review: Native Env Escape Cast
+
+### Scope
+
+This correction changes only the native Queue Worker test and this report. No Worker runtime behavior, deployment, Web, legacy, Task 7, schema, secrets, or generated artifacts changed.
+
+### Type-driven RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npx tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,WebWorker --types @cloudflare/workers-types --strict --skipLibCheck apps/worker/tests/native-queue.test.ts apps/worker/tests/health-ocr.test.ts` before completing native test fakes | RED: `ExecutionContext.props` was missing, `FakeR2ObjectBody.json<T>()` inferred `Promise<void>`, and `QueueJob.payload.source_revision` was used as `unknown`. |
+| Same explicit Workers test compile after the typed fixture corrections | GREEN: PASS. |
+
+### Implemented and Self-review
+
+- Replaced `delete (env as Record<string, unknown>)[binding]` with direct typed optional-binding assignments: `env.AI = undefined` and `env.FILES = undefined`.
+- Completed the native test's strict Workers typing with `ExecutionContext.props`, a generic `R2ObjectBody.json<T>(): Promise<T>` signature, and a runtime numeric guard before source-revision arithmetic.
+- Searched both in-scope test files for `as any`, `as unknown`, `as Record`, `as BetaWorkerEnv`, `as R2Bucket`, and `as D1Database`; none remain. The AI/FILES missing-binding matrix, native receiver assertions, retry propagation, and OCR health matrix are unchanged.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/native-queue.test.ts tests/health-ocr.test.ts` | PASS, 13 tests in 2 files. |
+| `npx tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,WebWorker --types @cloudflare/workers-types --strict --skipLibCheck apps/worker/tests/native-queue.test.ts apps/worker/tests/health-ocr.test.ts` | PASS. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+Commit: independent B2.2 second re-review commit containing this report section; SHA is recorded in the final handoff.
