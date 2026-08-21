@@ -545,3 +545,27 @@ Cloudflare's native `env.AI.toMarkdown` binding does not provide a hard-cancella
 | `npm run typecheck --workspace=@nexus/worker` | PASS. |
 
 Commit: independent B1 review-fix commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C Fix B1 Re-review Fix: Guarded Startup Observation
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/ocr-extractor.test.ts` | RED: two expected failures. An R2 or AI dependency that aborted the caller while returning a promise left that started promise unobserved. |
+| Same focused command | GREEN: PASS, 21 tests. |
+
+### Implemented
+
+- `guarded()` now accepts an operation thunk. It checks active/deadline and installs timeout/abort handling before it invokes R2 reads, R2 stream reads, or AI conversion.
+- Every started promise immediately receives resolve/reject observers. A late R2 resolution still cancels its body; late AI resolution and rejection remain observed but are never consumed by extraction.
+- Added regression coverage for abort during dependency startup plus separately in-flight AbortSignal cancellation of late R2 and AI results.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/ocr-extractor.test.ts` | PASS, 21 tests. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+
+Commit: independent B1 re-review-fix commit containing this report section; SHA is recorded in the final handoff.

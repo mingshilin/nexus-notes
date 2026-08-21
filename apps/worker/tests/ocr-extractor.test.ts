@@ -30,8 +30,25 @@ function fakeStore(objects: Record<string, { bytes: Uint8Array; size?: number }>
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((next, fail) => { resolve = next; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+function observedPromise<T>(source: Promise<T>) {
+  let observed = 0;
+  return {
+    promise: {
+      then<TResult1 = T, TResult2 = never>(
+        onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+      ) {
+        observed += 1;
+        return source.then(onfulfilled, onrejected);
+      },
+    } as Promise<T>,
+    get observed() { return observed; },
+  };
 }
 
 async function flushAsyncWork() {
@@ -200,6 +217,78 @@ describe("OcrExtractor", () => {
 
     await expectExtractionError(conversionTimeout.extract(request({ sizeBytes: 1 })), "OCR_TIMEOUT", true);
     lateAi.resolve(latePayload);
+    await flushAsyncWork();
+    expect(dataRead).not.toHaveBeenCalled();
+  });
+
+  it("observes and cleans a late R2 object when its operation aborts the caller during startup", async () => {
+    const controller = new AbortController();
+    const lateObject = deferred<{ body: ReadableStream<Uint8Array>; size: number } | null>();
+    const tracked = observedPromise(lateObject.promise);
+    const cancel = vi.fn();
+    const files: OcrObjectStore = {
+      get: vi.fn(() => {
+        controller.abort();
+        return tracked.promise;
+      }),
+    };
+    const extractor = new OcrExtractor({ files });
+
+    await expectExtractionError(extractor.extract(request({ signal: controller.signal })), "OCR_CANCELLED", true);
+    expect(tracked.observed).toBeGreaterThan(0);
+    lateObject.resolve({ body: stream(new Uint8Array([1]), cancel), size: 1 });
+    await flushAsyncWork();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("observes a late AI rejection when its operation aborts the caller during startup", async () => {
+    const controller = new AbortController();
+    const lateAi = deferred<unknown>();
+    const tracked = observedPromise(lateAi.promise);
+    const extractor = new OcrExtractor({
+      files: fakeStore({ "ws-1/attachments/attachment-1": { bytes: new Uint8Array([1]) } }),
+      ai: { toMarkdown: vi.fn(() => {
+        controller.abort();
+        return tracked.promise;
+      }) },
+    });
+
+    await expectExtractionError(extractor.extract(request({ signal: controller.signal, sizeBytes: 1 })), "OCR_CANCELLED", true);
+    expect(tracked.observed).toBeGreaterThan(0);
+    lateAi.reject(new Error("late provider failure"));
+    await flushAsyncWork();
+  });
+
+  it("cancels an in-flight R2 body and ignores an in-flight AI result after caller abort", async () => {
+    const controller = new AbortController();
+    const lateObject = deferred<{ body: ReadableStream<Uint8Array>; size: number } | null>();
+    const objectCancel = vi.fn();
+    const files: OcrObjectStore = { get: vi.fn(() => lateObject.promise) };
+    const extractor = new OcrExtractor({ files });
+    const extraction = extractor.extract(request({ signal: controller.signal }));
+
+    await flushAsyncWork();
+    controller.abort();
+    await expectExtractionError(extraction, "OCR_CANCELLED", true);
+    lateObject.resolve({ body: stream(new Uint8Array([1]), objectCancel), size: 1 });
+    await flushAsyncWork();
+    expect(objectCancel).toHaveBeenCalledOnce();
+
+    const aiController = new AbortController();
+    const lateAi = deferred<unknown>();
+    const dataRead = vi.fn(() => "# late");
+    const payload = { format: "markdown" as const } as { format: "markdown"; data?: string };
+    Object.defineProperty(payload, "data", { get: dataRead });
+    const conversion = new OcrExtractor({
+      files: fakeStore({ "ws-1/attachments/attachment-1": { bytes: new Uint8Array([1]) } }),
+      ai: { toMarkdown: vi.fn(() => lateAi.promise) },
+    });
+    const converting = conversion.extract(request({ signal: aiController.signal, sizeBytes: 1 }));
+
+    await flushAsyncWork();
+    aiController.abort();
+    await expectExtractionError(converting, "OCR_CANCELLED", true);
+    lateAi.resolve(payload);
     await flushAsyncWork();
     expect(dataRead).not.toHaveBeenCalled();
   });

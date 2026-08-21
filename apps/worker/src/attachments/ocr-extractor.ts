@@ -58,7 +58,7 @@ async function cancelObject(object: { body: ReadableStream<Uint8Array> } | null 
 }
 
 async function guarded<T>(
-  operation: Promise<T>,
+  operation: () => Promise<T>,
   request: Pick<OcrExtractionRequest, "deadline" | "signal">,
   timeoutMs: number,
   options: { abort?: () => void; onLateResolve?: (value: T) => void | Promise<void> } = {},
@@ -72,13 +72,6 @@ async function guarded<T>(
   let abort: (() => void) | undefined;
   let settled = false;
   let timedOut = false;
-  const watched = operation.then(
-    async (value) => {
-      if (settled) await options.onLateResolve?.(value);
-      return value;
-    },
-    (error) => Promise.reject(error),
-  );
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       timedOut = true;
@@ -91,6 +84,15 @@ async function guarded<T>(
     request.signal?.addEventListener("abort", abort, { once: true });
   });
   try {
+    // Start only after cancellation and timeout observers are in place.
+    const started = operation();
+    const watched = started.then(
+      async (value) => {
+        if (settled) await options.onLateResolve?.(value);
+        return value;
+      },
+      (error) => Promise.reject(error),
+    );
     return await Promise.race([watched, timeout, cancellation]);
   } finally {
     settled = true;
@@ -118,7 +120,7 @@ async function readBoundedObject(
   let total = 0;
   try {
     while (true) {
-      const { done, value } = await guarded(reader.read(), request, timeoutMs, { abort });
+      const { done, value } = await guarded(() => reader.read(), request, timeoutMs, { abort });
       if (done) break;
       const accepted = Math.min(value.byteLength, MAX_UPLOAD_BYTES + 1 - total);
       if (accepted > 0) chunks.push(value.subarray(0, accepted));
@@ -194,7 +196,7 @@ export class OcrExtractor {
       let object: { body: ReadableStream<Uint8Array>; size?: number } | null;
       try {
         object = await guarded(
-          this.dependencies.files.get(request.objectKey, { signal: controller.signal }),
+          () => this.dependencies.files.get(request.objectKey, { signal: controller.signal }),
           activeRequest,
           this.timeoutMs,
           { abort, onLateResolve: cancelObject },
@@ -225,13 +227,14 @@ export class OcrExtractor {
         }
       }
 
-      if (!this.dependencies.ai) throw new OcrExtractionError("OCR_AI_UNAVAILABLE", false);
+      const ai = this.dependencies.ai;
+      if (!ai) throw new OcrExtractionError("OCR_AI_UNAVAILABLE", false);
 
       const blob = new Blob([bytes], { type: request.mimeType });
       let response: Awaited<ReturnType<OcrAiBinding["toMarkdown"]>>;
       try {
         response = await guarded(
-          this.dependencies.ai.toMarkdown({ name: request.filename, blob }, { signal: controller.signal }),
+          () => ai.toMarkdown({ name: request.filename, blob }, { signal: controller.signal }),
           activeRequest,
           this.timeoutMs,
           { abort },
