@@ -95,11 +95,27 @@ describe("v2 structured database routes", () => {
     const responses = await Promise.all(cases.map(([method, path, body]) => registry.fetch(request(path, method, body), {})));
 
     expect(responses.every((response: Response) => response.status >= 200 && response.status < 300)).toBe(true);
+    const mutationMethods = [
+      "createDatabase", "updateDatabase", "deleteDatabase", "createProperty", "updateProperty", "deleteProperty",
+      "createRecord", "updateRecord", "deleteRecord", "bulkEditRecords", "boardMove", "calendarAssign",
+      "createView", "updateView", "deleteView", "createTemplate", "updateTemplate", "deleteTemplate", "applyTemplate",
+      "createComment", "updateComment", "deleteComment", "setDatabasePermission", "deleteDatabasePermission",
+      "setFieldPermission", "deleteFieldPermission", "importCsv",
+    ];
+    for (const method of mutationMethods) {
+      const mutation = repository[method as keyof typeof repository] as ReturnType<typeof vi.fn>;
+      expect(mutation).toHaveBeenCalled();
+      expect(mutation.mock.calls[0]?.[0]).toEqual({ ...workspace, requestId: "req-db" });
+    }
     expect(repository.listRecords).toHaveBeenCalledWith(workspace, "db-1", { cursor: "next", view_id: "view-1", limit: 25 });
     expect(repository.searchRecords).toHaveBeenCalledWith(workspace, "db-1", { query: "alpha", cursor: null, limit: 20 });
-    expect(repository.createComment).toHaveBeenCalledWith(workspace, "db-1", { record_id: "record-1", body: "Review" });
+    expect(repository.createComment).toHaveBeenCalledWith(
+      { ...workspace, requestId: "req-db" }, "db-1", { record_id: "record-1", body: "Review" },
+    );
     expect(repository.listDatabasePermissions).toHaveBeenCalledWith(workspace, "db-1");
-    expect(repository.deleteFieldPermission).toHaveBeenCalledWith(workspace, "db-1", "prop-1", "permission-1", { base_revision: 1 });
+    expect(repository.deleteFieldPermission).toHaveBeenCalledWith(
+      { ...workspace, requestId: "req-db" }, "db-1", "prop-1", "permission-1", { base_revision: 1 },
+    );
     const databasePermissionsResponse = await responses[cases.findIndex(([method, path]) => method === "GET" && path === "/api/v2/databases/db-1/permissions")]!.json();
     const fieldPermissionsResponse = await responses[cases.findIndex(([method, path]) => method === "GET" && path === "/api/v2/databases/db-1/properties/prop-1/permissions")]!.json();
     const permission = { id: "entity-1", revision: 1 };
@@ -141,7 +157,9 @@ describe("v2 structured database routes", () => {
     }), {});
 
     expect(response.status).toBe(201);
-    expect(repository.importCsv).toHaveBeenCalledWith(workspace, "db-1", expect.objectContaining({ csv }));
+    expect(repository.importCsv).toHaveBeenCalledWith(
+      { ...workspace, requestId: "req-csv-limit" }, "db-1", expect.objectContaining({ csv }),
+    );
   });
 
   it("wires database routes into the default Beta worker", async () => {

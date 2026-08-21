@@ -1,6 +1,8 @@
 import type { DatabaseProperty, DatabaseRecord, DatabaseView, WorkspaceContext } from "@nexus/contracts";
 import { normalizeDatabaseValues, type DatabaseValueProperty } from "@nexus/domain";
 
+import { prepareActivityAndAuditStatements } from "../collaboration/d1-collaboration-repository";
+import type { PresenceNotifier } from "../presence/presence-dispatcher";
 import { D1DatabaseAccess } from "./d1-database-access";
 import {
   RECORD_COLUMNS,
@@ -33,6 +35,7 @@ const MAX_REFERENCE_ITEMS = 1_000;
 export interface D1DatabaseRepositoryOptions {
   createId(): string;
   clock(): Date;
+  presence?: Pick<PresenceNotifier, "invalidate">;
 }
 
 const defaultOptions: D1DatabaseRepositoryOptions = {
@@ -391,5 +394,45 @@ export abstract class DatabaseRepositoryBase {
 
   protected now() {
     return this.options.clock().toISOString();
+  }
+
+  protected auditStatements(
+    context: WorkspaceContext,
+    action: string,
+    targetType: string,
+    targetId: string | null,
+    revision: number,
+    createdAt: string,
+    condition?: string,
+    conditionBindings?: unknown[],
+    metadata: Record<string, unknown> = {},
+  ) {
+    const requestId = (context as WorkspaceContext & { requestId?: string }).requestId;
+    if (!requestId) return [];
+    return prepareActivityAndAuditStatements(this.db, this.options.createId, {
+      workspaceId: context.workspaceId,
+      actorUserId: context.userId,
+      requestId,
+      action,
+      targetType,
+      targetId,
+      metadata: { revision, ...metadata },
+      createdAt,
+      condition,
+      conditionBindings,
+    });
+  }
+
+  protected async notifyPresence(
+    workspaceId: string,
+    entityType: string,
+    entityId: string,
+    revision: number,
+  ) {
+    try {
+      await this.options.presence?.invalidate({ workspaceId, entityType, entityId, revision });
+    } catch {
+      // Presence is advisory after the D1 commit.
+    }
   }
 }

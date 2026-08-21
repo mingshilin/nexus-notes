@@ -4,6 +4,8 @@ import type {
   CreateNoteRecordInput,
   NoteRepository,
 } from "./note-service";
+import { prepareActivityAndAuditStatements } from "../collaboration/d1-collaboration-repository";
+import type { PresenceNotifier } from "../presence/presence-dispatcher";
 
 interface NoteRow {
   id: string;
@@ -58,6 +60,7 @@ export class D1NoteRepository implements NoteRepository {
   constructor(
     private readonly db: D1Database,
     private readonly createId: () => string = () => crypto.randomUUID(),
+    private readonly options: { presence?: Pick<PresenceNotifier, "invalidate"> } = {},
   ) {}
 
   async createNote(input: CreateNoteRecordInput) {
@@ -124,7 +127,14 @@ export class D1NoteRepository implements NoteRepository {
        ) VALUES (?, ?, 'note', ?, ?, ?, '', '', '', '', 1, ?)`,
     ).bind(`search:note:${note.id}`, note.workspace_id, note.id, note.title, note.content, note.updated_at);
 
-    await this.db.batch([insertNote, insertRevision, insertSyncChange, insertSearchDocument]);
+    await this.db.batch([
+      insertNote,
+      insertRevision,
+      insertSyncChange,
+      insertSearchDocument,
+      ...this.auditStatements(input, "note.created", note.id, 1, input.now),
+    ]);
+    await this.notifyPresence(input.workspaceId, note.id, note.revision);
     return note;
   }
 
@@ -181,6 +191,7 @@ export class D1NoteRepository implements NoteRepository {
     baseRevision: number;
     patch: Omit<UpdateNoteInput, "base_revision">;
     now: string;
+    requestId?: string;
   }) {
     const { source = "autosave", ...changes } = input.patch;
     const assignments: string[] = [];
@@ -229,13 +240,26 @@ export class D1NoteRepository implements NoteRepository {
       insertRevision,
       insertSyncChange,
       upsertSearchDocument,
+      ...this.auditStatements(
+        input,
+        "note.updated",
+        input.noteId,
+        nextRevision,
+        input.now,
+        `EXISTS (SELECT 1 FROM notes
+          WHERE workspace_id = ? AND id = ? AND revision = ?
+            AND updated_by = ? AND updated_at = ? AND deleted_at IS NULL)`,
+        [input.workspaceId, input.noteId, nextRevision, input.userId, input.now],
+      ),
     ]);
     const row = firstResultRow(results[0]);
 
     if (!row) {
       return { note: null, current: await this.getNote(input.workspaceId, input.noteId) };
     }
-    return { note: toNote(row), current: null };
+    const note = toNote(row);
+    await this.notifyPresence(input.workspaceId, input.noteId, note.revision);
+    return { note, current: null };
   }
 
   async restoreRevision(input: {
@@ -245,6 +269,7 @@ export class D1NoteRepository implements NoteRepository {
     revision: number;
     baseRevision: number;
     now: string;
+    requestId?: string;
   }) {
     const nextRevision = input.baseRevision + 1;
     const update = this.db.prepare(
@@ -296,10 +321,25 @@ export class D1NoteRepository implements NoteRepository {
       insertRevision,
       insertSyncChange,
       upsertSearchDocument,
+      ...this.auditStatements(
+        input,
+        "note.restored",
+        input.noteId,
+        nextRevision,
+        input.now,
+        `EXISTS (SELECT 1 FROM notes
+          WHERE workspace_id = ? AND id = ? AND revision = ?
+            AND updated_by = ? AND updated_at = ? AND deleted_at IS NULL)`,
+        [input.workspaceId, input.noteId, nextRevision, input.userId, input.now],
+      ),
     ]);
     const row = firstResultRow(results[0]);
 
-    if (row) return { note: toNote(row), current: null, revisionFound: true };
+    if (row) {
+      const note = toNote(row);
+      await this.notifyPresence(input.workspaceId, input.noteId, note.revision);
+      return { note, current: null, revisionFound: true };
+    }
 
     const [current, revision] = await Promise.all([
       this.getNote(input.workspaceId, input.noteId),
@@ -376,5 +416,37 @@ export class D1NoteRepository implements NoteRepository {
          revision = excluded.revision,
          updated_at = excluded.updated_at`,
     ).bind(input.workspaceId, input.noteId, revision, input.userId, input.now);
+  }
+
+  private auditStatements(
+    input: { workspaceId: string; userId: string; requestId?: string },
+    action: string,
+    noteId: string,
+    revision: number,
+    createdAt: string,
+    condition?: string,
+    conditionBindings?: unknown[],
+  ) {
+    if (!input.requestId) return [];
+    return prepareActivityAndAuditStatements(this.db, this.createId, {
+      workspaceId: input.workspaceId,
+      actorUserId: input.userId,
+      requestId: input.requestId,
+      action,
+      targetType: "note",
+      targetId: noteId,
+      metadata: { revision },
+      createdAt,
+      condition,
+      conditionBindings,
+    });
+  }
+
+  private async notifyPresence(workspaceId: string, noteId: string, revision: number) {
+    try {
+      await this.options.presence?.invalidate({ workspaceId, entityType: "note", entityId: noteId, revision });
+    } catch {
+      // Presence is advisory after the D1 commit.
+    }
   }
 }

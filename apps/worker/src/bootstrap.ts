@@ -35,6 +35,7 @@ import { registerDatabaseRoutes } from "./routes/databases";
 import { D1CollaborationRepository } from "./collaboration/d1-collaboration-repository";
 import { registerCollaborationRoutes } from "./routes/collaboration";
 import { registerPresenceRoute } from "./routes/presence";
+import { createPresenceNotifier } from "./presence/presence-dispatcher";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -81,11 +82,15 @@ function createAuthService(env: BetaWorkerEnv) {
 }
 
 function createNoteService(env: BetaWorkerEnv) {
-  return new NoteService(new D1NoteRepository(env.DB));
+  return new NoteService(new D1NoteRepository(env.DB, undefined, {
+    presence: createPresenceNotifier(env),
+  }));
 }
 
 function createDatabaseRepository(env: BetaWorkerEnv) {
-  return new D1DatabaseRepository(env.DB);
+  return new D1DatabaseRepository(env.DB, {
+    presence: createPresenceNotifier(env),
+  });
 }
 
 function collaborationTokens(env: BetaWorkerEnv) {
@@ -96,6 +101,7 @@ function createCollaborationRepository(env: BetaWorkerEnv) {
   return new D1CollaborationRepository(env.DB, {
     tokens: collaborationTokens(env),
     password: new WebCryptoPasswordHasher(),
+    presence: createPresenceNotifier(env),
   });
 }
 

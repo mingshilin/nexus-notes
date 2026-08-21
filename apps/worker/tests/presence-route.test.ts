@@ -67,6 +67,7 @@ describe("authenticated Presence proxy", () => {
     expect(forwarded?.headers.get("x-presence-workspace-id")).toBe("ws-1");
     expect(forwarded?.headers.get("x-presence-user-id")).toBe("user-1");
     expect(forwarded?.headers.get("x-presence-display-name")).toBe("One");
+    expect(forwarded?.headers.get("x-presence-membership-epoch")).toBe("1");
     expect(forwarded?.headers.get("x-presence-signature")).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(forwarded?.headers.get("cookie")).toBeNull();
 

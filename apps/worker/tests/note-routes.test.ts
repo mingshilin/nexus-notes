@@ -86,16 +86,17 @@ describe("v2 note routes", () => {
 
     expect(responses.map((response: Response) => response.status)).toEqual([200, 201, 200, 200, 200, 200, 201]);
     expect(service.list).toHaveBeenCalledWith(workspace, { cursor: "cursor-1", limit: 25 });
-    expect(service.create).toHaveBeenCalledWith(workspace, { title: "Draft", content: "Body" });
+    const mutationWorkspace = { ...workspace, requestId: "req-notes" };
+    expect(service.create).toHaveBeenCalledWith(mutationWorkspace, { title: "Draft", content: "Body" });
     expect(service.get).toHaveBeenCalledWith(workspace, "note-1");
-    expect(service.update).toHaveBeenCalledWith(workspace, "note-1", {
+    expect(service.update).toHaveBeenCalledWith(mutationWorkspace, "note-1", {
       base_revision: 1,
       title: "Updated",
       source: "autosave",
     });
     expect(service.listRevisions).toHaveBeenCalledWith(workspace, "note-1");
-    expect(service.restore).toHaveBeenCalledWith(workspace, "note-1", 1, { base_revision: 1 });
-    expect(service.quickCapture).toHaveBeenCalledWith(workspace, { content: "Quick thought" });
+    expect(service.restore).toHaveBeenCalledWith(mutationWorkspace, "note-1", 1, { base_revision: 1 });
+    expect(service.quickCapture).toHaveBeenCalledWith(mutationWorkspace, { content: "Quick thought" });
   });
 
   it("rejects missing workspace context before calling the note service", async () => {

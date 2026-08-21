@@ -7,7 +7,7 @@ import {
 import { registerDatabaseCommentRoutes } from "./database-comments";
 import { registerDatabaseMetadataRoutes } from "./database-metadata";
 import { registerDatabaseRecordRoutes } from "./database-records";
-import type { DatabaseRegistry, DatabaseRepositoryFactory } from "./database-route-types";
+import { mutationContext, type DatabaseRegistry, type DatabaseRepositoryFactory } from "./database-route-types";
 
 export function registerDatabaseRoutes<TEnv>(
   registry: DatabaseRegistry<TEnv>,
@@ -21,9 +21,9 @@ export function registerDatabaseRoutes<TEnv>(
   });
   registry.register({
     method: "POST", path: "/api/v2/databases", auth: "workspace", minimumRole: "editor", body: CreateDatabaseInputSchema,
-    handler: async ({ env, workspace, body }) => ({
+    handler: async ({ env, workspace, body, requestId }) => ({
       status: 201,
-      data: { database: await createRepository(env).createDatabase(workspace!, body) },
+      data: { database: await createRepository(env).createDatabase(mutationContext(workspace!, requestId), body) },
     }),
   });
   registry.register({
@@ -34,14 +34,14 @@ export function registerDatabaseRoutes<TEnv>(
   });
   registry.register({
     method: "PATCH", path: "/api/v2/databases/:databaseId", auth: "workspace", body: UpdateDatabaseInputSchema,
-    handler: async ({ env, workspace, params, body }) => ({
-      data: { database: await createRepository(env).updateDatabase(workspace!, params.databaseId!, body) },
+    handler: async ({ env, workspace, params, body, requestId }) => ({
+      data: { database: await createRepository(env).updateDatabase(mutationContext(workspace!, requestId), params.databaseId!, body) },
     }),
   });
   registry.register({
     method: "DELETE", path: "/api/v2/databases/:databaseId", auth: "workspace", body: DeleteDatabaseInputSchema,
-    handler: async ({ env, workspace, params, body }) => ({
-      data: await createRepository(env).deleteDatabase(workspace!, params.databaseId!, body),
+    handler: async ({ env, workspace, params, body, requestId }) => ({
+      data: await createRepository(env).deleteDatabase(mutationContext(workspace!, requestId), params.databaseId!, body),
     }),
   });
 

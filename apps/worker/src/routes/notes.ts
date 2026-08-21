@@ -34,6 +34,10 @@ function revisionParam(value: string) {
   return revision;
 }
 
+function mutationContext<T extends object>(workspace: T, requestId: string) {
+  return { ...workspace, requestId };
+}
+
 export function registerNoteRoutes<TEnv>(
   registry: NoteRegistry<TEnv>,
   createService: (env: TEnv) => NoteRouteService,
@@ -54,9 +58,9 @@ export function registerNoteRoutes<TEnv>(
     minimumRole: "editor",
     quota: "notes",
     body: CreateNoteInputSchema,
-    handler: async ({ env, workspace, body }) => ({
+    handler: async ({ env, workspace, body, requestId }) => ({
       status: 201,
-      data: { note: await createService(env).create(workspace!, body) },
+      data: { note: await createService(env).create(mutationContext(workspace!, requestId), body) },
     }),
   });
 
@@ -75,8 +79,8 @@ export function registerNoteRoutes<TEnv>(
     auth: "workspace",
     minimumRole: "editor",
     body: UpdateNoteInputSchema,
-    handler: async ({ env, workspace, params, body }) => ({
-      data: { note: await createService(env).update(workspace!, params.noteId!, body) },
+    handler: async ({ env, workspace, params, body, requestId }) => ({
+      data: { note: await createService(env).update(mutationContext(workspace!, requestId), params.noteId!, body) },
     }),
   });
 
@@ -95,10 +99,10 @@ export function registerNoteRoutes<TEnv>(
     auth: "workspace",
     minimumRole: "editor",
     body: RestoreNoteInputSchema,
-    handler: async ({ env, workspace, params, body }) => ({
+    handler: async ({ env, workspace, params, body, requestId }) => ({
       data: {
         note: await createService(env).restore(
-          workspace!,
+          mutationContext(workspace!, requestId),
           params.noteId!,
           revisionParam(params.revision!),
           body,
@@ -114,9 +118,9 @@ export function registerNoteRoutes<TEnv>(
     minimumRole: "editor",
     quota: "notes",
     body: QuickCaptureInputSchema,
-    handler: async ({ env, workspace, body }) => ({
+    handler: async ({ env, workspace, body, requestId }) => ({
       status: 201,
-      data: { note: await createService(env).quickCapture(workspace!, body) },
+      data: { note: await createService(env).quickCapture(mutationContext(workspace!, requestId), body) },
     }),
   });
 }

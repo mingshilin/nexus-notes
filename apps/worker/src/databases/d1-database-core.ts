@@ -59,10 +59,15 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
       description: input.description ?? "", created_by: context.userId,
       revision: 1, created_at: now, updated_at: now,
     };
-    await this.db.prepare(
+    const insert = this.db.prepare(
       `INSERT INTO databases (id, workspace_id, name, description, created_by, revision, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
-    ).bind(database.id, database.workspace_id, database.name, database.description, database.created_by, now, now).run();
+    ).bind(database.id, database.workspace_id, database.name, database.description, database.created_by, now, now);
+    await this.db.batch([
+      insert,
+      ...this.auditStatements(context, "database.created", "database", database.id, 1, now),
+    ]);
+    await this.notifyPresence(context.workspaceId, "database", database.id, database.revision);
     return database;
   }
 
@@ -72,12 +77,27 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
     const name = input.name ?? database.name;
     const description = input.description ?? database.description;
     const now = this.now();
-    const result = await this.db.prepare(
+    const update = this.db.prepare(
       `UPDATE databases SET name = ?, description = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND id = ? AND revision = ?`,
-    ).bind(name, description, now, context.workspaceId, databaseId, input.base_revision).run();
+    ).bind(name, description, now, context.workspaceId, databaseId, input.base_revision);
+    const [result] = await this.db.batch([
+      update,
+      ...this.auditStatements(
+        context,
+        "database.updated",
+        "database",
+        databaseId,
+        input.base_revision + 1,
+        now,
+        "EXISTS (SELECT 1 FROM databases WHERE workspace_id = ? AND id = ? AND revision = ? AND updated_at = ?)",
+        [context.workspaceId, databaseId, input.base_revision + 1, now],
+      ),
+    ]);
     if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
-    return { ...database, name, description, revision: database.revision + 1, updated_at: now };
+    const updated = { ...database, name, description, revision: database.revision + 1, updated_at: now };
+    await this.notifyPresence(context.workspaceId, "database", databaseId, updated.revision);
+    return updated;
   }
 
   async deleteDatabase(context: WorkspaceContext, databaseId: string, input: DeleteDatabaseInput) {
@@ -87,6 +107,16 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
     const statements: D1PreparedStatement[] = [databaseRevisionGuard(
       this.db, context, databaseId, input.base_revision, "expected",
     ),
+      ...this.auditStatements(
+        context,
+        "database.deleted",
+        "database",
+        databaseId,
+        input.base_revision + 1,
+        now,
+        "EXISTS (SELECT 1 FROM databases WHERE workspace_id = ? AND id = ? AND revision = ?)",
+        [context.workspaceId, databaseId, input.base_revision],
+      ),
       this.db.prepare(
         `UPDATE notes SET database_id = NULL, revision = revision + 1, updated_at = ?
          WHERE workspace_id = ? AND database_id = ?`,
@@ -112,6 +142,7 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
       if (!isDatabaseRevisionGuardError(error)) throw error;
       throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     }
+    await this.notifyPresence(context.workspaceId, "database", databaseId, input.base_revision + 1);
     return { id: databaseId };
   }
 
@@ -132,14 +163,19 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
       position: candidate.position, hidden: candidate.hidden, read_only: candidate.read_only,
       revision: 1, created_at: now, updated_at: now,
     };
-    await this.db.prepare(
+    const insert = this.db.prepare(
       `INSERT INTO database_properties
        (id, workspace_id, database_id, name, type, config_json, position, is_hidden, is_read_only, revision, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
     ).bind(
       property.id, property.workspace_id, property.database_id, property.name, property.type,
       JSON.stringify(property.config), property.position, Number(property.hidden), Number(property.read_only), now, now,
-    ).run();
+    );
+    await this.db.batch([
+      insert,
+      ...this.auditStatements(context, "database_property.created", "database_property", property.id, 1, now),
+    ]);
+    await this.notifyPresence(context.workspaceId, "database_property", property.id, property.revision);
     return property;
   }
 
@@ -160,16 +196,32 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
     }
     await this.assertRelationTarget(context, candidate);
     const now = this.now();
-    const result = await this.db.prepare(
+    const update = this.db.prepare(
       `UPDATE database_properties SET name = ?, config_json = ?, position = ?, is_hidden = ?, is_read_only = ?,
        revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
     ).bind(
       candidate.name, JSON.stringify(candidate.config), candidate.position, Number(candidate.hidden), Number(candidate.read_only),
       now, context.workspaceId, databaseId, propertyId, input.base_revision,
-    ).run();
+    );
+    const [result] = await this.db.batch([
+      update,
+      ...this.auditStatements(
+        context,
+        "database_property.updated",
+        "database_property",
+        propertyId,
+        input.base_revision + 1,
+        now,
+        `EXISTS (SELECT 1 FROM database_properties
+          WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ? AND updated_at = ?)`,
+        [context.workspaceId, databaseId, propertyId, input.base_revision + 1, now],
+      ),
+    ]);
     if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
-    return { ...property, ...candidate, revision: property.revision + 1, updated_at: now };
+    const updated = { ...property, ...candidate, revision: property.revision + 1, updated_at: now };
+    await this.notifyPresence(context.workspaceId, "database_property", propertyId, updated.revision);
+    return updated;
   }
 
   async deleteProperty(context: WorkspaceContext, databaseId: string, propertyId: string, input: { base_revision: number }) {
@@ -179,10 +231,25 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
       throw new DatabaseRepositoryError("FIELD_WRITE_DENIED", "Field write denied", 403, { property_id: property.id });
     }
     assertRevision(property.revision, input.base_revision);
-    const result = await this.db.prepare(
+    const remove = this.db.prepare(
       "DELETE FROM database_properties WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?",
-    ).bind(context.workspaceId, databaseId, propertyId, input.base_revision).run();
+    ).bind(context.workspaceId, databaseId, propertyId, input.base_revision);
+    const results = await this.db.batch([
+      ...this.auditStatements(
+        context,
+        "database_property.deleted",
+        "database_property",
+        propertyId,
+        input.base_revision + 1,
+        this.now(),
+        "EXISTS (SELECT 1 FROM database_properties WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?)",
+        [context.workspaceId, databaseId, propertyId, input.base_revision],
+      ),
+      remove,
+    ]);
+    const result = results.at(-1)!;
     if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    await this.notifyPresence(context.workspaceId, "database_property", propertyId, input.base_revision + 1);
     return { id: propertyId };
   }
 

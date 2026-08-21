@@ -30,6 +30,7 @@ import {
 } from "@nexus/domain";
 
 import { D1DatabaseAccess } from "../databases/d1-database-access";
+import type { PresenceNotifier } from "../presence/presence-dispatcher";
 
 interface TokenService {
   createSessionToken(): string;
@@ -55,6 +56,7 @@ export interface CollaborationRepositoryOptions {
   createId(): string;
   clock(): Date;
   memberLimit: number;
+  presence?: PresenceNotifier;
 }
 
 interface InvitationRow extends WorkspaceInvitation {}
@@ -73,6 +75,8 @@ interface CommentRow {
   revision: number;
   created_at: string;
   updated_at: string;
+  deleted_at: string | null;
+  idempotency_key: string | null;
 }
 
 interface NotificationRow {
@@ -155,6 +159,48 @@ function parseMetadata(value: string): SafeAuditMetadata {
   }
 }
 
+export interface ActivityAuditStatementInput {
+  workspaceId: string;
+  actorUserId: string | null;
+  requestId: string;
+  action: string;
+  targetType: string;
+  targetId: string | null;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  condition?: string;
+  conditionBindings?: unknown[];
+}
+
+export function prepareActivityAndAuditStatements(
+  db: D1Database,
+  createId: () => string,
+  input: ActivityAuditStatementInput,
+) {
+  const metadata = JSON.stringify(redactAuditMetadata(input.metadata ?? {}));
+  const condition = input.condition ?? "1 = 1";
+  const conditionBindings = input.conditionBindings ?? [];
+  return [
+    db.prepare(
+      `INSERT INTO activity_logs
+       (id, workspace_id, actor_user_id, request_id, action, entity_type, entity_id, target_type, target_id, metadata_json, created_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${condition}`,
+    ).bind(
+      createId(), input.workspaceId, input.actorUserId, input.requestId, input.action,
+      input.targetType, input.targetId, input.targetType, input.targetId, metadata, input.createdAt,
+      ...conditionBindings,
+    ),
+    db.prepare(
+      `INSERT INTO audit_logs
+       (id, workspace_id, actor_user_id, request_id, action, target_type, target_id, outcome, metadata_json, created_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, 'success', ?, ? WHERE ${condition}`,
+    ).bind(
+      createId(), input.workspaceId, input.actorUserId, input.requestId, input.action,
+      input.targetType, input.targetId, metadata, input.createdAt, ...conditionBindings,
+    ),
+  ];
+}
+
 function encodeCursor(input: { created_at: string; id: string }) {
   return encodeURIComponent(`${input.created_at}\n${input.id}`);
 }
@@ -217,7 +263,7 @@ const invitationColumns = `id, workspace_id, email, role, status, revision, expi
 const memberColumns = `m.user_id, u.email, u.display_name, m.role, m.revision, m.joined_at, m.updated_at`;
 const commentColumns = `c.id, c.workspace_id, c.entity_type AS target_type, c.entity_id AS target_id,
   c.author_user_id, u.display_name AS author_display_name, c.parent_id, c.body,
-  c.revision, c.created_at, c.updated_at`;
+  c.revision, c.created_at, c.updated_at, c.deleted_at, c.idempotency_key`;
 const notificationColumns = `id, workspace_id, user_id, type, payload_json, deep_link, read_at, revision, created_at`;
 const shareColumns = `id, workspace_id, entity_type, entity_id, token_hash, password_hash,
   expires_at, revoked_at, status, revision, created_by, created_at, updated_at`;
@@ -254,6 +300,27 @@ export class D1CollaborationRepository {
        SET status = 'expired', revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND status = 'pending' AND consumed_at IS NULL AND expires_at <= ?`,
     ).bind(createdAt, context.workspaceId, createdAt);
+    const operationId = this.options.createId();
+    const operationStart = this.operationStart(
+      operationId,
+      "invitation.create",
+      context.workspaceId,
+      id,
+      `NOT EXISTS (
+         SELECT 1 FROM workspace_members m JOIN users u ON u.id = m.user_id
+         WHERE m.workspace_id = ? AND lower(u.email) = lower(?)
+       ) AND (
+         (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?)
+         + (SELECT COUNT(*) FROM workspace_invitations
+            WHERE workspace_id = ? AND status = 'pending' AND consumed_at IS NULL AND expires_at > ?)
+       ) < COALESCE(
+         (SELECT limit_value FROM workspace_quotas WHERE workspace_id = ? AND quota_key = 'members'), ?
+       )`,
+      [
+        context.workspaceId, email, context.workspaceId, context.workspaceId, createdAt,
+        context.workspaceId, this.options.memberLimit,
+      ],
+    );
     const insert = this.db.prepare(
       `INSERT INTO workspace_invitations
        (id, workspace_id, email, role, token_hash, status, revision, expires_at, consumed_at, created_by, created_at, updated_at)
@@ -277,12 +344,14 @@ export class D1CollaborationRepository {
     try {
       const results = await this.db.batch<InvitationRow>([
         expireStale,
+        ...operationStart,
         insert,
         ...this.logStatements(context.workspaceId, context.userId, requestId, "invitation.created", "workspace_invitation", id, {
           role: input.role,
-        }, `EXISTS (SELECT 1 FROM workspace_invitations WHERE id = '${id.replaceAll("'", "''")}')`),
+        }, this.operationCondition(operationId)),
+        this.operationCleanup(operationId),
       ]);
-      const invitation = results[1]?.results?.[0];
+      const invitation = results[3]?.results?.[0];
       if (!invitation) {
         const existingMember = await this.db.prepare(
           `SELECT 1 AS found FROM workspace_members m JOIN users u ON u.id = m.user_id
@@ -294,6 +363,14 @@ export class D1CollaborationRepository {
       return { invitation: { ...invitation, status: invitationStatus(invitation, createdAt) }, token };
     } catch (error) {
       if (error instanceof CollaborationRepositoryError) throw error;
+      if (this.isOperationGuardError(error)) {
+        const existingMember = await this.db.prepare(
+          `SELECT 1 AS found FROM workspace_members m JOIN users u ON u.id = m.user_id
+           WHERE m.workspace_id = ? AND lower(u.email) = lower(?) LIMIT 1`,
+        ).bind(context.workspaceId, email).first();
+        if (existingMember) throw new CollaborationRepositoryError("MEMBER_ALREADY_EXISTS", "User is already a member", 409);
+        throw new CollaborationRepositoryError("MEMBER_QUOTA_EXCEEDED", "Workspace member quota exceeded", 403);
+      }
       if (error instanceof Error && /workspace_invitations_pending_email|UNIQUE constraint failed/iu.test(error.message)) {
         throw new CollaborationRepositoryError("INVITATION_ALREADY_PENDING", "An invitation is already pending", 409);
       }
@@ -321,6 +398,24 @@ export class D1CollaborationRepository {
   async acceptInvitation(context: InvitationAcceptanceContext, requestId: string) {
     const now = this.now();
     const consumptionId = this.options.createId();
+    const operationId = this.options.createId();
+    const marker = this.db.prepare(
+      `INSERT INTO collaboration_operation_results
+       (operation_id, workspace_id, operation_type, target_id, created_at)
+       SELECT ?, workspace_id, 'invitation.accept', id, ?
+       FROM workspace_invitations
+       WHERE token_hash = ? AND status = 'pending' AND consumed_at IS NULL AND expires_at > ?
+         AND lower(email) = lower((SELECT email FROM users WHERE id = ?))
+         AND NOT EXISTS (
+           SELECT 1 FROM workspace_members m
+           WHERE m.workspace_id = workspace_invitations.workspace_id AND m.user_id = ?
+         )
+         AND (SELECT COUNT(*) FROM workspace_members m WHERE m.workspace_id = workspace_invitations.workspace_id)
+           < COALESCE(
+             (SELECT limit_value FROM workspace_quotas q
+              WHERE q.workspace_id = workspace_invitations.workspace_id AND q.quota_key = 'members'), ?
+           )`,
+    ).bind(operationId, now, context.tokenHash, now, context.userId, context.userId, this.options.memberLimit);
     const update = this.db.prepare(
       `UPDATE workspace_invitations
        SET status = 'accepted', consumed_at = ?, consumption_id = ?, consumed_by_user_id = ?,
@@ -348,7 +443,11 @@ export class D1CollaborationRepository {
     ).bind(context.userId, now, now, consumptionId, context.userId);
     const activityId = this.options.createId();
     const auditId = this.options.createId();
-    const results = await this.db.batch<InvitationRow>([
+    let results: D1Result<InvitationRow>[];
+    try {
+      results = await this.db.batch<InvitationRow>([
+      marker,
+      this.operationGuard(operationId),
       update,
       insertMember,
       this.db.prepare(
@@ -364,11 +463,18 @@ export class D1CollaborationRepository {
          SELECT ?, workspace_id, ?, ?, 'invitation.accepted', 'workspace_member', ?, 'success', '{}', ?
          FROM workspace_invitations WHERE consumption_id = ? AND consumed_by_user_id = ?`,
       ).bind(auditId, context.userId, requestId, context.userId, now, consumptionId, context.userId),
+      this.operationCleanup(operationId),
     ]);
-    if (!results[0]?.results?.[0]) {
+    } catch (error) {
+      if (this.isOperationGuardError(error)) {
+        throw new CollaborationRepositoryError("INVITATION_UNAVAILABLE", "Invitation is invalid, expired, or already used", 410);
+      }
+      throw error;
+    }
+    if (!results[2]?.results?.[0]) {
       throw new CollaborationRepositoryError("INVITATION_UNAVAILABLE", "Invitation is invalid, expired, or already used", 410);
     }
-    const invitation = results[0].results[0];
+    const invitation = results[2].results[0];
     const member = await this.member(invitation.workspace_id, context.userId);
     if (!member) throw new CollaborationRepositoryError("INVITATION_UNAVAILABLE", "Invitation could not be accepted", 409);
     return member;
@@ -387,16 +493,30 @@ export class D1CollaborationRepository {
   async revokeInvitation(context: WorkspaceContext, invitationId: string, baseRevision: number, requestId: string) {
     if (context.role !== "owner") throw new CollaborationRepositoryError("MEMBER_MANAGEMENT_DENIED", "Owner permission required", 403);
     const now = this.now();
-    const results = await this.db.batch<InvitationRow>([
+    const operationId = this.options.createId();
+    let results: D1Result<InvitationRow>[];
+    try {
+      results = await this.db.batch<InvitationRow>([
+      ...this.operationStart(operationId, "invitation.revoke", context.workspaceId, invitationId,
+        `EXISTS (SELECT 1 FROM workspace_invitations
+         WHERE workspace_id = ? AND id = ? AND revision = ? AND status = 'pending' AND consumed_at IS NULL)`,
+        [context.workspaceId, invitationId, baseRevision]),
       this.db.prepare(
         `UPDATE workspace_invitations SET status = 'revoked', revision = revision + 1, updated_at = ?
          WHERE workspace_id = ? AND id = ? AND revision = ? AND status = 'pending' AND consumed_at IS NULL
          RETURNING ${invitationColumns}`,
       ).bind(now, context.workspaceId, invitationId, baseRevision),
       ...this.logStatements(context.workspaceId, context.userId, requestId, "invitation.revoked", "workspace_invitation", invitationId, {},
-        `EXISTS (SELECT 1 FROM workspace_invitations WHERE workspace_id = '${context.workspaceId.replaceAll("'", "''")}' AND id = '${invitationId.replaceAll("'", "''")}' AND status = 'revoked' AND revision = ${baseRevision + 1})`),
+        this.operationCondition(operationId)),
+      this.operationCleanup(operationId),
     ]);
-    const row = results[0]?.results?.[0];
+    } catch (error) {
+      if (this.isOperationGuardError(error)) {
+        throw new CollaborationRepositoryError("INVITATION_CONFLICT", "Invitation is unavailable or changed", 409);
+      }
+      throw error;
+    }
+    const row = results[2]?.results?.[0];
     if (!row) throw new CollaborationRepositoryError("INVITATION_CONFLICT", "Invitation is unavailable or changed", 409);
     return { ...row, status: invitationStatus(row, now) };
   }
@@ -420,7 +540,18 @@ export class D1CollaborationRepository {
     }
     if (current.revision !== input.base_revision) throw this.revisionConflict(current.revision, input.base_revision);
     const now = this.now();
-    const results = await this.db.batch<MemberRow>([
+    const operationId = this.options.createId();
+    let results: D1Result<MemberRow>[];
+    try {
+      results = await this.db.batch<MemberRow>([
+      ...this.operationStart(operationId, "member.role", context.workspaceId, userId,
+        `EXISTS (SELECT 1 FROM workspace_members
+         WHERE workspace_id = ? AND user_id = ? AND revision = ?
+           AND (role <> 'owner' OR ? = 'owner' OR (
+             SELECT COUNT(*) FROM workspace_members owners
+             WHERE owners.workspace_id = workspace_members.workspace_id AND owners.role = 'owner'
+           ) > 1))`,
+        [context.workspaceId, userId, input.base_revision, input.role]),
       this.db.prepare(
         `UPDATE workspace_members SET role = ?, revision = revision + 1, updated_at = ?
          WHERE workspace_id = ? AND user_id = ? AND revision = ?
@@ -432,9 +563,18 @@ export class D1CollaborationRepository {
       ).bind(input.role, now, context.workspaceId, userId, input.base_revision, input.role),
       ...this.logStatements(context.workspaceId, context.userId, requestId, "member.role_changed", "workspace_member", userId, {
         role: input.role,
-      }, `EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id = '${context.workspaceId.replaceAll("'", "''")}' AND user_id = '${userId.replaceAll("'", "''")}' AND revision = ${input.base_revision + 1})`),
+      }, this.operationCondition(operationId)),
+      this.operationCleanup(operationId),
     ]);
-    if (!results[0]?.results?.[0]) {
+    } catch (error) {
+      if (!this.isOperationGuardError(error)) throw error;
+      if (current.role === "owner" && input.role !== "owner" && await this.ownerCount(context.workspaceId) <= 1) {
+        throw new CollaborationRepositoryError("LAST_OWNER_REQUIRED", "Workspace must retain an owner", 409);
+      }
+      const latest = await this.member(context.workspaceId, userId);
+      throw this.revisionConflict(latest?.revision ?? current.revision, input.base_revision);
+    }
+    if (!results[2]?.results?.[0]) {
       if (current.role === "owner" && input.role !== "owner" && await this.ownerCount(context.workspaceId) <= 1) {
         throw new CollaborationRepositoryError("LAST_OWNER_REQUIRED", "Workspace must retain an owner", 409);
       }
@@ -456,10 +596,17 @@ export class D1CollaborationRepository {
     }
     if (current.revision !== baseRevision) throw this.revisionConflict(current.revision, baseRevision);
     const now = this.now();
-    await this.db.batch([
-      ...this.logStatements(context.workspaceId, context.userId, requestId, "member.removed", "workspace_member", userId, {
-        previous_role: current.role,
-      }, `EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id = '${context.workspaceId.replaceAll("'", "''")}' AND user_id = '${userId.replaceAll("'", "''")}' AND revision = ${baseRevision})`),
+    const operationId = this.options.createId();
+    try {
+      await this.db.batch([
+      ...this.operationStart(operationId, "member.remove", context.workspaceId, userId,
+        `EXISTS (SELECT 1 FROM workspace_members
+         WHERE workspace_id = ? AND user_id = ? AND revision = ?
+           AND (role <> 'owner' OR (
+             SELECT COUNT(*) FROM workspace_members owners
+             WHERE owners.workspace_id = workspace_members.workspace_id AND owners.role = 'owner'
+           ) > 1))`,
+        [context.workspaceId, userId, baseRevision]),
       this.db.prepare(
         `DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ? AND revision = ?
          AND (role <> 'owner' OR (
@@ -467,7 +614,19 @@ export class D1CollaborationRepository {
            WHERE owners.workspace_id = workspace_members.workspace_id AND owners.role = 'owner'
          ) > 1)`,
       ).bind(context.workspaceId, userId, baseRevision),
+      ...this.logStatements(context.workspaceId, context.userId, requestId, "member.removed", "workspace_member", userId, {
+        previous_role: current.role,
+      }, this.operationCondition(operationId)),
+      this.operationCleanup(operationId),
     ]);
+    } catch (error) {
+      if (!this.isOperationGuardError(error)) throw error;
+      const latest = await this.member(context.workspaceId, userId);
+      if (latest?.role === "owner" && await this.ownerCount(context.workspaceId) <= 1) {
+        throw new CollaborationRepositoryError("LAST_OWNER_REQUIRED", "Workspace must retain an owner", 409);
+      }
+      throw this.revisionConflict(latest?.revision ?? current.revision, baseRevision);
+    }
     const stillPresent = await this.member(context.workspaceId, userId);
     if (stillPresent) {
       if (stillPresent.role === "owner" && await this.ownerCount(context.workspaceId) <= 1) {
@@ -475,6 +634,15 @@ export class D1CollaborationRepository {
       }
       throw this.revisionConflict(stillPresent.revision, baseRevision);
     }
+    const epoch = await this.db.prepare(
+      `SELECT membership_epoch FROM workspace_membership_epochs
+       WHERE workspace_id = ? AND user_id = ?`,
+    ).bind(context.workspaceId, userId).first<{ membership_epoch: number }>();
+    await this.notifyPresence(() => this.options.presence?.revoke({
+      workspaceId: context.workspaceId,
+      userId,
+      membershipEpoch: epoch?.membership_epoch ?? baseRevision + 1,
+    }));
     return { user_id: userId };
   }
 
@@ -485,12 +653,27 @@ export class D1CollaborationRepository {
     await this.assertTarget(context, input.target_type, input.target_id, "write");
     await this.assertCommentParent(context, input.target_type, input.target_id, input.parent_id ?? null);
     await this.assertMentionTargets(context.workspaceId, input.mention_user_ids);
-    const existing = await this.commentByIdempotency(context.workspaceId, input.idempotency_key);
-    if (existing) return existing;
+    const existing = await this.commentByIdempotency(context.workspaceId, context.userId, input.idempotency_key);
+    if (existing) return this.resolveCommentReplay(existing, context.userId, input);
 
     const id = this.options.createId();
+    const operationId = this.options.createId();
     const createdAt = this.now();
-    const statements: D1PreparedStatement[] = [this.db.prepare(
+    const statements: D1PreparedStatement[] = [...this.operationStart(
+      operationId,
+      "comment.create",
+      context.workspaceId,
+      id,
+      `EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)
+       AND NOT EXISTS (
+         SELECT 1 FROM json_each(?) requested
+         WHERE NOT EXISTS (
+           SELECT 1 FROM workspace_members member
+           WHERE member.workspace_id = ? AND member.user_id = requested.value
+         )
+       )`,
+      [context.workspaceId, context.userId, JSON.stringify(input.mention_user_ids), context.workspaceId],
+    ), this.db.prepare(
       `INSERT INTO comments
        (id, workspace_id, entity_type, entity_id, author_user_id, parent_id, body, revision, created_at, updated_at, idempotency_key)
        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
@@ -502,17 +685,26 @@ export class D1CollaborationRepository {
     statements.push(...this.logStatements(context.workspaceId, context.userId, requestId, "comment.created", "comment", id, {
       target_type: input.target_type,
       mention_count: input.mention_user_ids.length,
-    }));
+    }, this.operationCondition(operationId)));
+    statements.push(this.operationCleanup(operationId));
     try {
       await this.db.batch(statements);
     } catch (error) {
-      if (error instanceof Error && /comments_workspace_idempotency|UNIQUE constraint failed: comments.workspace_id, comments.idempotency_key/iu.test(error.message)) {
-        const replay = await this.commentByIdempotency(context.workspaceId, input.idempotency_key);
-        if (replay) return replay;
+      if (this.isOperationGuardError(error)) {
+        await this.assertMentionTargets(context.workspaceId, input.mention_user_ids);
+        throw new CollaborationRepositoryError("COMMENT_WRITE_DENIED", "Comment membership changed", 403);
+      }
+      if (error instanceof Error && /comments_actor_idempotency|UNIQUE constraint failed: comments.workspace_id, comments.author_user_id, comments.idempotency_key/iu.test(error.message)) {
+        const replay = await this.commentByIdempotency(context.workspaceId, context.userId, input.idempotency_key);
+        if (replay) return this.resolveCommentReplay(replay, context.userId, input);
       }
       throw error;
     }
-    return this.requireComment(context.workspaceId, id);
+    const comment = await this.requireComment(context.workspaceId, id);
+    await this.notifyPresence(() => this.options.presence?.invalidate({
+      workspaceId: context.workspaceId, entityType: "comment", entityId: id, revision: comment.revision,
+    }));
+    return comment;
   }
 
   async listComments(context: WorkspaceContext, targetType: CollaborationComment["target_type"], targetId: string) {
@@ -535,7 +727,26 @@ export class D1CollaborationRepository {
     if (current.revision !== input.base_revision) throw this.revisionConflict(current.revision, input.base_revision);
     const now = this.now();
     const nextRevision = input.base_revision + 1;
-    const statements: D1PreparedStatement[] = [this.db.prepare(
+    const operationId = this.options.createId();
+    const statements: D1PreparedStatement[] = [...this.operationStart(
+      operationId,
+      "comment.update",
+      context.workspaceId,
+      commentId,
+      `EXISTS (SELECT 1 FROM comments WHERE workspace_id = ? AND id = ? AND revision = ? AND deleted_at IS NULL)
+       AND EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)
+       AND NOT EXISTS (
+         SELECT 1 FROM json_each(?) requested
+         WHERE NOT EXISTS (
+           SELECT 1 FROM workspace_members member
+           WHERE member.workspace_id = ? AND member.user_id = requested.value
+         )
+       )`,
+      [
+        context.workspaceId, commentId, input.base_revision, context.workspaceId, context.userId,
+        JSON.stringify(input.mention_user_ids), context.workspaceId,
+      ],
+    ), this.db.prepare(
       `UPDATE comments SET body = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND id = ? AND revision = ? AND deleted_at IS NULL
        RETURNING id`,
@@ -549,10 +760,23 @@ export class D1CollaborationRepository {
     statements.push(...this.logStatements(context.workspaceId, context.userId, requestId, "comment.updated", "comment", commentId, {
       revision: nextRevision,
       mention_count: input.mention_user_ids.length,
-    }, `EXISTS (SELECT 1 FROM comments WHERE workspace_id = '${context.workspaceId.replaceAll("'", "''")}' AND id = '${commentId.replaceAll("'", "''")}' AND revision = ${nextRevision})`));
-    const results = await this.db.batch(statements);
-    if ((results[0]?.meta.changes ?? 0) === 0) throw this.revisionConflict(current.revision, input.base_revision);
-    return this.requireComment(context.workspaceId, commentId);
+    }, this.operationCondition(operationId)));
+    statements.push(this.operationCleanup(operationId));
+    let results: D1Result[];
+    try {
+      results = await this.db.batch(statements);
+    } catch (error) {
+      if (!this.isOperationGuardError(error)) throw error;
+      await this.assertMentionTargets(context.workspaceId, input.mention_user_ids);
+      const latest = await this.commentRow(context.workspaceId, commentId);
+      throw this.revisionConflict(latest?.revision ?? current.revision, input.base_revision);
+    }
+    if ((results[2]?.meta.changes ?? 0) === 0) throw this.revisionConflict(current.revision, input.base_revision);
+    const comment = await this.requireComment(context.workspaceId, commentId);
+    await this.notifyPresence(() => this.options.presence?.invalidate({
+      workspaceId: context.workspaceId, entityType: "comment", entityId: commentId, revision: comment.revision,
+    }));
+    return comment;
   }
 
   async deleteComment(context: WorkspaceContext, commentId: string, baseRevision: number, requestId: string) {
@@ -563,16 +787,32 @@ export class D1CollaborationRepository {
     await this.assertTarget(context, current.target_type, current.target_id, "write");
     if (current.revision !== baseRevision) throw this.revisionConflict(current.revision, baseRevision);
     const now = this.now();
-    const results = await this.db.batch([
+    const operationId = this.options.createId();
+    let results: D1Result[];
+    try {
+      results = await this.db.batch([
+      ...this.operationStart(operationId, "comment.delete", context.workspaceId, commentId,
+        `EXISTS (SELECT 1 FROM comments
+         WHERE workspace_id = ? AND id = ? AND revision = ? AND deleted_at IS NULL)`,
+        [context.workspaceId, commentId, baseRevision]),
       this.db.prepare(
         `UPDATE comments SET deleted_at = ?, revision = revision + 1, updated_at = ?
          WHERE workspace_id = ? AND id = ? AND revision = ? AND deleted_at IS NULL RETURNING id`,
       ).bind(now, now, context.workspaceId, commentId, baseRevision),
       ...this.logStatements(context.workspaceId, context.userId, requestId, "comment.deleted", "comment", commentId, {
         revision: baseRevision + 1,
-      }, `EXISTS (SELECT 1 FROM comments WHERE workspace_id = '${context.workspaceId.replaceAll("'", "''")}' AND id = '${commentId.replaceAll("'", "''")}' AND deleted_at IS NOT NULL)`),
+      }, this.operationCondition(operationId)),
+      this.operationCleanup(operationId),
     ]);
-    if ((results[0]?.meta.changes ?? 0) === 0) throw this.revisionConflict(current.revision, baseRevision);
+    } catch (error) {
+      if (!this.isOperationGuardError(error)) throw error;
+      const latest = await this.commentRow(context.workspaceId, commentId);
+      throw this.revisionConflict(latest?.revision ?? current.revision, baseRevision);
+    }
+    if ((results[2]?.meta.changes ?? 0) === 0) throw this.revisionConflict(current.revision, baseRevision);
+    await this.notifyPresence(() => this.options.presence?.invalidate({
+      workspaceId: context.workspaceId, entityType: "comment", entityId: commentId, revision: baseRevision + 1,
+    }));
     return { id: commentId };
   }
 
@@ -810,15 +1050,30 @@ export class D1CollaborationRepository {
     }
     if (current.revision !== baseRevision) throw this.revisionConflict(current.revision, baseRevision);
     const now = this.now();
-    const results = await this.db.batch<ShareRow>([
+    const operationId = this.options.createId();
+    let results: D1Result<ShareRow>[];
+    try {
+      results = await this.db.batch<ShareRow>([
+      ...this.operationStart(operationId, "public_share.revoke", context.workspaceId, shareId,
+        `EXISTS (SELECT 1 FROM public_shares
+         WHERE workspace_id = ? AND id = ? AND revision = ? AND status = 'active')`,
+        [context.workspaceId, shareId, baseRevision]),
       this.db.prepare(
         `UPDATE public_shares SET status = 'revoked', revoked_at = ?, revision = revision + 1, updated_at = ?
          WHERE workspace_id = ? AND id = ? AND revision = ? AND status = 'active'
          RETURNING ${shareColumns}`,
       ).bind(now, now, context.workspaceId, shareId, baseRevision),
-      ...this.logStatements(context.workspaceId, context.userId, requestId, "public_share.revoked", "public_share", shareId, {}),
+      ...this.logStatements(context.workspaceId, context.userId, requestId, "public_share.revoked", "public_share", shareId, {},
+        this.operationCondition(operationId)),
+      this.operationCleanup(operationId),
     ]);
-    const row = results[0]?.results?.[0];
+    } catch (error) {
+      if (this.isOperationGuardError(error)) {
+        throw new CollaborationRepositoryError("SHARE_CONFLICT", "Share is unavailable or changed", 409);
+      }
+      throw error;
+    }
+    const row = results[2]?.results?.[0];
     if (!row) throw new CollaborationRepositoryError("SHARE_CONFLICT", "Share is unavailable or changed", 409);
     return toShare(row, now);
   }
@@ -942,12 +1197,54 @@ export class D1CollaborationRepository {
     return statements;
   }
 
-  private async commentByIdempotency(workspaceId: string, idempotencyKey: string) {
+  private async commentByIdempotency(workspaceId: string, actorUserId: string, idempotencyKey: string) {
     const row = await this.db.prepare(
       `SELECT ${commentColumns} FROM comments c JOIN users u ON u.id = c.author_user_id
-       WHERE c.workspace_id = ? AND c.idempotency_key = ? AND c.deleted_at IS NULL LIMIT 1`,
-    ).bind(workspaceId, idempotencyKey).first<CommentRow>();
-    return row ? this.toComment(row) : null;
+       WHERE c.workspace_id = ? AND c.author_user_id = ? AND c.idempotency_key = ? LIMIT 1`,
+    ).bind(workspaceId, actorUserId, idempotencyKey).first<CommentRow>();
+    if (!row) return null;
+    return { row, comment: await this.toComment(row) };
+  }
+
+  private async commentRow(workspaceId: string, commentId: string) {
+    return this.db.prepare(
+      `SELECT ${commentColumns} FROM comments c JOIN users u ON u.id = c.author_user_id
+       WHERE c.workspace_id = ? AND c.id = ? LIMIT 1`,
+    ).bind(workspaceId, commentId).first<CommentRow>();
+  }
+
+  private resolveCommentReplay(
+    existing: { row: CommentRow; comment: CollaborationComment },
+    actorUserId: string,
+    input: CreateCommentInput,
+  ) {
+    const expected = this.commentFingerprint(actorUserId, input);
+    const actual = this.commentFingerprint(existing.row.author_user_id, {
+      target_type: existing.row.target_type,
+      target_id: existing.row.target_id,
+      ...(existing.row.parent_id ? { parent_id: existing.row.parent_id } : {}),
+      body: existing.row.body,
+      mention_user_ids: existing.comment.mention_user_ids,
+      idempotency_key: input.idempotency_key,
+    });
+    if (actual !== expected) {
+      throw new CollaborationRepositoryError("IDEMPOTENCY_CONFLICT", "Idempotency key payload does not match", 409);
+    }
+    if (existing.row.deleted_at) {
+      throw new CollaborationRepositoryError("IDEMPOTENCY_TOMBSTONE", "Idempotent comment was deleted", 409);
+    }
+    return existing.comment;
+  }
+
+  private commentFingerprint(actorUserId: string, input: CreateCommentInput) {
+    return JSON.stringify({
+      actor_user_id: actorUserId,
+      target_type: input.target_type,
+      target_id: input.target_id,
+      parent_id: input.parent_id ?? null,
+      body: input.body.trim(),
+      mention_user_ids: [...input.mention_user_ids].sort(),
+    });
   }
 
   private async requireComment(workspaceId: string, commentId: string) {
@@ -963,7 +1260,8 @@ export class D1CollaborationRepository {
     const mentions = await this.db.prepare(
       "SELECT mentioned_user_id FROM mentions WHERE workspace_id = ? AND comment_id = ? ORDER BY mentioned_user_id",
     ).bind(row.workspace_id, row.id).all<{ mentioned_user_id: string }>();
-    return { ...row, mention_user_ids: (mentions.results ?? []).map((mention) => mention.mentioned_user_id) };
+    const { deleted_at: _deletedAt, idempotency_key: _idempotencyKey, ...comment } = row;
+    return { ...comment, mention_user_ids: (mentions.results ?? []).map((mention) => mention.mentioned_user_id) };
   }
 
   private toNotification(row: NotificationRow): Notification {
@@ -1045,22 +1343,66 @@ export class D1CollaborationRepository {
     metadata: Record<string, unknown>,
     condition = "1 = 1",
   ) {
-    const safeMetadata = JSON.stringify(redactAuditMetadata(metadata));
-    const now = this.now();
+    return prepareActivityAndAuditStatements(this.db, this.options.createId, {
+      workspaceId,
+      actorUserId,
+      requestId,
+      action,
+      targetType,
+      targetId,
+      metadata,
+      createdAt: this.now(),
+      condition,
+    });
+  }
+
+  private operationStart(
+    operationId: string,
+    operationType: string,
+    workspaceId: string,
+    targetId: string | null,
+    condition: string,
+    bindings: unknown[],
+  ) {
     return [
       this.db.prepare(
-        `INSERT INTO activity_logs
-         (id, workspace_id, actor_user_id, request_id, action, entity_type, entity_id, target_type, target_id, metadata_json, created_at)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${condition}`,
-      ).bind(
-        this.options.createId(), workspaceId, actorUserId, requestId, action,
-        targetType, targetId, targetType, targetId, safeMetadata, now,
-      ),
-      this.db.prepare(
-        `INSERT INTO audit_logs
-         (id, workspace_id, actor_user_id, request_id, action, target_type, target_id, outcome, metadata_json, created_at)
-         SELECT ?, ?, ?, ?, ?, ?, ?, 'success', ?, ? WHERE ${condition}`,
-      ).bind(this.options.createId(), workspaceId, actorUserId, requestId, action, targetType, targetId, safeMetadata, now),
+        `INSERT INTO collaboration_operation_results
+         (operation_id, workspace_id, operation_type, target_id, created_at)
+         SELECT ?, ?, ?, ?, ? WHERE ${condition}`,
+      ).bind(operationId, workspaceId, operationType, targetId, this.now(), ...bindings),
+      this.operationGuard(operationId),
     ];
+  }
+
+  private operationGuard(operationId: string) {
+    return this.db.prepare(
+      `INSERT INTO collaboration_operation_guard (id)
+       SELECT 1 WHERE NOT EXISTS (
+         SELECT 1 FROM collaboration_operation_results WHERE operation_id = ?
+       )`,
+    ).bind(operationId);
+  }
+
+  private operationCleanup(operationId: string) {
+    return this.db.prepare(
+      "DELETE FROM collaboration_operation_results WHERE operation_id = ?",
+    ).bind(operationId);
+  }
+
+  private operationCondition(operationId: string) {
+    return `EXISTS (SELECT 1 FROM collaboration_operation_results WHERE operation_id = '${operationId.replaceAll("'", "''")}')`;
+  }
+
+  private isOperationGuardError(error: unknown) {
+    return error instanceof Error
+      && /UNIQUE constraint failed: collaboration_operation_guard\.id/iu.test(error.message);
+  }
+
+  private async notifyPresence(callback: () => Promise<void> | undefined) {
+    try {
+      await callback();
+    } catch {
+      // Presence is advisory; D1 remains authoritative after a successful commit.
+    }
   }
 }

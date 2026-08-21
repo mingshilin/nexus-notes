@@ -10,6 +10,7 @@ import type {
 export interface NoteActorContext {
   workspaceId: string;
   userId: string;
+  requestId?: string;
 }
 
 export interface CreateNoteRecordInput {
@@ -25,6 +26,7 @@ export interface CreateNoteRecordInput {
   isPinned: boolean;
   source: "manual";
   now: string;
+  requestId?: string;
 }
 
 export interface NoteRepository {
@@ -43,6 +45,7 @@ export interface NoteRepository {
     baseRevision: number;
     patch: Omit<UpdateNoteInput, "base_revision">;
     now: string;
+    requestId?: string;
   }): Promise<{ note: Note | null; current: Note | null }>;
   restoreRevision(input: {
     workspaceId: string;
@@ -51,6 +54,7 @@ export interface NoteRepository {
     revision: number;
     baseRevision: number;
     now: string;
+    requestId?: string;
   }): Promise<{ note: Note | null; current: Note | null; revisionFound: boolean }>;
 }
 
@@ -117,6 +121,7 @@ export class NoteService {
       isPinned: input.is_pinned ?? false,
       source: "manual",
       now: this.options.clock().toISOString(),
+      requestId: context.requestId,
     });
   }
 
@@ -162,6 +167,7 @@ export class NoteService {
       baseRevision,
       patch,
       now: this.options.clock().toISOString(),
+      requestId: context.requestId,
     });
     if (!result.note) {
       if (!result.current) {
@@ -190,6 +196,7 @@ export class NoteService {
       revision,
       baseRevision: input.base_revision,
       now: this.options.clock().toISOString(),
+      requestId: context.requestId,
     });
     if (!result.note) {
       if (!result.current) {

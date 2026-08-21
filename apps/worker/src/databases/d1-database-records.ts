@@ -91,7 +91,19 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
         ).bind(databaseId, now, context.workspaceId, record.note_id));
       }
     }
-    statements.push(...this.referenceGuards(context, references));
+    statements.push(
+      ...this.auditStatements(
+        context,
+        "database_record.created",
+        "database_record",
+        record.id,
+        record.revision,
+        now,
+        "EXISTS (SELECT 1 FROM database_records WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?)",
+        [context.workspaceId, databaseId, record.id, record.revision],
+      ),
+      ...this.referenceGuards(context, references),
+    );
     try {
       await this.db.batch(statements);
     } catch (error) {
@@ -99,6 +111,7 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
       if (referenceFailure) throw referenceFailure;
       throw error;
     }
+    await this.notifyPresence(context.workspaceId, "database_record", record.id, record.revision);
     return record;
   }
 
@@ -229,6 +242,18 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
        ON CONFLICT(record_id, property_id) DO UPDATE SET
          value_json = excluded.value_json, revision = record_values.revision + 1, updated_at = excluded.updated_at`,
     ).bind(context.workspaceId, databaseId, now, JSON.stringify(rows))));
+    for (const { mutation } of prepared) {
+      statements.push(...this.auditStatements(
+        context,
+        "database_record.updated",
+        "database_record",
+        mutation.record_id,
+        mutation.base_revision + 1,
+        now,
+        "EXISTS (SELECT 1 FROM database_records WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ? AND updated_at = ?)",
+        [context.workspaceId, databaseId, mutation.record_id, mutation.base_revision + 1, now],
+      ));
+    }
     statements.push(...this.referenceGuards(context, references));
     try {
       await this.db.batch(statements);
@@ -237,6 +262,9 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
       if (referenceFailure) throw referenceFailure;
       if (isRecordRevisionGuardError(error)) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
       throw error;
+    }
+    for (const { mutation } of prepared) {
+      await this.notifyPresence(context.workspaceId, "database_record", mutation.record_id, mutation.base_revision + 1);
     }
     const updatedRows = await this.recordRows(context.workspaceId, databaseId, recordIds);
     return { items: await this.materialize(updatedRows, fields.readable) };

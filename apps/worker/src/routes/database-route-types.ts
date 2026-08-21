@@ -7,6 +7,10 @@ export interface DatabaseRegistry<TEnv> {
 
 export type DatabaseRepositoryFactory<TEnv> = (env: TEnv) => D1DatabaseRepository;
 
+export function mutationContext<T extends object>(workspace: T, requestId: string) {
+  return { ...workspace, requestId };
+}
+
 export function recordListOptions(request: Request) {
   const params = new URL(request.url).searchParams;
   const requested = Number(params.get("limit") ?? 50);

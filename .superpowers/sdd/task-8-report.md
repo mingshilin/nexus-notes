@@ -138,3 +138,58 @@ These are feature-missing failures from tests added before any Wave 8B productio
 - No participant map or content is written with Durable Object storage APIs. `setAlarm` stores only Cloudflare scheduling metadata needed for expiry cleanup; WebSocket hibernation attachments contain bounded identity/presence fields only.
 - Ownership promotion can create a second owner; demotion/removal remains a separate revisioned owner-only operation protected by the committed last-owner database guard. This preserves recoverability and avoids a non-atomic two-member route mutation.
 - Residual timing differences may exist between an unknown public token and PBKDF2 verification for a valid protected share, although status/body/header semantics are indistinguishable and attempts are rate-limited. Eliminating that side channel would require a repository-level dummy-hash policy beyond the committed Wave 8A interface.
+
+---
+
+# Task 8 Backend Closure: Request IDs, Mutation Audit, Invalidation
+
+Date: 2026-08-22
+Branch: `codex/public-beta-rewrite`
+Base at start: `7252d62`
+
+## RED Evidence
+
+Command run before this closure production edit:
+
+```text
+npm test --workspace @nexus/worker -- tests/mutation-audit.test.ts tests/note-routes.test.ts tests/database-routes.test.ts
+
+Test Files  1 failed | 2 passed (3)
+Tests  1 failed | 11 passed (12)
+
+FAIL tests/mutation-audit.test.ts > Beta mutation audit and Presence invalidation > couples database mutation logs to request IDs and dispatches post-commit invalidation
+AssertionError: expected [ 'req-db-create', …(2) ] to deeply equal [ 'req-db-create', …(4) ]
+Expected request IDs: req-db-create, req-db-property, req-db-record, req-db-record-update, req-db-update
+Received request IDs: req-db-create, req-db-property, req-db-update
+```
+
+The current unstaged route fixes already made `note-routes.test.ts` and `database-routes.test.ts` green in that RED run. The remaining failure traced to `D1DatabaseRecordRepository.createRecord` and `bulkEditRecords`, which did not use the existing optional request-correlated audit hook or post-commit Presence notifier.
+
+## GREEN Evidence
+
+After the minimal record mutation closure:
+
+```text
+npm test --workspace @nexus/worker -- tests/mutation-audit.test.ts tests/note-routes.test.ts tests/database-routes.test.ts
+
+Test Files  3 passed (3)
+Tests  12 passed (12)
+```
+
+`createRecord` now appends redacted activity/audit statements inside its existing D1 batch and only notifies Presence after that batch commits. `bulkEditRecords` now appends one guarded redacted activity/audit pair per updated record in its existing D1 batch and dispatches invalidations only after the batch commits. Both use the existing optional `requestId` and optional notifier defaults, preserving old callers. Audit errors roll back source writes; revision/reference guard failures roll back and emit no success audit; Presence failures remain caught after commit.
+
+## Closure Verification
+
+| Command | Result |
+| --- | --- |
+| `npm test --workspace @nexus/worker -- tests/mutation-audit.test.ts tests/note-routes.test.ts tests/database-routes.test.ts` | 3 files, 12/12 passed |
+| `npm test --workspace @nexus/worker -- tests/d1-collaboration-repository.test.ts --pool=threads --maxWorkers=1 --minWorkers=1` | 1 file, 18/18 passed; isolated process completed in 37.23s |
+| `npm test --workspace @nexus/worker -- tests/presence-room.test.ts tests/presence-route.test.ts tests/collaboration-routes.test.ts` | 3 files, 10/10 passed |
+| `npm run typecheck --workspace @nexus/worker` | passed |
+| `npx vitest run --config vitest.worker.config.ts` | legacy Worker route suite: 11 files, 62/62 passed |
+| `npm run beta:build` | passed: Web production build plus Worker/contracts/domain/testkit/UI typechecks; Web initial JS 338.69 kB and no Vite large-chunk warning |
+| `npm run verify:deploy` | passed for root `dist`: initial entry plus vendor assets all within readiness/preload/chunk rules |
+| `node scripts/verify-deploy-readiness.mjs --dist=apps/web/dist` | passed for Beta Web dist: `/assets/index-BtHqVHQI.js`; no forbidden initial Markdown/OCR chunk or over-budget asset |
+| `git diff --check` | passed before report append; rerun after append before commit |
+
+No collaboration repository or Presence design was changed in this closure beyond wiring the existing optional notifier into the two already-RED database record mutation paths.

@@ -6,6 +6,7 @@ import {
 } from "@nexus/contracts";
 
 import { SecureTokenService } from "../auth/crypto";
+import { presenceCommandPayload } from "./presence-dispatcher";
 
 const CONNECTION_TTL_MS = 45_000;
 const MAX_MESSAGE_BYTES = 4_096;
@@ -19,6 +20,7 @@ interface PresenceAttachment {
   targetId?: string;
   expiresAt: string;
   connected: boolean;
+  membershipEpoch: number;
 }
 
 interface PresenceSocket extends WebSocket {
@@ -34,18 +36,20 @@ interface PresenceIdentity {
   workspaceId: string;
   userId: string;
   displayName: string;
+  membershipEpoch: number;
   signature: string;
 }
 
 export interface PresenceRoomDependencies {
   clock(): Date;
   verifyIdentity(env: PresenceRoomEnv, identity: PresenceIdentity): Promise<boolean>;
+  verifyCommand(env: PresenceRoomEnv, workspaceId: string, body: string, signature: string): Promise<boolean>;
   createWebSocketPair(): { client: WebSocket; server: PresenceSocket };
   createUpgradeResponse(client: WebSocket): Response;
 }
 
 function identityPayload(identity: Omit<PresenceIdentity, "signature">) {
-  return `${identity.workspaceId}\n${identity.userId}\n${identity.displayName}`;
+  return `${identity.workspaceId}\n${identity.userId}\n${identity.displayName}\n${identity.membershipEpoch}`;
 }
 
 function equalText(left: string, right: string) {
@@ -63,6 +67,13 @@ const defaultDependencies: PresenceRoomDependencies = {
     if (!env.RATE_LIMIT_SECRET || env.RATE_LIMIT_SECRET.length < 32) return false;
     const expected = await new SecureTokenService(`presence:${env.RATE_LIMIT_SECRET}`).hash(identityPayload(identity));
     return equalText(expected, identity.signature);
+  },
+  async verifyCommand(env, workspaceId, body, signature) {
+    if (!env.RATE_LIMIT_SECRET || env.RATE_LIMIT_SECRET.length < 32) return false;
+    const expected = await new SecureTokenService(`presence-command:${env.RATE_LIMIT_SECRET}`).hash(
+      presenceCommandPayload(workspaceId, body),
+    );
+    return equalText(expected, signature);
   },
   createWebSocketPair() {
     const pair = new WebSocketPair();
@@ -85,13 +96,15 @@ function readIdentity(request: Request): PresenceIdentity | null {
   const workspaceId = request.headers.get("x-presence-workspace-id") ?? "";
   const userId = request.headers.get("x-presence-user-id") ?? "";
   const displayName = request.headers.get("x-presence-display-name") ?? "";
+  const membershipEpoch = Number(request.headers.get("x-presence-membership-epoch"));
   const signature = request.headers.get("x-presence-signature") ?? "";
   const parsed = PresenceParticipantSchema.pick({ user_id: true, display_name: true }).safeParse({
     user_id: userId,
     display_name: displayName,
   });
-  if (!parsed.success || !workspaceId || workspaceId.length > 128 || !signature || signature.length > 256) return null;
-  return { workspaceId, userId: parsed.data.user_id, displayName: parsed.data.display_name, signature };
+  if (!parsed.success || !workspaceId || workspaceId.length > 128 || !signature || signature.length > 256
+    || !Number.isInteger(membershipEpoch) || membershipEpoch < 1) return null;
+  return { workspaceId, userId: parsed.data.user_id, displayName: parsed.data.display_name, membershipEpoch, signature };
 }
 
 export class PresenceRoom {
@@ -106,17 +119,20 @@ export class PresenceRoom {
   }
 
   async fetch(request: Request) {
+    if (request.method === "POST") return this.control(request);
     const identity = readIdentity(request);
     if (!identity || !await this.dependencies.verifyIdentity(this.env, identity)) return response(403, "FORBIDDEN");
     const existingWorkspace = this.sockets().map((socket) => socket.deserializeAttachment()?.workspaceId).find(Boolean);
     if (existingWorkspace && existingWorkspace !== identity.workspaceId) return response(403, "FORBIDDEN");
 
-    if (request.method === "POST") return this.invalidate(request);
     if (request.method !== "GET" || request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return response(426, "WEBSOCKET_REQUIRED");
     }
 
     await this.cleanupExpired();
+    if (identity.membershipEpoch < await this.revokedMembershipEpoch(identity.userId)) {
+      return response(403, "FORBIDDEN");
+    }
     for (const socket of this.sockets()) {
       const attachment = socket.deserializeAttachment();
       if (attachment?.connected && attachment.userId === identity.userId) {
@@ -133,6 +149,7 @@ export class PresenceRoom {
       state: "active",
       expiresAt: new Date(this.dependencies.clock().getTime() + CONNECTION_TTL_MS).toISOString(),
       connected: true,
+      membershipEpoch: identity.membershipEpoch,
     };
     pair.server.serializeAttachment(attachment);
     this.state.acceptWebSocket(pair.server, [`workspace:${identity.workspaceId}`, `user:${identity.userId}`]);
@@ -162,6 +179,10 @@ export class PresenceRoom {
     }
     const current = socket.deserializeAttachment();
     if (!current?.connected) return;
+    if (current.membershipEpoch < await this.revokedMembershipEpoch(current.userId)) {
+      this.disconnect(socket, 4003, "Membership revoked");
+      return;
+    }
     const next: PresenceAttachment = {
       ...current,
       expiresAt: new Date(this.dependencies.clock().getTime() + CONNECTION_TTL_MS).toISOString(),
@@ -196,9 +217,17 @@ export class PresenceRoom {
     await this.scheduleAlarm();
   }
 
-  private async invalidate(request: Request) {
+  private async control(request: Request) {
     const text = await request.text();
     if (encoder.encode(text).byteLength > MAX_MESSAGE_BYTES) return response(413, "MESSAGE_TOO_LARGE");
+    const workspaceId = request.headers.get("x-presence-workspace-id") ?? "";
+    const signature = request.headers.get("x-presence-command-signature") ?? "";
+    if (!workspaceId || workspaceId.length > 128 || !signature || signature.length > 256
+      || !await this.dependencies.verifyCommand(this.env, workspaceId, text, signature)) {
+      return response(403, "FORBIDDEN");
+    }
+    const existingWorkspace = this.sockets().map((socket) => socket.deserializeAttachment()?.workspaceId).find(Boolean);
+    if (existingWorkspace && existingWorkspace !== workspaceId) return response(403, "FORBIDDEN");
     let input: unknown;
     try {
       input = JSON.parse(text);
@@ -206,9 +235,47 @@ export class PresenceRoom {
       return response(400, "INVALID_MESSAGE");
     }
     const parsed = PresenceServerMessageSchema.safeParse(input);
-    if (!parsed.success || parsed.data.type !== "entity.invalidated") return response(400, "INVALID_MESSAGE");
-    this.broadcast(parsed.data);
+    if (parsed.success && parsed.data.type === "entity.invalidated") {
+      this.broadcast(parsed.data);
+      return response(204);
+    }
+    if (!this.isMembershipRevocation(input)) return response(400, "INVALID_MESSAGE");
+    const key = this.membershipEpochKey(input.user_id);
+    const current = await this.revokedMembershipEpoch(input.user_id);
+    const membershipEpoch = Math.max(current, input.membership_epoch);
+    await this.state.storage.put(key, membershipEpoch);
+    for (const socket of this.sockets()) {
+      const attachment = socket.deserializeAttachment();
+      if (attachment?.connected && attachment.userId === input.user_id
+        && attachment.membershipEpoch < membershipEpoch) {
+        this.disconnect(socket, 4003, "Membership revoked");
+      }
+    }
     return response(204);
+  }
+
+  private isMembershipRevocation(input: unknown): input is {
+    type: "membership.revoked";
+    user_id: string;
+    membership_epoch: number;
+  } {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+    const command = input as Record<string, unknown>;
+    return Object.keys(command).length === 3
+      && command.type === "membership.revoked"
+      && typeof command.user_id === "string"
+      && command.user_id.length > 0
+      && command.user_id.length <= 128
+      && Number.isInteger(command.membership_epoch)
+      && Number(command.membership_epoch) > 0;
+  }
+
+  private membershipEpochKey(userId: string) {
+    return `membership-epoch:${userId}`;
+  }
+
+  private async revokedMembershipEpoch(userId: string) {
+    return await this.state.storage.get<number>(this.membershipEpochKey(userId)) ?? 0;
   }
 
   private sockets() {

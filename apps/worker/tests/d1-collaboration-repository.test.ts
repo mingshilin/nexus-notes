@@ -54,16 +54,19 @@ async function setup() {
   };
   const Repository = worker.D1CollaborationRepository as new (db: D1Database, options: Record<string, unknown>) => any;
   expect(Repository).toBeTypeOf("function");
-  const repository = new Repository(testDb.db, {
+  const createRepository = (repositoryDb: D1Database = testDb.db, extraOptions: Record<string, unknown> = {}) => new Repository(repositoryDb, {
     tokens,
     password: new worker.WebCryptoPasswordHasher({ iterations: 1_000 }),
     createId: () => `id-${++id}`,
     clock: () => new Date(currentTime),
     memberLimit: 5,
+    ...extraOptions,
   });
+  const repository = createRepository();
   return {
     ...testDb,
     repository,
+    createRepository,
     tokens,
     tokenHashes,
     setNow(value: string) {
@@ -73,6 +76,33 @@ async function setup() {
       return { tokenHash: await tokens.hash(token) };
     },
   };
+}
+
+function beforeFirstBatch(db: D1Database, action: () => Promise<unknown>) {
+  let armed = true;
+  return new Proxy(db, {
+    get(target, property, receiver) {
+      if (property === "batch") {
+        return async (statements: D1PreparedStatement[]) => {
+          if (armed) {
+            armed = false;
+            await action();
+          }
+          return db.batch(statements);
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  }) as D1Database;
+}
+
+async function expectNoSuccessSideEffects(db: D1Database, requestId: string) {
+  expect(await db.prepare(
+    "SELECT COUNT(*) AS count FROM activity_logs WHERE request_id = ?",
+  ).bind(requestId).first<{ count: number }>()).toEqual({ count: 0 });
+  expect(await db.prepare(
+    "SELECT COUNT(*) AS count FROM audit_logs WHERE request_id = ?",
+  ).bind(requestId).first<{ count: number }>()).toEqual({ count: 0 });
 }
 
 describe("D1CollaborationRepository invitations and members", () => {
@@ -178,6 +208,59 @@ describe("D1CollaborationRepository invitations and members", () => {
     await expect(repository.removeMember(ownerTwo, "user-2", 2, "req-remove-last"))
       .rejects.toMatchObject({ code: "LAST_OWNER_REQUIRED" });
   });
+
+  it("aborts guarded invitation and membership batches before success side effects on stale CAS", async () => {
+    const state = await setup();
+    const invitation = await state.repository.createInvitation(owner, {
+      email: "stale@example.test", role: "viewer", expires_in_hours: 24,
+    }, "req-stale-create");
+    const staleInvitationRepository = state.createRepository(beforeFirstBatch(state.db, () => state.db.prepare(
+      "UPDATE workspace_invitations SET revision = 2 WHERE id = ?",
+    ).bind(invitation.invitation.id).run()));
+    await expect(staleInvitationRepository.revokeInvitation(
+      owner, invitation.invitation.id, 1, "req-stale-invitation",
+    )).rejects.toMatchObject({ code: "INVITATION_CONFLICT" });
+    await expectNoSuccessSideEffects(state.db, "req-stale-invitation");
+
+    const staleRoleRepository = state.createRepository(beforeFirstBatch(state.db, () => state.db.prepare(
+      "UPDATE workspace_members SET revision = 2 WHERE workspace_id = 'ws-1' AND user_id = 'user-2'",
+    ).run()));
+    await expect(staleRoleRepository.updateMemberRole(
+      owner, "user-2", { role: "viewer", base_revision: 1 }, "req-stale-role",
+    )).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+    await expectNoSuccessSideEffects(state.db, "req-stale-role");
+
+    const staleRemoveRepository = state.createRepository(beforeFirstBatch(state.db, () => state.db.prepare(
+      "UPDATE workspace_members SET revision = 2 WHERE workspace_id = 'ws-1' AND user_id = 'user-3'",
+    ).run()));
+    await expect(staleRemoveRepository.removeMember(
+      owner, "user-3", 1, "req-stale-remove",
+    )).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+    await expectNoSuccessSideEffects(state.db, "req-stale-remove");
+    expect(await state.db.prepare(
+      "SELECT revision FROM workspace_members WHERE workspace_id = 'ws-1' AND user_id = 'user-3'",
+    ).first()).toEqual({ revision: 2 });
+  });
+
+  it("dispatches a committed membership revocation epoch and isolates callback failure", async () => {
+    const state = await setup();
+    const revoke = vi.fn(async () => undefined);
+    const repository = state.createRepository(state.db, { presence: { revoke } });
+    await expect(repository.removeMember(owner, "user-3", 1, "req-presence-revoke"))
+      .resolves.toEqual({ user_id: "user-3" });
+    expect(revoke).toHaveBeenCalledWith({
+      workspaceId: "ws-1", userId: "user-3", membershipEpoch: 2,
+    });
+
+    const rejecting = state.createRepository(state.db, {
+      presence: { revoke: vi.fn(async () => { throw new Error("presence unavailable"); }) },
+    });
+    await expect(rejecting.removeMember(owner, "user-2", 1, "req-presence-revoke-failure"))
+      .resolves.toEqual({ user_id: "user-2" });
+    expect(await state.db.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_members WHERE workspace_id = 'ws-1' AND user_id IN ('user-2', 'user-3')",
+    ).first()).toEqual({ count: 0 });
+  });
 });
 
 describe("D1CollaborationRepository comments and notifications", () => {
@@ -218,6 +301,117 @@ describe("D1CollaborationRepository comments and notifications", () => {
       target_type: "note", target_id: "note-1", parent_id: "missing-parent", body: "Missing parent",
       mention_user_ids: [], idempotency_key: "child-missing-parent",
     }, "req-missing-parent")).rejects.toMatchObject({ code: "COMMENT_PARENT_INVALID" });
+  });
+
+  it("scopes comment idempotency by actor and rejects mismatched or deleted replays", async () => {
+    const { db, repository } = await setup();
+    const input = {
+      target_type: "note",
+      target_id: "note-1",
+      body: "Original",
+      mention_user_ids: ["user-3"],
+      idempotency_key: "actor-operation",
+    };
+    const first = await repository.createComment(editor, input, "req-idempotent-first");
+    await expect(repository.createComment(editor, {
+      ...input, body: "Different",
+    }, "req-idempotent-mismatch")).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
+
+    const otherActor = await repository.createComment(owner, {
+      ...input, body: "Owner operation", mention_user_ids: [],
+    }, "req-idempotent-other-actor");
+    expect(otherActor.id).not.toBe(first.id);
+
+    await repository.deleteComment(editor, first.id, first.revision, "req-idempotent-delete");
+    await expect(repository.createComment(editor, input, "req-idempotent-tombstone"))
+      .rejects.toMatchObject({ code: "IDEMPOTENCY_TOMBSTONE", status: 409 });
+    expect(await db.prepare(
+      "SELECT COUNT(*) AS count FROM comments WHERE workspace_id = 'ws-1' AND idempotency_key = 'actor-operation'",
+    ).first()).toEqual({ count: 2 });
+    await expectNoSuccessSideEffects(db, "req-idempotent-mismatch");
+    await expectNoSuccessSideEffects(db, "req-idempotent-tombstone");
+  });
+
+  it("rolls back comment creation when mentioned membership is removed after preflight", async () => {
+    const state = await setup();
+    const racingRepository = state.createRepository(beforeFirstBatch(state.db, () => state.db.prepare(
+      "DELETE FROM workspace_members WHERE workspace_id = 'ws-1' AND user_id = 'user-3'",
+    ).run()));
+    await expect(racingRepository.createComment(editor, {
+      target_type: "note", target_id: "note-1", body: "Racing mention",
+      mention_user_ids: ["user-3"], idempotency_key: "membership-race-create",
+    }, "req-membership-race-create")).rejects.toMatchObject({ code: "MENTION_TARGET_INVALID" });
+    expect(await state.db.prepare(
+      "SELECT COUNT(*) AS count FROM comments WHERE idempotency_key = 'membership-race-create'",
+    ).first()).toEqual({ count: 0 });
+    expect(await state.db.prepare(
+      "SELECT COUNT(*) AS count FROM mentions WHERE mentioned_user_id = 'user-3'",
+    ).first()).toEqual({ count: 0 });
+    expect(await state.db.prepare(
+      "SELECT COUNT(*) AS count FROM notifications WHERE user_id = 'user-3'",
+    ).first()).toEqual({ count: 0 });
+    await expectNoSuccessSideEffects(state.db, "req-membership-race-create");
+  });
+
+  it("aborts stale comment update and delete batches before mentions or success logs", async () => {
+    const state = await setup();
+    const updateTarget = await state.repository.createComment(editor, {
+      target_type: "note", target_id: "note-1", body: "Update target",
+      mention_user_ids: [], idempotency_key: "stale-comment-update",
+    }, "req-stale-comment-seed-update");
+    const staleUpdateRepository = state.createRepository(beforeFirstBatch(state.db, () => state.db.prepare(
+      "UPDATE comments SET body = 'Concurrent', revision = revision + 1 WHERE id = ?",
+    ).bind(updateTarget.id).run()));
+    await expect(staleUpdateRepository.updateComment(editor, updateTarget.id, {
+      body: "Stale", mention_user_ids: ["user-3"], base_revision: 1,
+    }, "req-stale-comment-update")).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+    expect(await state.db.prepare(
+      "SELECT COUNT(*) AS count FROM mentions WHERE comment_id = ?",
+    ).bind(updateTarget.id).first()).toEqual({ count: 0 });
+    expect(await state.db.prepare(
+      "SELECT COUNT(*) AS count FROM notifications WHERE dedupe_key LIKE ?",
+    ).bind(`comment:${updateTarget.id}:%`).first()).toEqual({ count: 0 });
+    await expectNoSuccessSideEffects(state.db, "req-stale-comment-update");
+
+    const deleteTarget = await state.repository.createComment(editor, {
+      target_type: "note", target_id: "note-1", body: "Delete target",
+      mention_user_ids: [], idempotency_key: "stale-comment-delete",
+    }, "req-stale-comment-seed-delete");
+    const staleDeleteRepository = state.createRepository(beforeFirstBatch(state.db, () => state.db.prepare(
+      "UPDATE comments SET deleted_at = ?, revision = revision + 1 WHERE id = ?",
+    ).bind(now, deleteTarget.id).run()));
+    await expect(staleDeleteRepository.deleteComment(
+      editor, deleteTarget.id, 1, "req-stale-comment-delete",
+    )).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+    await expectNoSuccessSideEffects(state.db, "req-stale-comment-delete");
+  });
+
+  it("dispatches comment invalidation only after a successful commit and isolates failure", async () => {
+    const state = await setup();
+    const invalidate = vi.fn(async () => undefined);
+    const repository = state.createRepository(state.db, { presence: { invalidate } });
+    const comment = await repository.createComment(editor, {
+      target_type: "note", target_id: "note-1", body: "Presence",
+      mention_user_ids: [], idempotency_key: "presence-comment",
+    }, "req-presence-comment");
+    expect(invalidate).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1", entityType: "comment", entityId: comment.id, revision: 1,
+    });
+
+    const rejecting = state.createRepository(state.db, {
+      presence: { invalidate: vi.fn(async () => { throw new Error("presence unavailable"); }) },
+    });
+    await expect(rejecting.updateComment(editor, comment.id, {
+      body: "Presence updated", mention_user_ids: [], base_revision: 1,
+    }, "req-presence-comment-update")).resolves.toMatchObject({ revision: 2 });
+
+    const staleInvalidate = vi.fn(async () => undefined);
+    const staleRepository = state.createRepository(beforeFirstBatch(state.db, () => state.db.prepare(
+      "UPDATE comments SET revision = revision + 1 WHERE id = ?",
+    ).bind(comment.id).run()), { presence: { invalidate: staleInvalidate } });
+    await expect(staleRepository.deleteComment(editor, comment.id, 2, "req-presence-comment-stale"))
+      .rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+    expect(staleInvalidate).not.toHaveBeenCalled();
   });
 
   it("paginates the personal inbox and restricts revisioned read mutations to its owner", async () => {
@@ -348,5 +542,19 @@ describe("D1CollaborationRepository audit and public shares", () => {
     expect((await repository.listPublicShares(owner))[0]).toMatchObject({ id: created.share.id, status: "expired" });
     await expect(repository.createPublicShare(ownerWs2, { entity_type: "note", entity_id: "note-1" }, "req-cross-share"))
       .rejects.toMatchObject({ code: "SHARE_TARGET_NOT_FOUND" });
+  });
+
+  it("aborts stale share revocation before success activity or audit", async () => {
+    const state = await setup();
+    const created = await state.repository.createPublicShare(editor, {
+      entity_type: "note", entity_id: "note-1",
+    }, "req-stale-share-create");
+    const staleRepository = state.createRepository(beforeFirstBatch(state.db, () => state.db.prepare(
+      "UPDATE public_shares SET revision = 2 WHERE id = ?",
+    ).bind(created.share.id).run()));
+    await expect(staleRepository.revokePublicShare(
+      editor, created.share.id, 1, "req-stale-share-revoke",
+    )).rejects.toMatchObject({ code: "SHARE_CONFLICT" });
+    await expectNoSuccessSideEffects(state.db, "req-stale-share-revoke");
   });
 });

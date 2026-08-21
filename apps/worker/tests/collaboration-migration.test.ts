@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createTestD1, migrationPaths, seedTenants } from "./helpers/d1";
+import { applyMigration, createTestD1, migrationPaths, seedTenants } from "./helpers/d1";
 
 describe("Task 8 collaboration migration", () => {
   it("is additive and installs tenant, inbox, token, revision, and idempotency fields", async () => {
@@ -15,6 +15,7 @@ describe("Task 8 collaboration migration", () => {
         activity_logs: ["workspace_id", "actor_user_id", "request_id", "target_type", "target_id"],
         audit_logs: ["workspace_id", "actor_user_id", "request_id", "target_type", "target_id"],
         public_shares: ["workspace_id", "token_hash", "status", "revision", "password_hash", "expires_at"],
+        workspace_membership_epochs: ["workspace_id", "user_id", "membership_epoch", "updated_at"],
       };
 
       for (const [table, columns] of Object.entries(expectedColumns)) {
@@ -47,6 +48,42 @@ describe("Task 8 collaboration migration", () => {
         .rejects.toThrow(/AUDIT_IMMUTABLE/);
       await expect(testDb.db.prepare("DELETE FROM audit_logs WHERE id = 'audit-1'").run())
         .rejects.toThrow(/AUDIT_IMMUTABLE/);
+    } finally {
+      await testDb.dispose();
+    }
+  });
+
+  it("backfills deterministic non-empty activity request and target fields before listing legacy rows", async () => {
+    const testDb = await createTestD1({ through: 6 });
+    try {
+      await seedTenants(testDb.db);
+      await testDb.db.prepare(
+        `INSERT INTO activity_logs
+         (id, workspace_id, actor_user_id, action, entity_type, entity_id, metadata_json, created_at)
+         VALUES ('legacy-activity', 'ws-1', 'user-1', 'note.updated', 'note', NULL, '{}', '2026-08-21T00:00:00.000Z')`,
+      ).run();
+      await applyMigration(testDb.db, migrationPaths[6]!);
+
+      const worker = await import("../src/index") as Record<string, any>;
+      const Repository = worker.D1CollaborationRepository as new (db: D1Database, options: Record<string, unknown>) => any;
+      const repository = new Repository(testDb.db, {
+        tokens: { createSessionToken: () => "unused", hash: async (value: string) => value },
+        password: { hash: async (value: string) => value, verify: async () => false },
+      });
+      const page = await repository.listActivity({
+        workspaceId: "ws-1", userId: "user-1", role: "owner", capabilities: new Set(),
+      }, { limit: 10 });
+      expect(page.items).toEqual([
+        expect.objectContaining({
+          id: "legacy-activity",
+          request_id: "legacy-activity:legacy-activity",
+          target_type: "note",
+          target_id: "legacy-target:legacy-activity",
+        }),
+      ]);
+      expect(page.items[0].request_id).not.toBe("");
+      expect(page.items[0].target_type).not.toBe("");
+      expect(page.items[0].target_id).not.toBe("");
     } finally {
       await testDb.dispose();
     }
