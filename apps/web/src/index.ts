@@ -1,4 +1,6 @@
 export * from "./auth";
+export * from "./app/App";
+export * from "./collaboration";
 export * from "./data";
 export * from "./databases/DatabaseWorkbench";
 export * from "./layout/AdaptiveWorkbench";

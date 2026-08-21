@@ -355,3 +355,114 @@ Workspace routes send `x-workspace-id`; public invitation/share routes intention
 Only these files are in the client-only commit: `apps/web/src/data/collaboration-client.ts`, `apps/web/src/data/index.ts`, and this report. Navigation route entry, unread button/panel, deep-link read callback, and full `CollaborationCenter` remain a concrete Wave 2 handoff; no UI files were changed in this wave.
 
 The only compatibility note is the RED test stub's broad notification matcher, which returns the bulk-read shape for `/notifications/read-all`; the client validates the real `{ count, read_at }` backend response first and accepts the stub shape only as a bounded fallback.
+
+---
+
+# Task 8C Web Wave 2 Collaboration UI Report
+
+Date: 2026-08-22
+Branch: `codex/public-beta-rewrite`
+Base: `5abab63`
+Scope: Beta Web collaboration center, App navigation/notifications, public-share UI, responsive modal behavior, the three handed-off collaboration tests, and this report only.
+
+## TDD RED/GREEN Evidence
+
+The two exact Wave 2 UI files were run before production UI existed:
+
+```text
+npm test --workspace @nexus/web -- tests/collaboration-center.test.tsx tests/collaboration-public-mobile.test.tsx
+RED: 2 files failed, 6/6 tests failed.
+Cause: CollaborationCenter and PublicSharePage were undefined/not exported. All failures were feature-missing component failures.
+```
+
+After the implementation and final responsive/App composition edits:
+
+```text
+npm test --workspace @nexus/web -- tests/collaboration-center.test.tsx tests/collaboration-public-mobile.test.tsx tests/collaboration-client.test.ts
+GREEN: 3 files passed, 8/8 tests passed, with no stderr.
+npm run typecheck --workspace @nexus/web
+GREEN: passed.
+```
+
+The three handed-off tests were preserved without assertion weakening. `collaboration-client.test.ts` and the committed `CollaborationClient` source were not edited in Wave 2.
+
+## Requirement Mapping
+
+- `CollaborationCenter` replaces the collaboration placeholder and is a third App domain. Desktop and mobile navigation open it without changing the existing notes/database request state machines. The no-context desktop layout expands the canvas instead of reserving an empty list column.
+- App loads the workspace unread count, exposes a persistent labelled notification button, lazily loads the notification list, handles loading/empty/error states, and marks only the selected deep-link notification with that notification's revision before routing to notes or databases.
+- Members, invitations, role updates, removals, ownership transfer, invitation revoke, and one-time invitation-link display use permission-aware controls. Viewer invitation creation is absent; unavailable mutations remain disabled.
+- Comments load by note/database-record target, provide workspace-member mention choices, send Presence typing state, and support create/update/delete with revision/idempotency inputs and conflict/rate/network feedback.
+- Public shares support entity selection, optional password and expiry, one-time link display, list, and revisioned revoke. Activity/audit metadata hides sensitive keys and refuses to stringify unknown structured values. Public `/share/:token` access performs unauthenticated GET followed by password POST, clears password state, and does not use storage, query credentials, logs, or raw-token rendering.
+- Presence uses the committed query-based native WebSocket client, renders connection/participants/typing, and displays non-blocking unavailable state. At 390px the modal reports the visual-viewport keyboard inset, traps focus, returns focus, makes canvas/bottom navigation inert, and leaves exactly one dialog scroll owner.
+
+## Gate Evidence
+
+| Command | Result |
+| --- | --- |
+| focused collaboration suite | passed: 3 files, 8/8 tests |
+| `npm run typecheck --workspace @nexus/web` | passed |
+| `npm test --workspace @nexus/web -- --reporter=dot` | **failed**: 22/25 files passed; 95/112 tests passed; 17 failed and 15 uncaught errors |
+| `npm run build --workspace @nexus/web` | passed; entry 371,656 bytes, lazy `DatabaseWorkbench` 46.81 kB; no `>500 kB` warning |
+| `npm run beta:build` | passed across all workspaces; same Web chunk result |
+| `npm run verify:deploy` | passed against final root `dist` |
+| `node scripts/verify-deploy-readiness.mjs --dist=apps/web/dist` | passed against Beta Web `dist` |
+| `npm test` | passed: legacy frontend 29 files/131 tests; legacy Worker routes 11 files/62 tests |
+| `npm run lint` | passed |
+| `npm run build` | passed; no Vite large-chunk warning |
+| `npm audit --omit=dev` | passed: 0 vulnerabilities |
+| `git diff --check` | passed before this report append |
+| root initial preload/chunk audit | 5 initial assets, 4 modulepreloads, 0 forbidden Markdown/OCR/PDF-worker assets, max 278,944 bytes |
+| Beta initial preload/chunk audit | 1 initial asset, 0 modulepreloads, 0 forbidden Markdown/OCR/PDF-worker assets, max 371,656 bytes |
+
+## Full-Web Blocker And Self-Review
+
+The full Web gate is not green. Existing App/live tests use historical session doubles that omit `session.workspaces`; the new role lookup calls `session.workspaces.find(...)` at `apps/web/src/app/App.tsx:598`. That exception cascades through `database-workspace-live`, `knowledge-recovery-live`, and `app-auth-bootstrap` and accounts for the 15 uncaught errors and most failed tests. Two non-crashing App assertions also observe three initial API calls instead of their historical attachment-plus-diagnostics count of two because unread notifications are now queried during App bootstrap. Focused collaboration behavior, production typechecking/builds, legacy suites, readiness, audit, and chunk gates are independently green.
+
+The user explicitly requested no further source changes during gate execution, so these compatibility defects were recorded rather than patched. The narrow closure is to tolerate a missing test-double membership list while retaining `viewer` fallback and avoid bootstrapping collaboration-only queries for legacy session doubles; it requires a source edit and a fresh full verification run. Because the mandatory full Web gate remains red, no staging or Wave 2 commit was performed in this run.
+
+## Wave 2 Files
+
+- Web source: `apps/web/src/app/App.tsx`, `apps/web/src/index.ts`, `apps/web/src/layout/AdaptiveWorkbench.tsx`, `apps/web/src/styles.css`, and `apps/web/src/collaboration/*`.
+- Tests: `apps/web/tests/collaboration-center.test.tsx`, `apps/web/tests/collaboration-public-mobile.test.tsx`, and the preserved `apps/web/tests/collaboration-client.test.ts`.
+- Evidence: `.superpowers/sdd/task-8-report.md`.
+
+No Worker, domain, migration, legacy product, deployment, remote, secret, or committed Wave 1 client file was modified.
+
+## Compatibility Closure
+
+The authorized source-only compatibility pass preserved every existing test and assertion.
+
+```text
+npm test --workspace @nexus/web -- tests/app-auth-bootstrap.test.tsx tests/knowledge-recovery-live.test.tsx tests/database-workspace-live.test.tsx --reporter=dot
+RED: 3 files failed; 17 failed / 5 passed tests; 15 uncaught errors.
+Primary cause: historical session doubles omitted workspaces and App called session.workspaces.find.
+Secondary cause after safe membership normalization: eager unread bootstrap changed two legacy recovery request-count assertions from 2 to 3.
+```
+
+App now treats the notes/database workspace route ID separately from verified collaboration membership. Missing `workspaces` becomes an empty membership list, role falls back to `viewer`, and collaboration/unread bootstrapping requires a matching real membership. Complete Beta sessions still derive role and collaboration capability from their workspace data. Unread count is scheduled through browser idle work with a bounded fallback and is cancelled on workspace change/unmount, preserving the legacy first-render request sequence while still populating the real notification button.
+
+```text
+npm test --workspace @nexus/web -- tests/app-auth-bootstrap.test.tsx tests/knowledge-recovery-live.test.tsx tests/database-workspace-live.test.tsx tests/collaboration-center.test.tsx tests/collaboration-public-mobile.test.tsx tests/collaboration-client.test.ts --reporter=dot
+GREEN: 6 files, 30/30 tests passed.
+
+npm test --workspace @nexus/web
+GREEN: 25 files, 112/112 tests passed.
+```
+
+### Final Gate Evidence
+
+| Command | Final result |
+| --- | --- |
+| `npm test --workspace @nexus/web` | 25 files, 112/112 passed |
+| `npm run typecheck --workspace @nexus/web` | passed |
+| `npm run build --workspace @nexus/web` | passed; entry 371,997 bytes, lazy database chunk 46.81 kB, no `>500 kB` warning |
+| `npm run beta:build` | passed across every workspace |
+| `npm test` | passed: legacy frontend 29 files/131 tests and legacy Worker routes 11 files/62 tests |
+| `npm run lint` | passed |
+| `npm run build` | passed; no Vite large-chunk warning |
+| `npm audit --omit=dev` | 0 vulnerabilities |
+| root and Beta deploy readiness | both passed against final artifacts |
+| final initial preload/chunk audit | root: 5 initial/4 modulepreload/0 forbidden/max 278,944 bytes; Beta: 1/0/0/max 371,997 bytes |
+| `git diff --check` | passed before compatibility report append; rerun before staging |
+
+Compatibility residual risk is limited to browsers that delay idle work: the 500 ms idle timeout guarantees the unread query is eventually scheduled while the component remains mounted. Presence and all editing flows remain independent of unread failure. No raw credentials or tokens are persisted, and no Worker/domain/migration/legacy/deployment/remote/secret file changed.

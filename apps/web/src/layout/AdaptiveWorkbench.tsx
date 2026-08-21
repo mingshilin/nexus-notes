@@ -8,6 +8,7 @@ import { useMobileChrome, useWorkbenchMode } from "./use-mobile-layout";
 export interface AdaptiveWorkbenchProps {
   mode?: WorkbenchMode;
   navigation: ReactNode;
+  mobileNavigation?: ReactNode;
   contextualList?: ReactNode;
   inspector?: ReactNode;
   inspectorOpen: boolean;
@@ -35,6 +36,7 @@ function Canvas({ children, mobile = false, modalOpen = false }: { children: Rea
 export function AdaptiveWorkbench({
   mode,
   navigation,
+  mobileNavigation,
   contextualList,
   inspector,
   inspectorOpen,
@@ -66,7 +68,7 @@ export function AdaptiveWorkbench({
 
   return (
     <WorkbenchModalContext.Provider value={setChildModalOpen}>
-      <Surface variant="window" className="adaptive-workbench" data-mode={currentMode}>
+      <Surface variant="window" className="adaptive-workbench" data-mode={currentMode} data-has-context={Boolean(contextualList)}>
       {!mobile ? (
         <nav className="workbench-rail" aria-label="主导航" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
           {navigation}
@@ -127,11 +129,13 @@ export function AdaptiveWorkbench({
 
       {mobile ? (
         <nav className="mobile-bottom-nav" data-visible={mobileChrome.visible} aria-label="移动端主导航" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
-          <button type="button" onClick={() => onActivePaneChange?.("canvas")}>首页</button>
-          <button type="button">搜索</button>
-          <button type="button">创建</button>
-          <button type="button">通知</button>
-          <button type="button">账户</button>
+          {mobileNavigation ?? <>
+            <button type="button" onClick={() => onActivePaneChange?.("canvas")}>首页</button>
+            <button type="button">搜索</button>
+            <button type="button">创建</button>
+            <button type="button">通知</button>
+            <button type="button">账户</button>
+          </>}
         </nav>
       ) : null}
       </Surface>
