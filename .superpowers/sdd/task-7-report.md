@@ -214,6 +214,42 @@ The Worker suite still emits the existing `OCR_QUEUE_MESSAGE_INVALID` stderr lin
 
 The requested Web scope explicitly requires browseable/selectable database- and field-permission state and typed updates using each entity's current revision. That behavior cannot be implemented correctly against `/api/v2` at backend head `018c10e`; guessing `base_revision: 1` violates the revision contract and fails after the first edit. No Web implementation changes were made, and no Worker/domain/contracts/migration/deployment/remote/secret files were changed.
 
+## Task 7 Web Review Fix Wave 3
+
+### Prerequisite resolution
+
+- The earlier blocker remains recorded above. Backend head `7328558` adds manage-only database/field permission list and revision-CAS delete APIs, so the Web flow can now enumerate current entities and supply their revisions without guessing.
+
+### RED evidence
+
+- `npm run test --workspace @nexus/web -- tests/database-task7-web.test.tsx` failed `5/12` before the Web implementation. The failures were: no refetch on selected-view revision/config change; no header or tools when views were empty; board auto-loaded instead of waiting for a user action; board retained a stale confirmed revision after queue drain/source refresh; and permissions were not browseable or deletable with their returned revisions.
+- A follow-up Blob test initially exposed jsdom's missing `Blob.text()` API rather than application behavior. It was adjusted to assert the generated Blob's exact byte size and its `include_header: [true, false]` paging contract; no production behavior or timeout was changed.
+
+### GREEN evidence
+
+- `npm run test --workspace @nexus/web -- tests/database-task7-web.test.tsx tests/database-workbench.test.tsx tests/database-state.test.ts tests/database-client.test.ts tests/database-workspace-live.test.tsx`: passed `5/5` files and `29/29` tests.
+- `npm run test --workspace @nexus/web`: passed `21/21` files and `94/94` tests.
+- `npm run typecheck --workspace @nexus/web`: passed.
+- `npm run build --workspace @nexus/web`: passed. No Vite `>500 kB` warning; lazy `DatabaseWorkbench` is `42.32 kB` (`11.76 kB` gzip).
+- `npm run beta:build`: passed for Web, Worker, contracts, domain, testkit, and UI.
+- `npm run verify:deploy`: passed local readiness checks.
+
+### Requirement mapping
+
+- View query identity: page and cursor state now include a `view id + revision + config` fingerprint. A changed selected view aborts the prior request, invalidates the old pages, and fetches page one with `{ cursor: null, viewId, limit }`; the signal is carried through `App` to `DatabaseClient`.
+- Empty view state: the database header and tool drawer remain available with no saved view, so first property and view creation is not a dead end.
+- Typed workflows: the focused drawer forms expose database, property, record, view, template, comment, database-permission, and field-permission create/update/delete/list/select paths. Existing entities provide their current revision to updates/deletes; view editing exposes page size, visible columns, grouping, frozen field, row height, card segmentation, date field, undated records, and week start.
+- Board/calendar scale: collection pages are loaded only by the explicit `加载更多记录` control, in a bounded 100-record request. There is no automatic cursor drain or two-page truncation.
+- Optimistic safety: bulk operations serialize through a queue; board/calendar serialize per record and clear confirmed snapshots when a record queue drains or a newer source revision arrives.
+- CSV: export accumulates bounded response strings as Blob parts through the server's `include_header` contract rather than concatenating an unbounded JavaScript string; quoted-newline chunks are not parsed or sliced in the client.
+- Focus: drawer view changes close through the same focus-return path, Escape returns focus to the trigger, and Tab/Shift+Tab are contained inside the modal drawer. Existing visualViewport/safe-area and one-scroll-owner behavior remain covered by the mobile test.
+- Build audit: `apps/web/dist/index.html` has no initial Markdown/OCR preload. The only modulepreload text in the generated JS is Vite/React runtime support, not an eager Markdown/OCR dependency.
+
+### Scope and remaining evidence gap
+
+- Modified only `apps/web` sources/tests and this report; no Worker, domain, contracts, migration, deployment, remote, or secret files were changed by this wave.
+- No real-browser 390px/200%/mobile-keyboard harness is configured. The code and jsdom 390px/2dppx/visualViewport/focus behavior are covered here; real-browser evidence remains the named Task 11 gate.
+
 ## Task 7 Permission API Unblocker
 
 ### RED evidence

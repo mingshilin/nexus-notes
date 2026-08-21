@@ -16,9 +16,9 @@ const PAGINATION_PREFIX = "nexus:database-pagination";
 export class DatabasePaginationStore {
   constructor(private readonly storage: StorageLike = localStorage) {}
 
-  read(workspaceId: string, databaseId: string, viewId: string, pageSize?: number): DatabasePaginationState | null {
+  read(workspaceId: string, databaseId: string, viewId: string, pageSize?: number, fingerprint?: string): DatabasePaginationState | null {
     try {
-      const baseKey = this.key(workspaceId, databaseId, viewId);
+      const baseKey = this.key(workspaceId, databaseId, viewId, fingerprint);
       const key = pageSize ? `${baseKey}:${pageSize}` : baseKey;
       const value: unknown = JSON.parse(this.storage.getItem(key) ?? "null");
       if (!value || typeof value !== "object") return null;
@@ -43,8 +43,8 @@ export class DatabasePaginationStore {
     }
   }
 
-  write(workspaceId: string, databaseId: string, viewId: string, state: DatabasePaginationState) {
-    const baseKey = this.key(workspaceId, databaseId, viewId);
+  write(workspaceId: string, databaseId: string, viewId: string, state: DatabasePaginationState, fingerprint?: string) {
+    const baseKey = this.key(workspaceId, databaseId, viewId, fingerprint);
     const indexKey = `${baseKey}:sizes`;
     const previous = JSON.parse(this.storage.getItem(indexKey) ?? "[]") as unknown;
     const sizes = Array.isArray(previous) ? previous.filter((value): value is number => Number.isInteger(value) && value > 0) : [];
@@ -54,11 +54,12 @@ export class DatabasePaginationStore {
     this.storage.setItem(`${baseKey}:${state.pageSize}`, JSON.stringify(state));
     // Keep a compatibility pointer for callers that have not yet resolved a view page size.
     this.storage.setItem(baseKey, JSON.stringify(state));
+    if (fingerprint) this.storage.setItem(this.key(workspaceId, databaseId, viewId), JSON.stringify(state));
     this.storage.setItem(indexKey, JSON.stringify([state.pageSize]));
   }
 
-  private key(workspaceId: string, databaseId: string, viewId: string) {
-    return `${PAGINATION_PREFIX}:${workspaceId}:${databaseId}:${viewId}`;
+  private key(workspaceId: string, databaseId: string, viewId: string, fingerprint?: string) {
+    return `${PAGINATION_PREFIX}:${workspaceId}:${databaseId}:${viewId}${fingerprint ? `:${fingerprint}` : ""}`;
   }
 }
 

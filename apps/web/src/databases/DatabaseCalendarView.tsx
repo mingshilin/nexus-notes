@@ -13,15 +13,23 @@ function monthDates(records: readonly DatabaseRecord[], propertyId: string) {
 export function DatabaseCalendarView({
   properties,
   records,
+  sourceRevisionKey,
   view,
   onRecordsChange,
   onCalendarAssign,
+  canLoadMore = false,
+  loadMorePending = false,
+  onLoadMore,
 }: {
   properties: readonly DatabaseProperty[];
   records: readonly DatabaseRecord[];
+  sourceRevisionKey?: string;
   view: DatabaseView;
   onRecordsChange(records: DatabaseRecord[]): void;
   onCalendarAssign?(input: CalendarAssignmentInput): Promise<DatabaseRecord>;
+  canLoadMore?: boolean;
+  loadMorePending?: boolean;
+  onLoadMore?(): void;
 }) {
   const propertyId = view.config.settings.date_property_id ?? undefined;
   const dateProperty = properties.find((property) => property.id === propertyId && property.type === "date");
@@ -37,6 +45,11 @@ export function DatabaseCalendarView({
   latestRecords.current = records;
 
   useEffect(() => { draggedRecord.current = null; setDraggedId(null); }, [recordSetKey, view.id]);
+  useEffect(() => {
+    if (queues.current.size) return;
+    confirmedRecords.current.clear();
+    operations.current.clear();
+  }, [sourceRevisionKey]);
 
   if (!dateProperty) return <p className="database-empty">Calendar view 需要 date 字段。</p>;
 
@@ -78,7 +91,12 @@ export function DatabaseCalendarView({
     const previous = queues.current.get(record.id) ?? Promise.resolve();
     const queued = previous.catch(() => undefined).then(execute);
     queues.current.set(record.id, queued);
-    void queued.finally(() => { if (queues.current.get(record.id) === queued) queues.current.delete(record.id); });
+    void queued.finally(() => {
+      if (queues.current.get(record.id) !== queued) return;
+      queues.current.delete(record.id);
+      confirmedRecords.current.delete(record.id);
+      operations.current.delete(record.id);
+    });
   };
 
   const dates = monthDates(records, dateProperty.id);
@@ -152,6 +170,7 @@ export function DatabaseCalendarView({
           ))}
         </div>
       ) : null}
+      {canLoadMore ? <button type="button" disabled={loadMorePending} onClick={onLoadMore}>加载更多记录</button> : null}
     </section>
   );
 }

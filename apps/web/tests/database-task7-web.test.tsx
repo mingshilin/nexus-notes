@@ -23,6 +23,89 @@ async function web() {
 }
 
 describe("Task 7 database web behavior", () => {
+  it("refetches page one when the selected view revision or configuration changes", async () => {
+    const { DatabaseWorkbench } = await web() as { DatabaseWorkbench: ComponentType<any> };
+    const request = vi.fn(async () => ({ items: [record("fresh", { name: "Fresh" })], next_cursor: null }));
+    const initialView = view("table", "table", { ...config, page_size: 2 });
+    const { rerender } = render(createElement(DatabaseWorkbench, {
+      database, properties: [name], records: [record("stale", { name: "Stale" })], views: [initialView], onRecordsPageRequest: request,
+    }));
+
+    expect(request).not.toHaveBeenCalled();
+    rerender(createElement(DatabaseWorkbench, {
+      database, properties: [name], records: [record("stale", { name: "Stale" })],
+      views: [{ ...initialView, revision: 2, config: { ...initialView.config, page_size: 3 } }], onRecordsPageRequest: request,
+    }));
+    await waitFor(() => expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: null, limit: 3, viewId: "table" })));
+  });
+
+  it("keeps the database header and creation tools available without a saved view", async () => {
+    const { DatabaseWorkbench } = await web() as { DatabaseWorkbench: ComponentType<any> };
+    render(createElement(DatabaseWorkbench, { database, properties: [], records: [], views: [] }));
+
+    expect(screen.getByRole("heading", { name: "Projects" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
+    expect(screen.getByRole("button", { name: "视图" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "属性" })).toBeInTheDocument();
+  });
+
+  it("loads the next board window only after the user explicitly asks for more records", async () => {
+    const { DatabaseWorkbench } = await web() as { DatabaseWorkbench: ComponentType<any> };
+    const request = vi.fn(async () => ({ items: [record("later", { name: "Later", status: "done" })], next_cursor: null }));
+    render(createElement(DatabaseWorkbench, {
+      database, properties: [name, status], records: [record("first", { name: "First", status: "todo" })], recordsNextCursor: "next",
+      views: [view("board", "board", { ...config, grouping: { property_id: "status" }, settings: { segment_size: 10 } })], onRecordsPageRequest: request,
+    }));
+
+    expect(request).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "加载更多记录" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith({ cursor: "next", limit: 100, viewId: "board" }));
+    expect(await screen.findByTestId("board-card-later")).toBeInTheDocument();
+  });
+
+  it("uses the newest source revision after a board queue drains", async () => {
+    const { DatabaseWorkbench } = await web() as { DatabaseWorkbench: ComponentType<any> };
+    const onBoardMove = vi.fn(async (input: any) => record(input.record_id, { name: "Race", status: input.option_id }, input.base_revision + 1));
+    const board = view("board", "board", { ...config, grouping: { property_id: "status" }, settings: { segment_size: 10 } });
+    const { rerender } = render(createElement(DatabaseWorkbench, {
+      database, properties: [name, status], records: [record("race", { name: "Race", status: "todo" })], views: [board], onBoardMove,
+    }));
+    fireEvent.dragStart(screen.getByTestId("board-card-race"));
+    fireEvent.drop(screen.getByTestId("board-column-done"));
+    await waitFor(() => expect(onBoardMove).toHaveBeenCalledTimes(1));
+    rerender(createElement(DatabaseWorkbench, {
+      database, properties: [name, status], records: [record("race", { name: "Race", status: "done" }, 9)], views: [board], onBoardMove,
+    }));
+    fireEvent.dragStart(screen.getByTestId("board-card-race"));
+    fireEvent.drop(screen.getByTestId("board-column-todo"));
+    await waitFor(() => expect(onBoardMove).toHaveBeenCalledTimes(2));
+    expect(onBoardMove.mock.calls[1]![0].base_revision).toBe(9);
+  });
+
+  it("browses and mutates database and field permissions with the fetched revisions", async () => {
+    const { DatabaseWorkbench, DatabaseClient } = await web() as Record<string, any>;
+    const databasePermission = { id: "db-permission", workspace_id: "ws-1", database_id: "db-1", subject_type: "user", subject_id: "user-2", role: "viewer", revision: 4, updated_at: now };
+    const fieldPermission = { id: "field-permission", workspace_id: "ws-1", database_id: "db-1", property_id: "name", subject_type: "user", subject_id: "user-2", can_read: true, can_write: false, revision: 6, updated_at: now };
+    const api = { request: vi.fn(async ({ path, method }: { path: string; method?: string }) => {
+      if (method === undefined && path.endsWith("/properties/name/permissions")) return { items: [fieldPermission] };
+      if (method === undefined && path.endsWith("/permissions")) return { items: [databasePermission] };
+      return { permission: databasePermission, id: "permission" };
+    }) };
+    render(createElement(DatabaseWorkbench, {
+      database, properties: [name], records: [], views: [view("table", "table", config)], client: new DatabaseClient(api, "ws-1", { createId: () => "permission" }),
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
+    const drawer = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(drawer).getByRole("button", { name: "权限" }));
+    expect(await within(drawer).findByRole("button", { name: "删除数据库权限 user-2" })).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: "删除数据库权限 user-2" }));
+    await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({ method: "DELETE", path: "/api/v2/databases/db-1/permissions/db-permission", body: { base_revision: 4 } })));
+    fireEvent.change(within(drawer).getByLabelText("权限字段"), { target: { value: "name" } });
+    expect(await within(drawer).findByRole("button", { name: "删除字段权限 user-2" })).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: "删除字段权限 user-2" }));
+    await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({ method: "DELETE", path: "/api/v2/databases/db-1/properties/name/permissions/field-permission", body: { base_revision: 6 } })));
+  });
+
   it("executes saved filters, sorts, visible columns, and page size against loaded records", async () => {
     const { DatabaseWorkbench } = await web() as { DatabaseWorkbench: ComponentType<any> };
     render(createElement(DatabaseWorkbench, {
@@ -51,7 +134,7 @@ describe("Task 7 database web behavior", () => {
       views: [view("table", "table", { ...config, visible_columns: ["name"] })], paginationStore: store, onRecordsPageRequest: request,
     }));
 
-    await waitFor(() => expect(request).toHaveBeenCalledWith({ cursor: "cursor-2", limit: 2, viewId: "table" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({ cursor: "cursor-2", limit: 2, viewId: "table" })));
     expect(await screen.findByText("Five")).toBeInTheDocument();
     expect(screen.getByText("Six")).toBeInTheDocument();
     expect(screen.queryByText("One")).not.toBeInTheDocument();
@@ -138,11 +221,12 @@ describe("Task 7 database web behavior", () => {
 
   it("loads one larger bounded board/calendar window instead of draining tiny saved pages", async () => {
     const { DatabaseWorkbench } = await web() as { DatabaseWorkbench: ComponentType<any> };
-    const request = vi.fn(async ({ cursor }: { cursor: string | null }) => cursor === "next" ? { items: [record("late", { name: "Late", status: "done", due: "2026-08-21" })], next_cursor: "still-more" } : { items: [], next_cursor: null });
+    const request = vi.fn(async ({ cursor }: { cursor: string | null }) => cursor === null ? { items: [record("first", { name: "First", status: "todo", due: "2026-08-21" })], next_cursor: "next" } : { items: [record("late", { name: "Late", status: "done", due: "2026-08-21" })], next_cursor: "still-more" });
     const { rerender } = render(createElement(DatabaseWorkbench, {
       database, properties: [name, status, due], records: [record("first", { name: "First", status: "todo", due: "2026-08-21" })], recordsNextCursor: "next",
       views: [view("board", "board", { ...config, grouping: { property_id: "status" }, settings: { segment_size: 10 } })], onRecordsPageRequest: request,
     }));
+    fireEvent.click(screen.getByRole("button", { name: "加载更多记录" }));
     await waitFor(() => expect(request).toHaveBeenCalledWith({ cursor: "next", limit: 100, viewId: "board" }));
     expect(await screen.findByTestId("board-card-late")).toBeInTheDocument();
     expect(request).toHaveBeenCalledTimes(1);
@@ -150,8 +234,11 @@ describe("Task 7 database web behavior", () => {
       database, properties: [name, status, due], records: [record("first", { name: "First", status: "todo", due: "2026-08-21" })], recordsNextCursor: "next",
       views: [view("calendar", "calendar", { ...config, settings: { date_property_id: "due", segment_size: 10 } })], onRecordsPageRequest: request,
     }));
+    await screen.findByLabelText("数据库日历");
+    await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({ cursor: null, viewId: "calendar" })));
+    fireEvent.click(screen.getByRole("button", { name: "加载更多记录" }));
     expect(await screen.findByTestId("calendar-card-late")).toBeInTheDocument();
-    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledTimes(3);
   });
 
   it("keeps the mobile tools action usable at 390px and 200% zoom with the page as the only scroll owner", async () => {
@@ -179,5 +266,22 @@ describe("Task 7 database web behavior", () => {
     fireEvent.keyDown(drawer, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "数据库工具" })).not.toBeInTheDocument());
     expect(screen.getByRole("button", { name: "数据库工具" })).toHaveFocus();
+  });
+
+  it("contains Tab focus in the tools drawer and returns focus after a view change", async () => {
+    const { DatabaseWorkbench } = await web() as { DatabaseWorkbench: ComponentType<any> };
+    render(createElement(DatabaseWorkbench, {
+      database, properties: [name], records: [], views: [view("one", "table", config), view("two", "table", config)],
+    }));
+    const trigger = screen.getByRole("button", { name: "数据库工具" });
+    fireEvent.click(trigger);
+    const drawer = screen.getByRole("dialog", { name: "数据库工具" });
+    const close = within(drawer).getByRole("button", { name: "关闭" });
+    close.focus();
+    fireEvent.keyDown(drawer, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).not.toBe(trigger);
+    fireEvent.change(within(drawer).getByLabelText("视图"), { target: { value: "two" } });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "数据库工具" })).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
   });
 });

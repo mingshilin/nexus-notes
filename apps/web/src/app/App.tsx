@@ -290,9 +290,9 @@ function AuthenticatedWorkspace({
     return () => controller.abort();
   }, [activeDomain, apiClient, databaseRefreshVersion, selectedDatabaseId, workspaceId]);
 
-  const requestDatabasePage = useCallback(({ cursor, limit, viewId }: { cursor: string | null; limit: number; viewId?: string }) => {
+  const requestDatabasePage = useCallback(({ cursor, limit, viewId, signal }: { cursor: string | null; limit: number; viewId?: string; signal?: AbortSignal }) => {
     if (!workspaceId || !selectedDatabaseId) return Promise.resolve({ items: [], next_cursor: null });
-    return new DatabaseClient(apiClient, workspaceId).listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, viewId, limit })
+    return new DatabaseClient(apiClient, workspaceId).listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, viewId, limit, signal })
       .then((page) => {
         setDatabaseRecordsNextCursor(page.next_cursor);
         return page;

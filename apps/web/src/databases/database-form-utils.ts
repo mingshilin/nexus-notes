@@ -20,8 +20,12 @@ export function normalizeFieldValue(property: DatabaseProperty, value: unknown) 
 }
 
 export function downloadCsv(csv: string) {
+  downloadCsvBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+}
+
+export function downloadCsvBlob(blob: Blob) {
   if (typeof document === "undefined" || typeof URL.createObjectURL !== "function") return;
-  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url; anchor.download = "database-export.csv"; anchor.click(); URL.revokeObjectURL(url);
 }

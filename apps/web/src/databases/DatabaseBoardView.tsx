@@ -7,15 +7,23 @@ interface SelectOption { id: string; name: string; color?: string }
 export function DatabaseBoardView({
   properties,
   records,
+  sourceRevisionKey,
   view,
   onRecordsChange,
   onBoardMove,
+  canLoadMore = false,
+  loadMorePending = false,
+  onLoadMore,
 }: {
   properties: readonly DatabaseProperty[];
   records: readonly DatabaseRecord[];
+  sourceRevisionKey?: string;
   view: DatabaseView;
   onRecordsChange(records: DatabaseRecord[]): void;
   onBoardMove?(input: BoardMoveInput): Promise<DatabaseRecord>;
+  canLoadMore?: boolean;
+  loadMorePending?: boolean;
+  onLoadMore?(): void;
 }) {
   const groupingId = view.config.grouping?.property_id;
   const grouping = properties.find((property) => property.id === groupingId && property.type === "select");
@@ -37,6 +45,11 @@ export function DatabaseBoardView({
 
   useEffect(() => setLimits({}), [view.id, segmentSize]);
   useEffect(() => { draggedRecord.current = null; setDraggedId(null); }, [recordSetKey, view.id]);
+  useEffect(() => {
+    if (queues.current.size) return;
+    confirmedRecords.current.clear();
+    operations.current.clear();
+  }, [sourceRevisionKey]);
 
   const move = (optionId: string) => {
     const id = draggedRecord.current ?? draggedId;
@@ -77,7 +90,12 @@ export function DatabaseBoardView({
     const previous = queues.current.get(record.id) ?? Promise.resolve();
     const queued = previous.catch(() => undefined).then(execute);
     queues.current.set(record.id, queued);
-    void queued.finally(() => { if (queues.current.get(record.id) === queued) queues.current.delete(record.id); });
+    void queued.finally(() => {
+      if (queues.current.get(record.id) !== queued) return;
+      queues.current.delete(record.id);
+      confirmedRecords.current.delete(record.id);
+      operations.current.delete(record.id);
+    });
   };
 
   if (!grouping) return <p className="database-empty">Board view 需要 select 分组字段。</p>;
@@ -117,6 +135,7 @@ export function DatabaseBoardView({
           );
         })}
       </div>
+      {canLoadMore ? <button type="button" disabled={loadMorePending} onClick={onLoadMore}>加载更多记录</button> : null}
     </section>
   );
 }

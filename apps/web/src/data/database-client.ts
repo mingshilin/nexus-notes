@@ -254,6 +254,18 @@ export class DatabaseClient {
     return csv;
   }
 
+  /** Keeps each response page bounded and lets Blob own the final byte sequence. */
+  async exportCsvBlob(databaseId: string, input: Omit<CsvExportInput, "cursor" | "include_header">) {
+    let cursor: string | null = null;
+    const chunks: BlobPart[] = [];
+    do {
+      const page = await this.exportCsv(databaseId, { ...input, cursor, include_header: cursor === null });
+      chunks.push(page.csv);
+      cursor = page.next_cursor;
+    } while (cursor);
+    return new Blob(chunks, { type: "text/csv;charset=utf-8" });
+  }
+
   private query<T>(path: string, dedupeKey: string, signal?: AbortSignal) {
     return this.client.request<T>({
       path, headers: this.headers(), requestClass: "query",
