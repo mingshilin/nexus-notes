@@ -84,9 +84,10 @@ export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
         Object.fromEntries(mapped.map((property, index) => [property.id, coerceCsvValue(property, row[index] ?? "")])),
         fields.writable,
       );
-      await this.validateReferences(context, fields.properties, values);
       normalizedRows.push(values);
     }
+    const references = this.referenceItems(fields.properties, normalizedRows);
+    await this.validateReferenceItems(context, references);
     const now = this.now();
     const records = normalizedRows.map((values) => ({
       id: this.id(), workspace_id: context.workspaceId, database_id: databaseId, note_id: null,
@@ -101,7 +102,9 @@ export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
       id: this.id(), workspace_id: record.workspace_id, database_id: record.database_id, record_id: record.id,
       property_id: propertyId, value_json: JSON.stringify(value), updated_at: record.updated_at,
     })));
-    const statements: D1PreparedStatement[] = [
+    const statements: D1PreparedStatement[] = [];
+    statements.push(...this.referenceGuards(context, references));
+    statements.push(
       ...splitJsonBatches(recordRows).map((rows) => this.db.prepare(
         `INSERT INTO database_records
          (id, workspace_id, database_id, note_id, created_by, updated_by, revision, created_at, updated_at)
@@ -118,8 +121,15 @@ export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
            1, json_extract(value, '$.updated_at')
          FROM json_each(?)`,
       ).bind(JSON.stringify(rows))),
-    ];
-    if (statements.length > 0) await this.db.batch(statements);
+    );
+    statements.push(...this.referenceGuards(context, references));
+    try {
+      if (statements.length > 0) await this.db.batch(statements);
+    } catch (error) {
+      const referenceFailure = this.referenceGuardFailure(error, references);
+      if (referenceFailure) throw referenceFailure;
+      throw error;
+    }
     return { items: records, imported_count: records.length };
   }
 

@@ -4,13 +4,34 @@ import type {
   CalendarAssignmentInput,
   CreateDatabaseRecordInput,
   DatabaseRecord,
+  DatabaseView,
   DeleteDatabaseRecordInput,
   UpdateDatabaseRecordInput,
   WorkspaceContext,
 } from "@nexus/contracts";
 
 import { assertRevision, DatabaseRepositoryBase } from "./database-repository-base";
-import { RECORD_COLUMNS, DatabaseRepositoryError, decodeRecordCursor, encodeRecordCursor, placeholders, type RecordRow } from "./database-model";
+import { RECORD_COLUMNS, VIEW_COLUMNS, DatabaseRepositoryError, decodeRecordCursor, encodeRecordCursor, isUniqueGuardError, placeholders, toView, type RecordRow, type ViewRow } from "./database-model";
+
+const JSON_BATCH_BYTES = 700_000;
+
+function splitJsonBatches<T>(items: readonly T[]) {
+  const batches: T[][] = [];
+  let current: T[] = [];
+  let bytes = 2;
+  for (const item of items) {
+    const itemBytes = new TextEncoder().encode(JSON.stringify(item)).byteLength + 1;
+    if (current.length > 0 && bytes + itemBytes > JSON_BATCH_BYTES) {
+      batches.push(current);
+      current = [];
+      bytes = 2;
+    }
+    current.push(item);
+    bytes += itemBytes;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
 
 function revisionGuard(
   db: D1Database,
@@ -18,7 +39,6 @@ function revisionGuard(
   databaseId: string,
   expected: readonly { record_id: string; revision: number }[],
 ) {
-  const pairPlaceholders = expected.map(() => "(?, ?)").join(", ");
   return db.prepare(
     `INSERT INTO workspaces (id, owner_user_id, slug, name, revision, created_at, updated_at)
      SELECT id, owner_user_id, slug, name, revision, created_at, updated_at
@@ -27,18 +47,19 @@ function revisionGuard(
        NOT EXISTS (SELECT 1 FROM databases WHERE workspace_id = ? AND id = ?)
        OR
        (SELECT COUNT(*) FROM database_records
-        WHERE workspace_id = ? AND database_id = ? AND deleted_at IS NULL
-          AND (id, revision) IN (${pairPlaceholders}))
+        JOIN json_each(?) AS expected_record
+          ON json_extract(expected_record.value, '$.record_id') = database_records.id
+         AND json_extract(expected_record.value, '$.revision') = database_records.revision
+        WHERE workspace_id = ? AND database_id = ? AND deleted_at IS NULL)
        <> ?
      )`,
   ).bind(
-    context.workspaceId, context.workspaceId, databaseId, context.workspaceId, databaseId,
-    ...expected.flatMap((item) => [item.record_id, item.revision]), expected.length,
+    context.workspaceId, context.workspaceId, databaseId, JSON.stringify(expected), context.workspaceId, databaseId, expected.length,
   );
 }
 
 function isRecordRevisionGuardError(error: unknown) {
-  return error instanceof Error && error.message.includes("UNIQUE constraint failed:");
+  return isUniqueGuardError(error, "workspaces.slug");
 }
 
 export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
@@ -78,8 +99,14 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     return (await this.materialize(rows, fields.readable))[0]!;
   }
 
-  listRecords(context: WorkspaceContext, databaseId: string, options: { cursor?: string | null; limit: number }) {
-    return this.recordPage(context, databaseId, options);
+  async listRecords(context: WorkspaceContext, databaseId: string, options: { cursor?: string | null; limit: number; view_id?: string | null }) {
+    if (!options.view_id) return this.recordPage(context, databaseId, options);
+    const row = await this.db.prepare(
+      `SELECT ${VIEW_COLUMNS} FROM database_views WHERE workspace_id = ? AND database_id = ? AND id = ?`,
+    ).bind(context.workspaceId, databaseId, options.view_id).first<ViewRow>();
+    if (!row) throw new DatabaseRepositoryError("VIEW_NOT_FOUND", "Database view not found", 404);
+    const view: DatabaseView = toView(row);
+    return this.recordPage(context, databaseId, { ...options, viewConfig: view.config });
   }
 
   async searchRecords(context: WorkspaceContext, databaseId: string, options: { query: string; cursor?: string | null; limit: number }) {
@@ -89,11 +116,11 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     const limit = Math.max(1, Math.min(options.limit, 100));
     const conditions = [
       "r.workspace_id = ?", "r.database_id = ?", "r.deleted_at IS NULL",
-      `v.property_id IN (${placeholders(propertyIds.length)})`, "v.value_json LIKE ? ESCAPE '\\'",
+      `v.property_id IN (${placeholders(propertyIds.length)})`, "json_extract(v.value_json, '$') LIKE ? ESCAPE '\\'",
     ];
     const bindings: unknown[] = [
       context.workspaceId, databaseId, ...propertyIds,
-      `%${options.query.replaceAll("%", "\\%").replaceAll("_", "\\_")}%`,
+      `%${options.query.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`,
     ];
     if (options.cursor) {
       const cursor = decodeRecordCursor(options.cursor);
@@ -147,40 +174,46 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
       if (!row) throw new DatabaseRepositoryError("RECORD_NOT_FOUND", "Database record not found", 404);
       assertRevision(row.revision, mutation.base_revision);
       const values = this.normalize(fields.properties, mutation.values, fields.writable);
-      await this.validateReferences(context, fields.properties, values);
       prepared.push({ mutation, values });
     }
+    const references = this.referenceItems(fields.properties, prepared.map((item) => item.values));
+    await this.validateReferenceItems(context, references);
     const now = this.now();
     const expected = prepared.map(({ mutation }) => ({ record_id: mutation.record_id, revision: mutation.base_revision }));
-    const statements: D1PreparedStatement[] = [revisionGuard(
-      this.db, context, databaseId, expected,
-    )];
-    for (const item of prepared) {
-      statements.push(this.db.prepare(
-        `UPDATE database_records SET updated_by = ?, revision = revision + 1, updated_at = ?
-         WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
-      ).bind(context.userId, now, context.workspaceId, databaseId, item.mutation.record_id, item.mutation.base_revision));
-    }
+    const valueRows = prepared.flatMap((item) => Object.entries(item.values).map(([property_id, value]) => ({
+      id: this.id(), record_id: item.mutation.record_id, property_id, value_json: JSON.stringify(value),
+    })));
+    const statements: D1PreparedStatement[] = [revisionGuard(this.db, context, databaseId, expected)];
+    statements.push(...this.referenceGuards(context, references));
+    statements.push(this.db.prepare(
+      `UPDATE database_records SET updated_by = ?, revision = revision + 1, updated_at = ?
+       WHERE workspace_id = ? AND database_id = ? AND deleted_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM json_each(?) AS expected_record
+           WHERE json_extract(expected_record.value, '$.record_id') = database_records.id
+             AND json_extract(expected_record.value, '$.revision') = database_records.revision
+         )`,
+    ).bind(context.userId, now, context.workspaceId, databaseId, JSON.stringify(expected)));
     statements.push(revisionGuard(
       this.db, context, databaseId,
       expected.map((item) => ({ ...item, revision: item.revision + 1 })),
     ));
-    for (const item of prepared) {
-      for (const [propertyId, value] of Object.entries(item.values)) {
-        statements.push(this.db.prepare(
-          `INSERT INTO record_values
-           (id, workspace_id, database_id, record_id, property_id, value_json, revision, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-           ON CONFLICT(record_id, property_id) DO UPDATE SET
-             value_json = excluded.value_json, revision = record_values.revision + 1, updated_at = excluded.updated_at`,
-        ).bind(this.id(), context.workspaceId, databaseId, item.mutation.record_id, propertyId, JSON.stringify(value), now));
-      }
-    }
+    statements.push(...splitJsonBatches(valueRows).map((rows) => this.db.prepare(
+      `INSERT INTO record_values
+       (id, workspace_id, database_id, record_id, property_id, value_json, revision, updated_at)
+       SELECT json_extract(value, '$.id'), ?, ?, json_extract(value, '$.record_id'), json_extract(value, '$.property_id'),
+         json_extract(value, '$.value_json'), 1, ? FROM json_each(?) WHERE 1
+       ON CONFLICT(record_id, property_id) DO UPDATE SET
+         value_json = excluded.value_json, revision = record_values.revision + 1, updated_at = excluded.updated_at`,
+    ).bind(context.workspaceId, databaseId, now, JSON.stringify(rows))));
+    statements.push(...this.referenceGuards(context, references));
     try {
       await this.db.batch(statements);
     } catch (error) {
-      if (!isRecordRevisionGuardError(error)) throw error;
-      throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+      const referenceFailure = this.referenceGuardFailure(error, references);
+      if (referenceFailure) throw referenceFailure;
+      if (isRecordRevisionGuardError(error)) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+      throw error;
     }
     const updatedRows = await this.recordRows(context.workspaceId, databaseId, recordIds);
     return { items: await this.materialize(updatedRows, fields.readable) };

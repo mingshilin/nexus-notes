@@ -105,15 +105,27 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
   async createTemplate(context: WorkspaceContext, databaseId: string, input: CreateDatabaseTemplateInput) {
     const fields = await this.access.fields(context, databaseId, "write");
     const defaults = this.normalize(fields.properties, input.default_values, fields.writable);
+    const references = this.referenceItems(fields.properties, [defaults]);
+    await this.validateReferenceItems(context, references);
     const now = this.now();
     const template: DatabaseTemplate = {
       id: this.id(), workspace_id: context.workspaceId, database_id: databaseId,
       name: input.name, default_values: defaults, revision: 1, created_at: now, updated_at: now,
     };
-    await this.db.prepare(
+    const statements: D1PreparedStatement[] = [];
+    statements.push(...this.referenceGuards(context, references));
+    statements.push(this.db.prepare(
       `INSERT INTO database_templates (id, workspace_id, database_id, name, default_values_json, revision, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
-    ).bind(template.id, context.workspaceId, databaseId, template.name, JSON.stringify(defaults), now, now).run();
+    ).bind(template.id, context.workspaceId, databaseId, template.name, JSON.stringify(defaults), now, now));
+    statements.push(...this.referenceGuards(context, references));
+    try {
+      await this.db.batch(statements);
+    } catch (error) {
+      const referenceFailure = this.referenceGuardFailure(error, references);
+      if (referenceFailure) throw referenceFailure;
+      throw error;
+    }
     return template;
   }
 
@@ -124,13 +136,27 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
     const defaults = input.default_values === undefined
       ? template.default_values
       : this.normalize(fields.properties, input.default_values, fields.writable);
+    const references = this.referenceItems(fields.properties, [defaults]);
+    await this.validateReferenceItems(context, references);
     const now = this.now();
     const updated = { ...template, name: input.name ?? template.name, default_values: defaults, revision: template.revision + 1, updated_at: now };
-    const result = await this.db.prepare(
+    const statements: D1PreparedStatement[] = [];
+    const beforeReferenceGuards = this.referenceGuards(context, references);
+    statements.push(...beforeReferenceGuards);
+    statements.push(this.db.prepare(
       `UPDATE database_templates SET name = ?, default_values_json = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
-    ).bind(updated.name, JSON.stringify(defaults), now, context.workspaceId, databaseId, templateId, input.base_revision).run();
-    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    ).bind(updated.name, JSON.stringify(defaults), now, context.workspaceId, databaseId, templateId, input.base_revision));
+    statements.push(...this.referenceGuards(context, references));
+    try {
+      const results = await this.db.batch(statements);
+      const update = results[beforeReferenceGuards.length]!;
+      if (update.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    } catch (error) {
+      const referenceFailure = this.referenceGuardFailure(error, references);
+      if (referenceFailure) throw referenceFailure;
+      throw error;
+    }
     return updated;
   }
 

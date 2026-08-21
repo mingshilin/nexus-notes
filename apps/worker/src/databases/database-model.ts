@@ -174,13 +174,21 @@ export function toComment(row: CommentRow, databaseId: string): DatabaseComment 
   };
 }
 
-export function encodeRecordCursor(record: Pick<DatabaseRecord, "updated_at" | "id">) {
+export function encodeRecordCursor(record: Pick<DatabaseRecord, "updated_at" | "id">, sortValues?: readonly unknown[]) {
+  if (sortValues) {
+    return encodeURIComponent(JSON.stringify({ sort_values: sortValues, updated_at: record.updated_at, id: record.id }));
+  }
   return encodeURIComponent(`${record.updated_at}\n${record.id}`);
 }
 
 export function decodeRecordCursor(cursor: string) {
   try {
     const decoded = decodeURIComponent(cursor);
+    if (decoded.startsWith("{")) {
+      const parsed = JSON.parse(decoded) as { sort_values?: unknown; updated_at?: unknown; id?: unknown };
+      if (!Array.isArray(parsed.sort_values) || typeof parsed.updated_at !== "string" || typeof parsed.id !== "string") throw new Error("invalid");
+      return { updatedAt: parsed.updated_at, id: parsed.id, sortValues: parsed.sort_values };
+    }
     const separator = decoded.indexOf("\n");
     if (separator <= 0 || separator === decoded.length - 1) throw new Error("invalid");
     return { updatedAt: decoded.slice(0, separator), id: decoded.slice(separator + 1) };
@@ -191,4 +199,8 @@ export function decodeRecordCursor(cursor: string) {
 
 export function placeholders(length: number) {
   return Array.from({ length }, () => "?").join(", ");
+}
+
+export function isUniqueGuardError(error: unknown, signature: "workspaces.id" | "workspaces.slug" | "users.email" | "database_records.id") {
+  return error instanceof Error && new RegExp(`(?:^|: )UNIQUE constraint failed: ${signature.replace(".", "\\.")}(?=:|$)`).test(error.message);
 }

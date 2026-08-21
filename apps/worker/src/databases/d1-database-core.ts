@@ -14,6 +14,7 @@ import { assertRevision, DatabaseRepositoryBase } from "./database-repository-ba
 import {
   DATABASE_COLUMNS,
   DatabaseRepositoryError,
+  isUniqueGuardError,
   type DatabaseRow,
   toDatabase,
 } from "./database-model";
@@ -39,7 +40,7 @@ function databaseRevisionGuard(
 }
 
 function isDatabaseRevisionGuardError(error: unknown) {
-  return error instanceof Error && error.message.includes("UNIQUE constraint failed:");
+  return isUniqueGuardError(error, "workspaces.slug");
 }
 
 export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {

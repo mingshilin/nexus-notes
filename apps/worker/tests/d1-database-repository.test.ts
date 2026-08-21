@@ -14,12 +14,12 @@ const now = "2026-08-21T00:00:00.000Z";
 let dispose: (() => Promise<void>) | undefined;
 let db: D1Database;
 
-async function createRepository(repositoryDb: D1Database = db) {
+async function createRepository(repositoryDb: D1Database = db, idPrefix = "generated") {
   const worker = await import("../src/index") as Record<string, any>;
   expect(worker.D1DatabaseRepository).toBeTypeOf("function");
   let nextId = 0;
   return new worker.D1DatabaseRepository(repositoryDb, {
-    createId: () => `generated-${String(++nextId).padStart(4, "0")}`,
+    createId: () => `${idPrefix}-${String(++nextId).padStart(4, "0")}`,
     clock: () => new Date(now),
   });
 }
@@ -358,7 +358,7 @@ describe("D1 structured database repository", () => {
         return Reflect.get(target, property, receiver);
       },
     }) as D1Database;
-    const countedRepository = await createRepository(countedDb);
+    const countedRepository = await createRepository(countedDb, "csv-counted");
 
     await expect(countedRepository.importCsv(owner, database.id, {
       csv, header_property_ids: Object.fromEntries(properties.map((property: any) => [property.name, property.id])),
@@ -372,5 +372,203 @@ describe("D1 structured database repository", () => {
       header_property_ids: Object.fromEntries(properties.map((property: any) => [property.name, property.id])),
     })).rejects.toMatchObject({ code: "INVALID_FIELD_VALUE" });
     expect(await db.prepare("SELECT COUNT(*) AS count FROM database_records WHERE database_id = ?").bind(database.id).first()).toEqual({ count: 500 });
+  });
+
+  it("uses bounded set-based statements for a maximum-size bulk edit", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Bulk limit", description: "" });
+    const title = await repository.createProperty(owner, database.id, { name: "Title", type: "text", config: {}, position: 0 });
+    const records = Array.from({ length: 100 }, (_, index) => ({ id: `bulk-${String(index).padStart(3, "0")}`, revision: 1 }));
+    await db.batch([
+      db.prepare(
+        `INSERT INTO database_records
+         (id, workspace_id, database_id, note_id, created_by, updated_by, revision, created_at, updated_at)
+         SELECT json_extract(value, '$.id'), 'ws-1', ?, NULL, 'user-1', 'user-1', 1, ?, ? FROM json_each(?)`,
+      ).bind(database.id, now, now, JSON.stringify(records)),
+      db.prepare(
+        `INSERT INTO record_values
+         (id, workspace_id, database_id, record_id, property_id, value_json, revision, updated_at)
+         SELECT 'value-' || json_extract(value, '$.id'), 'ws-1', ?, json_extract(value, '$.id'), ?,
+           json_quote('Before'), 1, ? FROM json_each(?)`,
+      ).bind(database.id, title.id, now, JSON.stringify(records)),
+    ]);
+    let prepareCount = 0;
+    const countedDb = new Proxy(db as unknown as object, {
+      get(target, property, receiver) {
+        if (property === "prepare") {
+          return (...args: unknown[]) => {
+            prepareCount += 1;
+            return (target as D1Database).prepare.bind(target)(...args as [string]);
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as D1Database;
+    const countedRepository = await createRepository(countedDb, "bulk-counted");
+
+    await expect(countedRepository.bulkEditRecords(owner, database.id, {
+      mutations: records.map((record: any, index) => ({
+        record_id: record.id, base_revision: record.revision, values: { [title.id]: `After ${index}` },
+      })),
+    })).resolves.toMatchObject({ items: expect.arrayContaining([expect.objectContaining({ id: records[0]!.id })]) });
+    expect(prepareCount).toBeLessThanOrEqual(12);
+  });
+
+  it("imports reference-heavy 500-row CSV with bounded reference checks", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Reference CSV", description: "" });
+    const target = await repository.createDatabase(owner, { name: "Reference target", description: "" });
+    await db.prepare(
+      "INSERT INTO workspace_members (workspace_id, user_id, role, joined_at, updated_at) VALUES ('ws-1', 'user-1', 'owner', ?, ?)",
+    ).bind(now, now).run();
+    const targetRecord = await repository.createRecord(owner, target.id, { note_id: null, values: {} });
+    const member = await repository.createProperty(owner, database.id, { name: "Member", type: "member", config: { allow_multiple: true }, position: 0 });
+    const relation = await repository.createProperty(owner, database.id, {
+      name: "Relation", type: "relation", config: { target_database_id: target.id, allow_multiple: true }, position: 1,
+    });
+    const csv = `Member,Relation\r\n${Array.from({ length: 500 }, () => `user-1,${targetRecord.id}`).join("\r\n")}`;
+    let prepareCount = 0;
+    const countedDb = new Proxy(db as unknown as object, {
+      get(targetObject, property, receiver) {
+        if (property === "prepare") {
+          return (...args: unknown[]) => {
+            prepareCount += 1;
+            return (targetObject as D1Database).prepare.bind(targetObject)(...args as [string]);
+          };
+        }
+        return Reflect.get(targetObject, property, receiver);
+      },
+    }) as D1Database;
+    const countedRepository = await createRepository(countedDb, "reference-csv");
+
+    await expect(countedRepository.importCsv(owner, database.id, {
+      csv, header_property_ids: { Member: member.id, Relation: relation.id },
+    })).resolves.toMatchObject({ imported_count: 500 });
+    expect(prepareCount).toBeLessThanOrEqual(12);
+  });
+
+  it("rolls back a bulk edit when a referenced target disappears inside its transaction", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Reference race", description: "" });
+    const target = await repository.createDatabase(owner, { name: "Target", description: "" });
+    const relation = await repository.createProperty(owner, database.id, {
+      name: "Relation", type: "relation", config: { target_database_id: target.id }, position: 0,
+    });
+    const source = await repository.createRecord(owner, database.id, { note_id: null, values: {} });
+    const targetRecord = await repository.createRecord(owner, target.id, { note_id: null, values: {} });
+    await db.prepare(
+      `CREATE TRIGGER reference_race AFTER UPDATE ON database_records
+       WHEN NEW.id = '${source.id}'
+       BEGIN
+         UPDATE database_records SET deleted_at = '${now}' WHERE id = '${targetRecord.id}';
+       END;`,
+    ).run();
+
+    await expect(repository.updateRecord(owner, database.id, source.id, {
+      base_revision: 1, values: { [relation.id]: targetRecord.id },
+    })).rejects.toMatchObject({ code: "INVALID_RELATION_REFERENCE", status: 400 });
+    expect((await repository.getRecord(owner, database.id, source.id)).values).toEqual({});
+    expect(await db.prepare("SELECT deleted_at FROM database_records WHERE id = ?").bind(targetRecord.id).first()).toEqual({ deleted_at: null });
+  });
+
+  it("executes a saved view server-side with visible fields, filters, sorts, page size, and keyset cursors", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Server view", description: "" });
+    const title = await repository.createProperty(owner, database.id, { name: "Title", type: "text", config: {}, position: 0 });
+    const status = await repository.createProperty(owner, database.id, {
+      name: "Status", type: "select", config: { options: [{ id: "todo", name: "Todo", color: "" }, { id: "done", name: "Done", color: "" }] }, position: 1,
+    });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "Zulu", [status.id]: "todo" } });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "Alpha", [status.id]: "todo" } });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "Hidden", [status.id]: "done" } });
+    const view = await repository.createView(owner, database.id, {
+      name: "Todos", type: "table", position: 0,
+      config: {
+        filters: [{ property_id: status.id, operator: "equals", value: "todo" }],
+        sorts: [{ property_id: title.id, direction: "asc" }], grouping: { property_id: status.id },
+        visible_columns: [title.id], page_size: 1,
+        settings: { row_height: "compact", frozen_property_id: title.id, hide_empty_groups: true, card_properties: [title.id], week_start: "monday" },
+      },
+    });
+
+    const first = await repository.listRecords(owner, database.id, { view_id: view.id, limit: 100 });
+    const second = await repository.listRecords(owner, database.id, { view_id: view.id, limit: 100, cursor: first.next_cursor });
+    expect(first.items).toHaveLength(1);
+    expect(first.items[0]).toMatchObject({ values: { [title.id]: "Alpha" } });
+    expect(Object.keys(first.items[0]!.values)).toEqual([title.id]);
+    expect(first.next_cursor).toEqual(expect.any(String));
+    expect(second.items).toHaveLength(1);
+    expect(second.items[0]).toMatchObject({ values: { [title.id]: "Zulu" } });
+    expect(second.next_cursor).toBeNull();
+  });
+
+  it("validates and transactionally guards member and relation template defaults", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Template references", description: "" });
+    const target = await repository.createDatabase(owner, { name: "Template target", description: "" });
+    await db.prepare(
+      "INSERT INTO workspace_members (workspace_id, user_id, role, joined_at, updated_at) VALUES ('ws-1', 'user-1', 'owner', ?, ?)",
+    ).bind(now, now).run();
+    const targetRecord = await repository.createRecord(owner, target.id, { note_id: null, values: {} });
+    const member = await repository.createProperty(owner, database.id, { name: "Member", type: "member", config: {}, position: 0 });
+    const relation = await repository.createProperty(owner, database.id, {
+      name: "Relation", type: "relation", config: { target_database_id: target.id }, position: 1,
+    });
+
+    await expect(repository.createTemplate(owner, database.id, {
+      name: "Invalid", default_values: { [member.id]: "missing-user" },
+    })).rejects.toMatchObject({ code: "INVALID_MEMBER_REFERENCE", status: 400 });
+    const template = await repository.createTemplate(owner, database.id, {
+      name: "Valid", default_values: { [member.id]: "user-1", [relation.id]: targetRecord.id },
+    });
+    await db.prepare(
+      `CREATE TRIGGER template_reference_race BEFORE UPDATE ON database_templates
+       WHEN OLD.id = '${template.id}'
+       BEGIN
+         UPDATE database_records SET deleted_at = '${now}' WHERE id = '${targetRecord.id}';
+       END;`,
+    ).run();
+    await expect(repository.updateTemplate(owner, database.id, template.id, {
+      base_revision: 1, default_values: { [member.id]: "user-1", [relation.id]: targetRecord.id },
+    })).rejects.toMatchObject({ code: "INVALID_RELATION_REFERENCE", status: 400 });
+    expect(await db.prepare("SELECT deleted_at FROM database_records WHERE id = ?").bind(targetRecord.id).first()).toEqual({ deleted_at: null });
+  });
+
+  it("does not map unrelated unique constraint failures to revision conflicts", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Dedicated guard", description: "" });
+    const title = await repository.createProperty(owner, database.id, { name: "Title", type: "text", config: {}, position: 0 });
+    const record = await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "Before" } });
+    await db.prepare(
+      `CREATE TRIGGER unrelated_unique BEFORE UPDATE ON database_records
+       WHEN NEW.id = '${record.id}'
+       BEGIN
+         INSERT INTO record_values (id, workspace_id, database_id, record_id, property_id, value_json, revision, updated_at)
+         SELECT id, workspace_id, database_id, record_id, property_id, value_json, revision, updated_at
+         FROM record_values WHERE record_id = '${record.id}' AND property_id = '${title.id}';
+       END;`,
+    ).run();
+
+    await expect(repository.updateRecord(owner, database.id, record.id, {
+      base_revision: 1, values: { [title.id]: "After" },
+    })).rejects.not.toMatchObject({ code: "REVISION_CONFLICT" });
+  });
+
+  it("searches literal backslashes without treating them as LIKE escapes", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Backslash search", description: "" });
+    const title = await repository.createProperty(owner, database.id, { name: "Title", type: "text", config: {}, position: 0 });
+    const escaped = await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "C:\\build" } });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "Cbuild" } });
+
+    await expect(repository.searchRecords(owner, database.id, { query: "C:\\build", limit: 10 }))
+      .resolves.toMatchObject({ items: [expect.objectContaining({ id: escaped.id })] });
   });
 });

@@ -12,6 +12,7 @@ export function recordListOptions(request: Request) {
   const requested = Number(params.get("limit") ?? 50);
   return {
     cursor: params.get("cursor"),
+    view_id: params.get("view_id"),
     limit: Number.isInteger(requested) && requested > 0 ? Math.min(requested, 100) : 50,
   };
 }

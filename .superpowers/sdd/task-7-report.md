@@ -108,3 +108,35 @@ The Worker suite still emits the existing `OCR_QUEUE_MESSAGE_INVALID` stderr lin
 - Verified no Worker, domain, contract, migration, deployment, or plan/ledger files were modified.
 - Bulk edit is deliberately command-first and refreshes through the App mutation flow; it does not yet provide an optimistic bulk preview with per-record rollback tokens. It is safe from stale local rollback but does not meet the review request's explicit optimistic-bulk UX requirement.
 - The tools drawer provides complete `DatabaseClient` operation coverage through an actionable JSON payload editor; the Worker validates each payload against the shared contract boundary. It is a compact operations console rather than dedicated field-by-field forms for every property type.
+
+## Task 7 Backend Review Fix Wave 2
+
+### RED evidence
+
+- Added real-D1 repository tests before implementation and ran each with the fixed default test timeout. All seven failed for the intended missing behavior: max-100 bulk exceeded the test limit; 500-row member/relation CSV performed per-row processing; a target soft-deleted by an in-transaction trigger left a dangling relation; `view_id` was ignored by list; template defaults accepted a missing member; a `record_values` unique error was mapped to `REVISION_CONFLICT`; and a literal backslash search returned no records.
+- The saved-view RED test verifies server-side filters, effective grouping/sort order, visible columns, saved page size, and cursor continuation. The template RED test covers both invalid member defaults and a relation target disappearing during the update transaction.
+
+### GREEN evidence
+
+- `npm run test --workspace @nexus/worker -- tests/d1-database-repository.test.ts -t ... --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=dot`: all 20 repository tests passed in four serial five-test groups. New boundaries passed: max bulk used 11 prepared statements; reference-heavy 500-row CSV stayed at or below 12; transaction reference race rolled back; view cursor ordering passed; template references passed; dedicated guard mapping passed; literal backslash search passed.
+- `npm run test --workspace @nexus/worker -- tests/database-routes.test.ts --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=verbose`: 3/3 passed.
+- `npm run test --workspace @nexus/web -- tests/database-client.test.ts`: 2/2 passed, including the compatible `view_id` query signature and cache key.
+- `npm run test --workspace @nexus/contracts -- tests/database-contracts.test.ts`: 4/4 passed.
+- `npm run test --workspace @nexus/domain -- tests/database-values.test.ts tests/database-csv.test.ts`: 6/6 passed.
+- Full `@nexus/worker` coverage was run serially in nine file/test shards because the host terminates an individual command after 30 seconds. Every Worker test file and test case completed: 37/37 files, 199/199 tests. Existing `OCR_QUEUE_MESSAGE_INVALID` output is expected poison-message test stderr; no Worker test failed.
+- `npm run typecheck --workspace @nexus/worker`, `@nexus/contracts`, `@nexus/domain`, and `@nexus/web`: all passed.
+- `git diff --check`: passed with no output.
+
+### Requirement mapping
+
+- Bulk and templates: record IDs/revisions are loaded and guarded through bounded JSON `json_each`; the record revision update and all value upserts are set-based JSON statements. Valid 100-record work avoids bind and statement explosion while retaining one atomic D1 batch.
+- CSV references: normalized 500-row input aggregates unique member/relation targets. One bounded JSON join validates them before write and distinct member/relation guards repeat validation at both ends of the D1 transaction.
+- Saved views: `GET /records?view_id=` uses saved filters, grouping, sorts, visible columns, and saved page size server-side. Sort-aware cursors include effective sort values plus the deterministic `(updated_at, id)` tie-breaker. Non-query layout settings remain persisted in the v2 view contract and are returned with the view.
+- Template defaults: create/update normalize values, validate member/relation references, and execute transaction-time reference guards.
+- Guard mapping: revision guards only map the dedicated `workspaces.slug` signature; member/relation guards use separate `users.email` and `database_records.id` signatures. An unrelated `record_values` UNIQUE failure is no longer converted to a revision conflict.
+- LIKE: search escapes `\\` before `%` and `_`, and searches the decoded JSON scalar so a literal backslash matches its stored field value.
+- Compatibility only: the Web client/routing signature adds optional `view_id`; no Web UI review finding was implemented.
+
+### Remaining Web work
+
+- All Review Fix Wave 2 Web findings remain explicitly for the next agent: typed UI forms, workspace/database/view/page-size cache scoping, incremental board/calendar fetching and virtualization, optimistic bulk preview and per-record rollback serialization, full CSV export pagination, and keyboard/focus-safe tools drawer behavior.

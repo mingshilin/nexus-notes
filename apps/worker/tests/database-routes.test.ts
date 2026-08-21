@@ -61,7 +61,7 @@ describe("v2 structured database routes", () => {
       ["POST", "/api/v2/databases/db-1/properties", { name: "Name", type: "text", config: {}, position: 0 }],
       ["PATCH", "/api/v2/databases/db-1/properties/prop-1", { base_revision: 1, name: "Title" }],
       ["DELETE", "/api/v2/databases/db-1/properties/prop-1", { base_revision: 1 }],
-      ["GET", "/api/v2/databases/db-1/records?cursor=next&limit=25"],
+      ["GET", "/api/v2/databases/db-1/records?cursor=next&view_id=view-1&limit=25"],
       ["GET", "/api/v2/databases/db-1/records/search?q=alpha&limit=20"],
       ["POST", "/api/v2/databases/db-1/records", { note_id: null, values: {} }],
       ["GET", "/api/v2/databases/db-1/records/record-1"],
@@ -89,7 +89,7 @@ describe("v2 structured database routes", () => {
     const responses = await Promise.all(cases.map(([method, path, body]) => registry.fetch(request(path, method, body), {})));
 
     expect(responses.every((response: Response) => response.status >= 200 && response.status < 300)).toBe(true);
-    expect(repository.listRecords).toHaveBeenCalledWith(workspace, "db-1", { cursor: "next", limit: 25 });
+    expect(repository.listRecords).toHaveBeenCalledWith(workspace, "db-1", { cursor: "next", view_id: "view-1", limit: 25 });
     expect(repository.searchRecords).toHaveBeenCalledWith(workspace, "db-1", { query: "alpha", cursor: null, limit: 20 });
     expect(repository.createComment).toHaveBeenCalledWith(workspace, "db-1", { record_id: "record-1", body: "Review" });
   });

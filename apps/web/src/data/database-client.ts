@@ -92,14 +92,15 @@ export class DatabaseClient {
     return this.command<{ id: string }>(`${this.databasePath(databaseId)}/properties/${encodeURIComponent(propertyId)}`, "DELETE", input);
   }
 
-  listRecords(databaseId: string, options: { cursor?: string; limit?: number; signal?: AbortSignal } = {}) {
+  listRecords(databaseId: string, options: { cursor?: string; viewId?: string; limit?: number; signal?: AbortSignal } = {}) {
     const params = new URLSearchParams();
     if (options.cursor) params.set("cursor", options.cursor);
+    if (options.viewId) params.set("view_id", options.viewId);
     const limit = options.limit ?? 50;
     params.set("limit", String(limit));
     return this.query<{ items: DatabaseRecord[]; next_cursor: string | null }>(
       `${this.databasePath(databaseId)}/records?${params}`,
-      `database-records:${this.workspaceId}:${databaseId}:${options.cursor ?? "first"}:${limit}`,
+      `database-records:${this.workspaceId}:${databaseId}:${options.viewId ?? "all"}:${options.cursor ?? "first"}:${limit}`,
       options.signal,
     );
   }
