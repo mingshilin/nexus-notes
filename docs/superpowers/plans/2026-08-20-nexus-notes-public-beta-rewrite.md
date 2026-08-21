@@ -25,6 +25,9 @@
 - [x] Task 4: Add the API transport, normalized cache, IndexedDB persistence, mutation queue, and sync engine.
 - [x] Task 5: Add authentication, tenant isolation, security controls, and configurable Beta quotas.
 - [ ] Task 6: Deliver Capture, notes, revisions, search, graph, reminders, attachments, and diagnostics.
+  - [x] Task 6A: Add tenant-scoped note CRUD, keyset pagination, quick capture, optimistic revisions, restore, and 800 ms autosave conflict preservation.
+  - [ ] Task 6B: Add folders, tags, links, reminders, graph, FTS search documents, and saved-search filters.
+  - [ ] Task 6C: Add private attachments, OCR retry flows, and knowledge diagnostics.
 - [ ] Task 7: Deliver structured databases, typed properties, views, bulk operations, CSV, and virtualized views.
 - [ ] Task 8: Deliver workspace collaboration, sharing, notifications, audit, and Durable Object presence.
 - [ ] Task 9: Deliver R2 files, queued OCR/index/import/export/email jobs, status, feedback, and administration.

@@ -127,6 +127,7 @@ interface TrustedHttpError extends Error {
   code: string;
   status: number;
   retryable: boolean;
+  details?: Record<string, unknown>;
   retryAfterSeconds?: number;
 }
 
@@ -196,7 +197,12 @@ function thrownErrorResponse(error: unknown, requestId: string) {
       : undefined;
     return jsonResponse(
       createFailureResponse(
-        { code: error.code, message: error.message, retryable: error.retryable },
+        {
+          code: error.code,
+          message: error.message,
+          retryable: error.retryable,
+          ...(error.details ? { details: error.details } : {}),
+        },
         requestId,
       ),
       error.status,

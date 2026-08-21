@@ -88,6 +88,37 @@ describe("gateway security", () => {
     });
   });
 
+  it("preserves safe structured details for trusted conflict errors", async () => {
+    const worker = await loadWorker();
+    const createRouteRegistry = worker.createRouteRegistry as (options: Record<string, unknown>) => any;
+    const error = Object.assign(new Error("Note changed on another device"), {
+      code: "NOTE_CONFLICT",
+      status: 409,
+      retryable: false,
+      details: { server_revision: 3, submitted_revision: 2 },
+    });
+    const registry = createRouteRegistry({ requestId: () => "req-conflict" });
+    registry.register({
+      method: "PATCH",
+      path: "/api/v2/notes/:noteId",
+      auth: "public",
+      handler: () => { throw error; },
+    });
+
+    const response = await registry.fetch(new Request("https://beta.test/api/v2/notes/note-1", {
+      method: "PATCH",
+    }), {});
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      success: false,
+      error: {
+        code: "NOTE_CONFLICT",
+        details: { server_revision: 3, submitted_revision: 2 },
+      },
+    });
+  });
+
   it("rejects oversized JSON bodies before parsing or dispatching", async () => {
     const worker = await loadWorker();
     const createRouteRegistry = worker.createRouteRegistry as (options: Record<string, unknown>) => any;

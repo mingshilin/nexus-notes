@@ -8,8 +8,11 @@ import { D1SessionAuthenticator, D1WorkspaceAuthorizer } from "./auth/session-te
 import { TurnstileVerifier } from "./auth/turnstile";
 import { createRouteRegistry, type GatewayHookContext } from "./http/route-registry";
 import { createSecureGateway } from "./http/security-gateway";
+import { D1NoteRepository } from "./notes/d1-note-repository";
+import { NoteService } from "./notes/note-service";
 import { registerAuthRoutes } from "./routes/auth";
 import { healthRoute, type BetaWorkerEnv } from "./routes/health";
+import { registerNoteRoutes } from "./routes/notes";
 import { D1QuotaService } from "./security/quota";
 import { D1RateLimiter } from "./security/rate-limit";
 
@@ -57,6 +60,10 @@ function createAuthService(env: BetaWorkerEnv) {
   });
 }
 
+function createNoteService(env: BetaWorkerEnv) {
+  return new NoteService(new D1NoteRepository(env.DB));
+}
+
 function allowedOrigins(env: BetaWorkerEnv) {
   const origins = new Set<string>();
   if (env.APP_BASE_URL) origins.add(new URL(env.APP_BASE_URL).origin);
@@ -89,6 +96,7 @@ export function createBetaWorker() {
   });
   registry.register(healthRoute);
   registerAuthRoutes(registry, createAuthService);
+  registerNoteRoutes(registry, createNoteService);
 
   return {
     fetch(request: Request, env: BetaWorkerEnv) {
