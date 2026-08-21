@@ -173,6 +173,24 @@ describe("native Cloudflare OCR queue wiring", () => {
       .toEqual({ status: "dead_letter", attempt_count: 3, last_error_code: "OCR_ATTEMPTS_EXHAUSTED" });
   });
 
+  it("keeps attempts monotonic and capped when native delivery races scheduled recovery", async () => {
+    const { D1AttachmentRepository, createBetaWorker, db, job } = await fixture();
+    const expired = "2000-01-01T00:00:00.000Z";
+    await db.prepare("UPDATE beta_ocr_jobs SET deadline = ? WHERE id = ?").bind(expired, job.job_id).run();
+    const native = new FakeNativeMessage({ ...job, deadline: expired }, 3);
+    const repository = new (D1AttachmentRepository as any)(db);
+
+    await Promise.all([
+      (createBetaWorker() as any).queue(fakeBatch([native]), queueEnv(db), {}),
+      repository.recoverStaleOcrJobs(new Date().toISOString(), 50),
+    ]);
+
+    expect(await db.prepare("SELECT attempt_count FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first())
+      .toEqual({ attempt_count: 3 });
+    expect(await db.prepare("SELECT 1 found FROM queue_outbox WHERE json_extract(payload_json, '$.attempt') > 3").first())
+      .toBeNull();
+  });
+
   it.each(["AI", "FILES"] as const)("treats a missing %s binding as an OCR-only terminal degradation", async (binding) => {
     const { createBetaWorker, db, job } = await fixture();
     const message = new FakeNativeMessage(job);

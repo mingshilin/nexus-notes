@@ -125,7 +125,7 @@ describe("AttachmentService", () => {
       })),
     };
     const outbox = { dispatch: vi.fn(async () => ({ dispatched: 1, failed: 0 })) };
-    const service = new (worker.AttachmentService as new (...args: any[]) => any)(repository, {}, { clock: () => new Date(now), outbox });
+    const service = new (worker.AttachmentService as new (...args: any[]) => any)(repository, configuredFiles(), { clock: () => new Date(now), outbox });
 
     await expect(service.completeUpload(context, "attachment-1", { upload_id: "attachment-1", signature: "25504446" })).resolves.toEqual(attachment);
     expect(repository.getAttachment).toHaveBeenCalledWith("ws-1", "attachment-1", false);

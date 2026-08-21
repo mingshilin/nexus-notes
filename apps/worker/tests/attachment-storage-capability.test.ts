@@ -32,9 +32,14 @@ afterEach(async () => {
 });
 
 describe("AttachmentService storage capability", () => {
-  it("returns CAPABILITY_UNAVAILABLE without mutating D1 when FILES is missing or incomplete", async () => {
+  it.each([
+    ["missing", {}],
+    ["get only", { async get() { return null; } }],
+    ["put only", { async put() {} }],
+    ["delete only", { async delete() {} }],
+  ])("returns CAPABILITY_UNAVAILABLE without mutating D1 when FILES is %s", async (_shape, files) => {
     const { db, repository, ready, uploading } = await fixture();
-    const service = new AttachmentService(repository, {}, { clock: () => new Date(now) });
+    const service = new AttachmentService(repository, files, { clock: () => new Date(now) });
     const before = (await db.prepare("SELECT id, status FROM beta_attachments ORDER BY id").all()).results;
 
     await expect(service.createUpload(context, {
@@ -46,8 +51,12 @@ describe("AttachmentService storage capability", () => {
       .rejects.toMatchObject({ code: "ATTACHMENT_CAPABILITY_UNAVAILABLE", status: 503 });
     await expect(service.deleteAttachment(context, ready.id))
       .rejects.toMatchObject({ code: "ATTACHMENT_CAPABILITY_UNAVAILABLE", status: 503 });
+    await expect(service.completeUpload(context, ready.id, { upload_id: ready.id, signature: "25504446" }))
+      .rejects.toMatchObject({ code: "ATTACHMENT_CAPABILITY_UNAVAILABLE", status: 503 });
 
     expect((await db.prepare("SELECT id, status FROM beta_attachments ORDER BY id").all()).results).toEqual(before);
+    expect(await db.prepare("SELECT 1 found FROM beta_ocr_jobs").first()).toBeNull();
+    expect(await db.prepare("SELECT 1 found FROM queue_outbox").first()).toBeNull();
   });
 
   it("leaves D1 metadata intact when a configured object delete fails", async () => {

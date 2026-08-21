@@ -169,6 +169,7 @@ export class AttachmentService {
     if (input.upload_id !== attachmentId) {
       throw new AttachmentServiceError("UPLOAD_ATTACHMENT_MISMATCH", "Upload does not belong to this attachment", 400);
     }
+    this.requireFiles();
     const attachment = await this.getAttachment(context, attachmentId);
     if (attachment.status !== "ready") {
       throw new AttachmentServiceError("ATTACHMENT_UPLOAD_INELIGIBLE", "Attachment content is not ready", 409);

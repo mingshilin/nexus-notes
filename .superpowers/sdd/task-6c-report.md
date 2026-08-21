@@ -754,3 +754,34 @@ This follow-up addresses only the two B2.2 Critical findings: D1-persisted nativ
 | `git diff --check` | PASS. |
 
 Commit: independent B2.2a commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C Fix B2.2a Review Fix: Completion Capability and Race Coverage
+
+### Scope
+
+This review fix completes the remaining B2.2a Important and Minor findings only. B2.2b native receiver/retry behavior, health capability validation, typed native mocks, and TOML parsing remain out of scope. No deployment, Web, legacy, Task 7, or secret changes were made.
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm run test -- tests/attachment-storage-capability.test.ts tests/native-queue.test.ts` | RED: `completeUpload()` returned ready metadata for missing, get-only, put-only, and delete-only FILES shapes, allowing `ensureOcrJob()`/outbox work. |
+| Focused attachment/OCR Worker suite | GREEN: PASS, 59 tests in 6 files. |
+
+### Implemented
+
+- `completeUpload()` now invokes the existing full `FILES.get/put/delete` capability guard immediately after path/body identity validation and before attachment lookup, `ensureOcrJob()`, or outbox dispatch.
+- Real-D1 capability tests cover missing, get-only, put-only, and delete-only FILES across create/upload/download/delete/completion; all assert no attachment, OCR-job, or outbox mutation.
+- A real-D1 `Promise.all` native-delivery/scheduled-recovery race regression proves the attempt value is monotonic and capped at 3, with no outbox payload above attempt 3.
+- Existing success fixtures now intentionally provide a complete FILES capability.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| Focused attachment/OCR Worker suite | PASS, 59 tests in 6 files. |
+| `npm run test --workspace=@nexus/worker` | PASS. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+Commit: independent B2.2a review-fix commit containing this report section; SHA is recorded in the final handoff.
