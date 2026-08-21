@@ -2,6 +2,8 @@ import type { RouteDefinition } from "../http/route-registry";
 
 export interface BetaWorkerEnv {
   DB: D1Database;
+  FILES: R2Bucket;
+  JOBS: Queue<unknown>;
   APP_BASE_URL: string;
   CORS_ALLOWED_ORIGINS?: string;
   RATE_LIMIT_SECRET: string;

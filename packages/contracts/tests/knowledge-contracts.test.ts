@@ -7,6 +7,36 @@ async function loadContracts() {
 }
 
 describe("knowledge contracts", () => {
+  it("validates private attachment, OCR retry, and diagnostics contracts", async () => {
+    const contracts = await loadContracts();
+    const timestamp = "2026-08-21T00:00:00.000Z";
+    expect(contracts.AttachmentSchema).toBeDefined();
+    expect(contracts.AttachmentSchema.safeParse({
+      id: "attachment-1", workspace_id: "ws-1", note_id: "note-1", filename: "scan.pdf",
+      mime_type: "application/pdf", size_bytes: 42, status: "ready", revision: 1,
+      created_at: timestamp, updated_at: timestamp,
+    }).success).toBe(true);
+    expect(contracts.UploadCompleteInputSchema.safeParse({
+      upload_id: "upload-1", signature: "25504446",
+    }).success).toBe(true);
+    expect(contracts.AttachmentListRequestSchema.parse({ mime_type: "application/pdf", limit: 10 })).toMatchObject({
+      mime_type: "application/pdf", limit: 10,
+    });
+    expect(contracts.OcrJobSchema.safeParse({
+      id: "ocr-1", workspace_id: "ws-1", attachment_id: "attachment-1", status: "failed",
+      idempotency_key: "ocr:attachment-1:1", attempt_count: 1,
+      deadline: timestamp, last_error_code: "OCR_TIMEOUT", revision: 1,
+      created_at: timestamp, updated_at: timestamp,
+    }).success).toBe(true);
+    expect(contracts.OcrRetryInputSchema.parse({ attachment_ids: ["attachment-1", "attachment-1"] })).toEqual({
+      attachment_ids: ["attachment-1"],
+    });
+    expect(contracts.KnowledgeDiagnosticsRequestSchema.parse({ limit: 25 })).toEqual({ limit: 25 });
+    expect(contracts.KnowledgeDiagnosticSchema.safeParse({
+      kind: "failed_ocr", entity_id: "attachment-1", title: "scan.pdf", count: 1,
+    }).success).toBe(true);
+  });
+
   it("validates tenant-scoped folders, tags, links, and reminders", async () => {
     const contracts = await loadContracts();
     expect(contracts.FolderSchema.safeParse({

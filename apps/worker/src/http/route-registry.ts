@@ -50,7 +50,7 @@ export interface RouteDefinition<TEnv, TBody = unknown, TData = unknown> {
   };
   quota?: string;
   body?: BodySchema<TBody>;
-  handler(context: RouteContext<TEnv, TBody>): RouteResult<TData> | Promise<RouteResult<TData>>;
+  handler(context: RouteContext<TEnv, TBody>): RouteResult<TData> | Response | Promise<RouteResult<TData> | Response>;
 }
 
 export interface GatewayHookContext<TEnv> {
@@ -121,6 +121,16 @@ function jsonResponse(payload: unknown, status: number, requestId: string, extra
     status,
     headers,
   });
+}
+
+function rawResponse(response: Response, requestId: string) {
+  const headers = new Headers(response.headers);
+  headers.set("cache-control", headers.get("cache-control") ?? "no-store");
+  headers.set("referrer-policy", "strict-origin-when-cross-origin");
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("x-frame-options", "DENY");
+  headers.set("x-request-id", requestId);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 interface TrustedHttpError extends Error {
@@ -392,6 +402,7 @@ export function createRouteRegistry<TEnv = unknown>(options: RouteRegistryOption
           }),
           deadline,
         ]);
+        if (result instanceof Response) return rawResponse(result, requestId);
         return jsonResponse(
           createSuccessResponse(result.data, requestId, result.meta),
           result.status ?? 200,

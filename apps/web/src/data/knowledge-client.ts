@@ -1,8 +1,13 @@
 import type {
   CreateFolderInput,
+  CreateAttachmentUploadInput,
   CreateReminderInput,
   CreateTagInput,
   Folder,
+  Attachment,
+  AttachmentListRequest,
+  KnowledgeDiagnostic,
+  KnowledgeDiagnosticsRequest,
   GraphResponse,
   NoteLink,
   Reminder,
@@ -152,6 +157,63 @@ export class KnowledgeClient {
       "PATCH",
       input,
     ).then(({ reminder }) => reminder);
+  }
+
+  listAttachments(input: AttachmentListRequest, signal?: AbortSignal) {
+    const params = new URLSearchParams();
+    if (input.mime_type) params.set("mime_type", input.mime_type);
+    if (input.note_id) params.set("note_id", input.note_id);
+    if (input.status) params.set("status", input.status);
+    if (input.cursor) params.set("cursor", input.cursor);
+    params.set("limit", String(input.limit));
+    return this.query<{ items: Attachment[]; next_cursor: string | null }>(
+      `/api/v2/attachments?${params.toString()}`,
+      `attachments:${params.toString()}`,
+      signal,
+    );
+  }
+
+  createAttachmentUpload(input: Omit<CreateAttachmentUploadInput, "idempotency_key">) {
+    return this.command<{ attachment: Attachment }>("/api/v2/attachments/uploads", "POST", {
+      ...input,
+      idempotency_key: this.createId(),
+    }).then(({ attachment }) => attachment);
+  }
+
+  retryAttachmentOcr(attachmentId: string) {
+    return this.command<{ queued: string[]; ineligible: string[]; duplicate: string[] }>(
+      `/api/v2/attachments/${encodeURIComponent(attachmentId)}/ocr/retry`,
+      "POST",
+      { attachment_ids: [attachmentId] },
+    );
+  }
+
+  retryAttachmentOcrBatch(attachmentIds: string[]) {
+    return this.command<{ queued: string[]; ineligible: string[]; duplicate: string[] }>(
+      "/api/v2/attachments/ocr/retry",
+      "POST",
+      { attachment_ids: attachmentIds },
+    );
+  }
+
+  getKnowledgeDiagnostics(input: KnowledgeDiagnosticsRequest, signal?: AbortSignal) {
+    const params = new URLSearchParams({ limit: String(input.limit) });
+    if (input.cursor) params.set("cursor", input.cursor);
+    return this.query<{ items: KnowledgeDiagnostic[]; next_cursor: string | null }>(
+      `/api/v2/knowledge/diagnostics?${params.toString()}`,
+      `diagnostics:${params.toString()}`,
+      signal,
+    );
+  }
+
+  deleteAttachment(attachmentId: string) {
+    return this.client.request<{ deleted: true }>({
+      path: `/api/v2/attachments/${encodeURIComponent(attachmentId)}`,
+      method: "DELETE",
+      headers: this.headers(),
+      requestClass: "command",
+      policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId() },
+    });
   }
 
   private listQuery<T>(path: string, key: string, signal?: AbortSignal) {

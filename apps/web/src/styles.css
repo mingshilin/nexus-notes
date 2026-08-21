@@ -66,6 +66,16 @@ button { color: inherit; }
 .editor-copy hr { margin: 46px 0; border: 0; border-top: 1px solid var(--border-subtle); }
 .callout { display: flex; gap: 13px; margin-top: 30px; padding: 18px; border: 1px solid rgba(0,122,255,.16); border-radius: 18px; color: var(--nexus-accent); background: rgba(0,122,255,.06); }
 .callout p { margin: 0; font-size: 14px; }
+.knowledge-recovery { display: grid; gap: 10px; padding: 16px 0; }
+.knowledge-recovery-heading, .knowledge-recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.knowledge-recovery-heading h3 { margin: 4px 0 0; font-size: 18px; }
+.knowledge-recovery button { border: 1px solid var(--border-subtle); border-radius: 10px; padding: 7px 10px; color: var(--nexus-accent); background: rgba(0,122,255,.06); cursor: pointer; font-size: 12px; font-weight: 650; }
+.knowledge-filter { display: grid; gap: 5px; color: hsl(var(--muted-foreground)); font-size: 11px; }
+.knowledge-filter input { min-width: 0; border: 1px solid var(--border-subtle); border-radius: 10px; padding: 8px 10px; outline: 0; background: rgba(255,255,255,.52); }
+.knowledge-recovery-row { padding: 10px 0; border-top: 1px solid var(--border-subtle); }
+.knowledge-recovery-row span { display: grid; min-width: 0; gap: 3px; }
+.knowledge-recovery-row strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-recovery-row small { color: hsl(var(--muted-foreground)); font-size: 11px; }
 .inspector-backdrop { position: absolute; inset: 0; z-index: 20; background: rgba(15, 23, 42, 0.16); backdrop-filter: blur(3px); }
 .workbench-inspector { position: absolute; inset: 10px 10px 10px auto; width: min(360px, calc(100% - 20px)); padding: 52px 24px 24px; }
 .inspector-close { position: absolute; top: 12px; right: 12px; display: grid; width: 32px; height: 32px; border: 0; border-radius: 10px; place-items: center; background: rgba(0,0,0,.05); cursor: pointer; }

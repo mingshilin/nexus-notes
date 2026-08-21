@@ -24,6 +24,9 @@ import { registerReminderRoutes } from "./routes/reminders";
 import { registerTaxonomyRoutes } from "./routes/taxonomy";
 import { D1QuotaService } from "./security/quota";
 import { D1RateLimiter } from "./security/rate-limit";
+import { D1AttachmentRepository } from "./attachments/d1-attachment-repository";
+import { AttachmentService } from "./attachments/attachment-service";
+import { registerAttachmentRoutes } from "./routes/attachments";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -98,6 +101,10 @@ function createKnowledgeService(env: BetaWorkerEnv) {
   });
 }
 
+function createAttachmentService(env: BetaWorkerEnv) {
+  return new AttachmentService(new D1AttachmentRepository(env.DB), env.FILES, { queue: env.JOBS });
+}
+
 function allowedOrigins(env: BetaWorkerEnv) {
   const origins = new Set<string>();
   if (env.APP_BASE_URL) origins.add(new URL(env.APP_BASE_URL).origin);
@@ -135,6 +142,7 @@ export function createBetaWorker() {
   registerTaxonomyRoutes(registry, createKnowledgeService);
   registerReminderRoutes(registry, createKnowledgeService);
   registerGraphRoutes(registry, createKnowledgeService);
+  registerAttachmentRoutes(registry, createAttachmentService);
 
   return {
     fetch(request: Request, env: BetaWorkerEnv) {
