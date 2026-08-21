@@ -384,5 +384,6 @@ export const CsvExportInputSchema = z.object({
   property_ids: z.array(EntityIdSchema).min(1).max(100),
   cursor: z.string().trim().min(1).nullable().default(null),
   page_size: z.number().int().min(1).max(1_000).default(100),
+  include_header: z.boolean().default(true),
 }).strict();
 export type CsvExportInput = z.infer<typeof CsvExportInputSchema>;

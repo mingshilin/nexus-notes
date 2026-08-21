@@ -145,7 +145,7 @@ export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
       limit: Math.min(input.page_size, 100),
     });
     const rows = [
-      properties.map((property) => property.name),
+      ...(input.include_header !== false ? [properties.map((property) => property.name)] : []),
       ...page.items.map((record) => properties.map((property) => displayCsvValue(record.values[property.id]))),
     ];
     return { csv: serializeDatabaseCsv(rows), next_cursor: page.next_cursor };

@@ -211,14 +211,12 @@ export class DatabaseClient {
     return this.command<{ csv: string; next_cursor: string | null }>(`${this.databasePath(databaseId)}/export/csv`, "POST", input);
   }
 
-  async exportAllCsv(databaseId: string, input: Omit<CsvExportInput, "cursor">) {
+  async exportAllCsv(databaseId: string, input: Omit<CsvExportInput, "cursor" | "include_header">) {
     let cursor: string | null = null;
-    let first = true;
     let csv = "";
     do {
-      const page = await this.exportCsv(databaseId, { ...input, cursor });
-      csv += first ? page.csv : stripCsvHeader(page.csv);
-      first = false;
+      const page = await this.exportCsv(databaseId, { ...input, cursor, include_header: cursor === null });
+      csv += page.csv;
       cursor = page.next_cursor;
     } while (cursor);
     return csv;
@@ -245,9 +243,4 @@ export class DatabaseClient {
   private headers() {
     return { "x-workspace-id": this.workspaceId };
   }
-}
-
-function stripCsvHeader(csv: string) {
-  const newline = csv.indexOf("\n");
-  return newline < 0 ? "" : csv.slice(newline + 1);
 }

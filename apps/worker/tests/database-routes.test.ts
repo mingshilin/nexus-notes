@@ -112,6 +112,25 @@ describe("v2 structured database routes", () => {
     expect(noWorkspace.status).toBe(400);
   });
 
+  it("accepts the advertised CSV payload through the route-specific JSON body boundary", async () => {
+    const worker = await import("../src/index") as Record<string, any>;
+    const repository = repositoryDouble();
+    const registry = worker.createRouteRegistry({
+      requestId: () => "req-csv-limit",
+      authenticate: vi.fn(async () => ({ userId: "user-1" })),
+      authorizeWorkspace: vi.fn(async () => workspace),
+    });
+    worker.registerDatabaseRoutes(registry, () => repository);
+    const csv = `Name\r\n${"x".repeat(1024 * 1024 + 128)}`;
+
+    const response = await registry.fetch(request("/api/v2/databases/db-1/import/csv", "POST", {
+      csv, header_property_ids: { Name: "prop-1" },
+    }), {});
+
+    expect(response.status).toBe(201);
+    expect(repository.importCsv).toHaveBeenCalledWith(workspace, "db-1", expect.objectContaining({ csv }));
+  });
+
   it("wires database routes into the default Beta worker", async () => {
     const worker = await import("../src/index") as Record<string, any>;
     const betaWorker = worker.createBetaWorker();

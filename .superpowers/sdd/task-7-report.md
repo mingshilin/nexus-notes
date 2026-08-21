@@ -163,3 +163,41 @@ The Worker suite still emits the existing `OCR_QUEUE_MESSAGE_INVALID` stderr lin
 ### Scope audit
 
 - Modified only `apps/web` source/tests and this report; no Worker, domain, contracts, migrations, deployment, remote, secret, plan, or ledger files changed.
+
+## Task 7 Backend Review Fix Wave 3
+
+### RED evidence
+
+- `rtk npm run test --workspace @nexus/contracts -- tests/database-contracts.test.ts` failed because `CsvExportInputSchema` rejected the compatible `include_header: false` field.
+- `rtk npm run test --workspace @nexus/domain -- tests/database-permissions.test.ts` failed because an explicit `{ can_read: false, can_write: false }` row removed an owner's field access.
+- `rtk npm run test --workspace @nexus/web -- tests/database-client.test.ts` failed because the second export page without a header was passed through the old newline-based header stripper and was discarded.
+- `rtk npm run test --workspace @nexus/worker -- tests/database-routes.test.ts -t 'advertised CSV payload' --pool=forks --maxWorkers=1 --minWorkers=1` failed `413` rather than `201` for a valid JSON CSV payload above 1 MiB.
+- `rtk npm run test --workspace @nexus/worker -- tests/d1-database-repository.test.ts -t 'uses typed saved filters|guards relation targets|omits repeated CSV headers' --pool=forks --maxWorkers=1 --minWorkers=1` failed with a numeric saved filter returning zero records, a relation target deleted by a single-record create resolving successfully, and page two repeating its CSV header.
+- Controlled RED replay after the focused implementation: temporarily disabling cursor checks and raising the reference cap made `uses typed saved filters and rejects cursors from another view or search query` accept a cross-view cursor and made `rejects reference-heavy CSV input before expanding unbounded guard sets` return `INVALID_RELATION_REFERENCE` instead of `REFERENCE_LIMIT`. The guards were immediately restored before GREEN verification.
+
+### GREEN evidence
+
+- `rtk npm run test --workspace @nexus/worker -- tests/d1-database-repository.test.ts tests/database-routes.test.ts --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=dot`: passed `2/2` files and `28/28` tests.
+- `rtk npm run test --workspace @nexus/contracts -- tests/database-contracts.test.ts`: passed `4/4`.
+- `rtk npm run test --workspace @nexus/domain -- tests/database-values.test.ts tests/database-permissions.test.ts tests/database-csv.test.ts`: passed `3/3` files and `8/8` tests.
+- `rtk npm run test --workspace @nexus/web -- tests/database-client.test.ts`: passed `3/3`, covering the compatible client export pagination contract.
+- `rtk npm run test --workspace @nexus/worker -- --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=dot`: passed `37/37` Worker files and `204/204` tests in `129.16s`. Existing poison-message tests emit expected `OCR_QUEUE_MESSAGE_INVALID` stderr lines.
+- `rtk npm run typecheck --workspace @nexus/worker`, `@nexus/contracts`, `@nexus/domain`, and `@nexus/web`: all exited `0`.
+- `git diff --check`: passed with no output.
+
+### Requirement mapping
+
+- Typed saved filters bind normalized native number and boolean values. Multi-select, multi-member, and multi-relation filters use JSON membership for scalar predicates, normalized JSON equality for array predicates, and explicit null/empty-array semantics.
+- Record list cursors carry a compact `v1` fingerprint. Saved-view cursors bind database ID, view ID, revision, and config; search cursors bind database ID and query. Missing, stale, cross-view, and cross-query cursors return `INVALID_CURSOR`.
+- Reference validation deduplicates across CSV, bulk, template, and single-record values and rejects more than `1,000` distinct member/relation references before D1 validation or write statements.
+- Relation transaction guards now use the always-present workspace sentinel instead of an arbitrary database record. Single record creation has pre/post guards and maps a target-delete race to `INVALID_RELATION_REFERENCE`; template create/update/apply retain transaction guards.
+- CSV import has a route-specific `12 MiB + 16 KiB` JSON body boundary, which safely accommodates a 2 MiB UTF-8 CSV's JSON escaping overhead while the domain parser retains its 2 MiB CSV limit.
+- Owners bypass explicit field denial rows, preserving owner as the highest database role. Hidden/read-only property state remains schema behavior, not a permission override.
+- `CsvExportInput.include_header` is optional and defaults to true. The server omits the header only when explicitly false; the compatible client requests it once, so quoted-newline headers cannot be sliced or duplicated while pages remain bounded.
+
+### Remaining Web findings for the next sequential agent
+
+- Refetch page one on selected-view revision/config changes; cancel stale requests and scope/invalidate caches by view revision/config.
+- Complete dedicated typed CRUD/settings UI for every database entity and property type, including no-view creation paths.
+- Add user/viewport-driven bounded board/calendar loading, robust serialized optimistic bulk rollback, and confirmed snapshot reconciliation.
+- Keep CSV export consumption bounded in the UI (chunk/Blob strategy where required) and complete drawer focus-return, modal focus containment, and real-browser 390px/200%/keyboard evidence.

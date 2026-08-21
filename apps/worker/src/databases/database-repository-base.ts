@@ -5,6 +5,7 @@ import { D1DatabaseAccess } from "./d1-database-access";
 import {
   RECORD_COLUMNS,
   DatabaseRepositoryError,
+  cursorFingerprint,
   decodeRecordCursor,
   encodeRecordCursor,
   fromValueError,
@@ -21,6 +22,8 @@ interface ReferenceItem {
   id: string;
   target_database_id?: string;
 }
+
+const MAX_REFERENCE_ITEMS = 1_000;
 
 export interface D1DatabaseRepositoryOptions {
   createId(): string;
@@ -107,6 +110,9 @@ export abstract class DatabaseRepositoryBase {
         }
       }
     }
+    if (items.size > MAX_REFERENCE_ITEMS) {
+      throw new DatabaseRepositoryError("REFERENCE_LIMIT", "Too many distinct references", 400);
+    }
     return [...items.values()];
   }
 
@@ -162,12 +168,11 @@ export abstract class DatabaseRepositoryBase {
        )`,
     ).bind(context.userId, JSON.stringify(memberItems), context.workspaceId));
     if (relationItems.length > 0) guards.push(this.db.prepare(
-      `INSERT INTO database_records
-       (id, workspace_id, database_id, note_id, created_by, updated_by, revision, created_at, updated_at, deleted_at)
-       SELECT guard.id, guard.workspace_id, guard.database_id, guard.note_id, guard.created_by, guard.updated_by,
-         guard.revision, guard.created_at, guard.updated_at, guard.deleted_at
-       FROM database_records AS guard
-       WHERE guard.workspace_id = ? AND EXISTS (
+      `INSERT INTO workspaces (id, owner_user_id, slug, name, revision, created_at, updated_at)
+       SELECT workspace.id, workspace.owner_user_id, workspace.slug, workspace.name,
+         workspace.revision, workspace.created_at, workspace.updated_at
+       FROM workspaces AS workspace
+       WHERE workspace.id = ? AND EXISTS (
          SELECT 1 FROM json_each(?) AS reference
          WHERE NOT EXISTS (
            SELECT 1 FROM database_records relation_record
@@ -178,7 +183,7 @@ export abstract class DatabaseRepositoryBase {
              AND relation_record.id = json_extract(reference.value, '$.id')
              AND relation_record.deleted_at IS NULL
          )
-       ) LIMIT 1`,
+       )`,
     ).bind(context.workspaceId, JSON.stringify(relationItems), context.workspaceId));
     return guards;
   }
@@ -188,7 +193,7 @@ export abstract class DatabaseRepositoryBase {
       const member = items.find((item) => item.kind === "member");
       return member ? this.referenceError(member) : null;
     }
-    if (isUniqueGuardError(error, "database_records.id")) {
+    if (isUniqueGuardError(error, "workspaces.slug")) {
       const relation = items.find((item) => item.kind === "relation");
       return relation ? this.referenceError(relation) : null;
     }
@@ -244,11 +249,13 @@ export abstract class DatabaseRepositoryBase {
   protected async recordPage(
     context: WorkspaceContext,
     databaseId: string,
-    options: { cursor?: string | null; limit: number; viewConfig?: DatabaseView["config"] },
+    options: { cursor?: string | null; limit: number; viewConfig?: DatabaseView["config"]; cursorFingerprint?: string },
   ) {
     const fields = await this.access.fields(context, databaseId, "read");
     const config = options.viewConfig;
     const visible = config ? new Set(config.visible_columns.filter((propertyId) => fields.readable.has(propertyId))) : fields.readable;
+    const fingerprint = options.cursorFingerprint ?? cursorFingerprint({ databaseId, viewConfig: config ?? null });
+    const properties = new Map(fields.properties.map((property) => [property.id, property]));
     const filters = config?.filters.filter((filter) => fields.readable.has(filter.property_id)) ?? [];
     const configuredSorts = config?.sorts.filter((sort) => fields.readable.has(sort.property_id)) ?? [];
     const grouping = config?.grouping && fields.readable.has(config.grouping.property_id) ? config.grouping.property_id : null;
@@ -258,14 +265,44 @@ export abstract class DatabaseRepositoryBase {
     const limit = Math.max(1, Math.min(options.limit, config?.page_size ?? 100, 100));
     const conditions = ["r.workspace_id = ?", "r.database_id = ?", "r.deleted_at IS NULL"];
     const bindings: unknown[] = [context.workspaceId, databaseId];
-    const valueExpression = (propertyId: string) => `COALESCE((SELECT json_extract(value_json, '$') FROM record_values
-      WHERE workspace_id = r.workspace_id AND record_id = r.id AND property_id = '${propertyId.replaceAll("'", "''")}' LIMIT 1), '')`;
+    const valueJsonExpression = (propertyId: string) => `(SELECT value_json FROM record_values
+      WHERE workspace_id = r.workspace_id AND record_id = r.id AND property_id = '${propertyId.replaceAll("'", "''")}' LIMIT 1)`;
+    const valueExpression = (propertyId: string) => `COALESCE(json_extract(${valueJsonExpression(propertyId)}, '$'), '')`;
     for (const filter of filters) {
+      const property = properties.get(filter.property_id);
+      if (!property) continue;
+      const valueJson = valueJsonExpression(filter.property_id);
       const expression = valueExpression(filter.property_id);
+      const propertyConfig = property.config as Record<string, unknown>;
+      const isArray = property.type === "multi_select" || ((property.type === "member" || property.type === "relation") && propertyConfig.allow_multiple === true);
       if (filter.operator === "is_empty") {
-        conditions.push(`${expression} = ''`);
+        conditions.push(isArray
+          ? `(${valueJson} IS NULL OR json_type(${valueJson}, '$') = 'null' OR json_array_length(${valueJson}) = 0)`
+          : `(${valueJson} IS NULL OR json_type(${valueJson}, '$') = 'null' OR ${expression} = '')`);
       } else if (filter.operator === "is_not_empty") {
-        conditions.push(`${expression} <> ''`);
+        conditions.push(isArray
+          ? `(${valueJson} IS NOT NULL AND json_type(${valueJson}, '$') <> 'null' AND json_array_length(${valueJson}) > 0)`
+          : `(${valueJson} IS NOT NULL AND json_type(${valueJson}, '$') <> 'null' AND ${expression} <> '')`);
+      } else if (isArray) {
+        const requested = Array.isArray(filter.value)
+          ? this.normalize([{ ...property, hidden: false, read_only: false }], { [property.id]: filter.value }, new Set([property.id]))[property.id]
+          : this.normalize([{ ...property, hidden: false, read_only: false }], { [property.id]: [filter.value] }, new Set([property.id]))[property.id];
+        if (Array.isArray(filter.value) && (filter.operator === "equals" || filter.operator === "not_equals")) {
+          if ((requested as unknown[]).length === 0) {
+            conditions.push(filter.operator === "equals"
+              ? `(${valueJson} IS NULL OR json_type(${valueJson}, '$') = 'null' OR json_array_length(${valueJson}) = 0)`
+              : `(${valueJson} IS NOT NULL AND json_type(${valueJson}, '$') <> 'null' AND json_array_length(${valueJson}) > 0)`);
+          } else {
+            conditions.push(filter.operator === "equals"
+              ? `${valueJson} = ?`
+              : `(${valueJson} IS NULL OR json_type(${valueJson}, '$') = 'null' OR ${valueJson} <> ?)`);
+            bindings.push(JSON.stringify(requested));
+          }
+        } else {
+          const operator = filter.operator === "not_equals" || filter.operator === "not_contains" ? "NOT EXISTS" : "EXISTS";
+          conditions.push(`${operator} (SELECT 1 FROM json_each(COALESCE(${valueJson}, '[]')) WHERE value = ?)`);
+          bindings.push((requested as unknown[])[0]);
+        }
       } else if (filter.operator === "contains" || filter.operator === "not_contains") {
         const operator = filter.operator === "contains" ? "LIKE" : "NOT LIKE";
         conditions.push(`${expression} ${operator} ? ESCAPE '\\'`);
@@ -274,12 +311,24 @@ export abstract class DatabaseRepositoryBase {
         const operator = filter.operator === "equals" ? "="
           : filter.operator === "not_equals" ? "<>"
             : filter.operator === "before" ? "<" : ">";
-        conditions.push(`${expression} ${operator} ?`);
-        bindings.push(filter.value === undefined ? null : String(filter.value));
+        const normalized = this.normalize([{ ...property, hidden: false, read_only: false }], { [property.id]: filter.value ?? null }, new Set([property.id]))[property.id];
+        if (normalized === null) {
+          conditions.push(filter.operator === "equals"
+            ? `(${valueJson} IS NULL OR json_type(${valueJson}, '$') = 'null')`
+            : filter.operator === "not_equals"
+              ? `(${valueJson} IS NOT NULL AND json_type(${valueJson}, '$') <> 'null')`
+              : "0");
+        } else {
+          conditions.push(`${expression} ${operator} ?`);
+          bindings.push(normalized);
+        }
       }
     }
     if (options.cursor) {
       const cursor = decodeRecordCursor(options.cursor);
+      if (cursor.fingerprint !== fingerprint) {
+        throw new DatabaseRepositoryError("INVALID_CURSOR", "Record cursor does not match this query", 400);
+      }
       if (sorts.length > 0) {
         if (!cursor.sortValues || cursor.sortValues.length !== sorts.length) {
           throw new DatabaseRepositoryError("INVALID_CURSOR", "Record cursor does not match the saved view", 400);
@@ -315,7 +364,7 @@ export abstract class DatabaseRepositoryBase {
       next_cursor: rows.length > limit && items.length > 0
         ? encodeRecordCursor(items[items.length - 1]!, sorts.length > 0
           ? sorts.map((_, index) => (pageRows[pageRows.length - 1] as unknown as Record<string, unknown>)[`sort_${index}`])
-          : undefined)
+          : undefined, fingerprint)
         : null,
     };
   }

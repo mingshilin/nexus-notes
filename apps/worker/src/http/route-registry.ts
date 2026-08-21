@@ -49,6 +49,7 @@ export interface RouteDefinition<TEnv, TBody = unknown, TData = unknown> {
     windowSeconds: number;
   };
   quota?: string;
+  bodyLimitBytes?: number;
   body?: BodySchema<TBody>;
   handler(context: RouteContext<TEnv, TBody>): RouteResult<TData> | Response | Promise<RouteResult<TData> | Response>;
 }
@@ -271,7 +272,7 @@ export function createRouteRegistry<TEnv = unknown>(options: RouteRegistryOption
 
       let body: unknown;
       if (matched.route.definition.body) {
-        const input = await readJsonBody(request, maxBodyBytes);
+        const input = await readJsonBody(request, matched.route.definition.bodyLimitBytes ?? maxBodyBytes);
         if (!input.success) {
           const tooLarge = input.reason === "too_large";
           return jsonResponse(

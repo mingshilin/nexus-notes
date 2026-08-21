@@ -11,7 +11,7 @@ import type {
 } from "@nexus/contracts";
 
 import { assertRevision, DatabaseRepositoryBase } from "./database-repository-base";
-import { RECORD_COLUMNS, VIEW_COLUMNS, DatabaseRepositoryError, decodeRecordCursor, encodeRecordCursor, isUniqueGuardError, placeholders, toView, type RecordRow, type ViewRow } from "./database-model";
+import { RECORD_COLUMNS, VIEW_COLUMNS, DatabaseRepositoryError, cursorFingerprint, decodeRecordCursor, encodeRecordCursor, isUniqueGuardError, placeholders, toView, type RecordRow, type ViewRow } from "./database-model";
 
 const JSON_BATCH_BYTES = 700_000;
 
@@ -73,7 +73,8 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
       note_id: input.note_id ?? null, values, created_by: context.userId, updated_by: context.userId,
       revision: 1, created_at: now, updated_at: now,
     };
-    const statements = this.createRecordStatements(record);
+    const references = this.referenceItems(fields.properties, [values]);
+    const statements = [...this.referenceGuards(context, references), ...this.createRecordStatements(record)];
     if (record.note_id) {
       const note = await this.db.prepare(
         "SELECT id, database_id FROM notes WHERE workspace_id = ? AND id = ? AND deleted_at IS NULL",
@@ -88,7 +89,14 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
         ).bind(databaseId, now, context.workspaceId, record.note_id));
       }
     }
-    await this.db.batch(statements);
+    statements.push(...this.referenceGuards(context, references));
+    try {
+      await this.db.batch(statements);
+    } catch (error) {
+      const referenceFailure = this.referenceGuardFailure(error, references);
+      if (referenceFailure) throw referenceFailure;
+      throw error;
+    }
     return record;
   }
 
@@ -100,19 +108,27 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
   }
 
   async listRecords(context: WorkspaceContext, databaseId: string, options: { cursor?: string | null; limit: number; view_id?: string | null }) {
-    if (!options.view_id) return this.recordPage(context, databaseId, options);
+    if (!options.view_id) return this.recordPage(context, databaseId, {
+      ...options,
+      cursorFingerprint: cursorFingerprint({ kind: "records", database_id: databaseId }),
+    });
     const row = await this.db.prepare(
       `SELECT ${VIEW_COLUMNS} FROM database_views WHERE workspace_id = ? AND database_id = ? AND id = ?`,
     ).bind(context.workspaceId, databaseId, options.view_id).first<ViewRow>();
     if (!row) throw new DatabaseRepositoryError("VIEW_NOT_FOUND", "Database view not found", 404);
     const view: DatabaseView = toView(row);
-    return this.recordPage(context, databaseId, { ...options, viewConfig: view.config });
+    return this.recordPage(context, databaseId, {
+      ...options,
+      viewConfig: view.config,
+      cursorFingerprint: cursorFingerprint({ kind: "records", database_id: databaseId, view_id: view.id, view_revision: view.revision, view_config: view.config }),
+    });
   }
 
   async searchRecords(context: WorkspaceContext, databaseId: string, options: { query: string; cursor?: string | null; limit: number }) {
     const fields = await this.access.fields(context, databaseId, "read");
     if (fields.readable.size === 0 || !options.query.trim()) return { items: [], next_cursor: null };
     const propertyIds = [...fields.readable];
+    const fingerprint = cursorFingerprint({ kind: "search", database_id: databaseId, query: options.query });
     const limit = Math.max(1, Math.min(options.limit, 100));
     const conditions = [
       "r.workspace_id = ?", "r.database_id = ?", "r.deleted_at IS NULL",
@@ -124,6 +140,9 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     ];
     if (options.cursor) {
       const cursor = decodeRecordCursor(options.cursor);
+      if (cursor.fingerprint !== fingerprint) {
+        throw new DatabaseRepositoryError("INVALID_CURSOR", "Record cursor does not match this query", 400);
+      }
       conditions.push("(r.updated_at < ? OR (r.updated_at = ? AND r.id < ?))");
       bindings.push(cursor.updatedAt, cursor.updatedAt, cursor.id);
     }
@@ -136,7 +155,7 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     ).bind(...bindings, limit + 1).all<RecordRow>();
     const rows = result.results ?? [];
     const items = await this.materialize(rows.slice(0, limit), fields.readable);
-    return { items, next_cursor: rows.length > limit && items.length > 0 ? encodeRecordCursor(items[items.length - 1]!) : null };
+    return { items, next_cursor: rows.length > limit && items.length > 0 ? encodeRecordCursor(items[items.length - 1]!, undefined, fingerprint) : null };
   }
 
   async updateRecord(context: WorkspaceContext, databaseId: string, recordId: string, input: UpdateDatabaseRecordInput) {

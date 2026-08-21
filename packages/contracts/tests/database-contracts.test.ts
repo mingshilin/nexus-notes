@@ -100,7 +100,7 @@ describe("structured database contracts", () => {
       ["CalendarAssignmentInputSchema", { record_id: "record-1", property_id: "due", date: "2026-08-22", base_revision: 1 }, { record_id: "record-1", property_id: "due", date: "22/08/2026", base_revision: 1 }],
       ["ApplyDatabaseTemplateInputSchema", { template_id: "template-1", records: [{ record_id: "record-1", base_revision: 1 }] }, { template_id: "template-1", records: [] }],
       ["CsvImportInputSchema", { csv: "Name,Due\r\nOne,2026-08-21", header_property_ids: { Name: "name" } }, { csv: "", header_property_ids: {} }],
-      ["CsvExportInputSchema", { property_ids: ["prop-1"], cursor: null, page_size: 100 }, { property_ids: [], page_size: 5001 }],
+      ["CsvExportInputSchema", { property_ids: ["prop-1"], cursor: null, page_size: 100, include_header: false }, { property_ids: [], page_size: 5001 }],
     ];
 
     for (const [name, valid, invalid] of fixtures) {

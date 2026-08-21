@@ -60,14 +60,15 @@ describe("DatabaseClient", () => {
 
   it("exports every bounded CSV page without repeating headers", async () => {
     const data = await loadData();
-    const api = { request: vi.fn(async ({ body }: { body: { cursor: string | null } }) => {
+    const api = { request: vi.fn(async ({ body }: { body: { cursor: string | null; include_header?: boolean } }) => {
       return body.cursor === null
         ? { csv: "Name\r\nOne\r\nTwo\r\n", next_cursor: "next-1" }
-        : { csv: "Name\r\nThree\r\n", next_cursor: null };
+        : { csv: "Three\r\n", next_cursor: null };
     }) };
     const client = new data.DatabaseClient(api, "ws-1", { createId: () => "export" });
 
     await expect(client.exportAllCsv("db-1", { property_ids: ["name"], page_size: 100 })).resolves.toBe("Name\r\nOne\r\nTwo\r\nThree\r\n");
     expect(api.request.mock.calls.map(([request]) => request.body.cursor)).toEqual([null, "next-1"]);
+    expect(api.request.mock.calls.map(([request]) => request.body.include_header)).toEqual([true, false]);
   });
 });

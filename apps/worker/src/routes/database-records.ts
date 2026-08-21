@@ -11,6 +11,9 @@ import {
 
 import { type DatabaseRegistry, type DatabaseRepositoryFactory, recordListOptions, recordSearchOptions } from "./database-route-types";
 
+// A 2 MiB UTF-8 CSV may expand up to sixfold when encoded as a JSON string.
+const CSV_IMPORT_JSON_BODY_LIMIT = 12 * 1024 * 1024 + 16 * 1024;
+
 export function registerDatabaseRecordRoutes<TEnv>(
   registry: DatabaseRegistry<TEnv>,
   createRepository: DatabaseRepositoryFactory<TEnv>,
@@ -72,6 +75,7 @@ export function registerDatabaseRecordRoutes<TEnv>(
   });
   registry.register({
     method: "POST", path: "/api/v2/databases/:databaseId/import/csv", auth: "workspace", body: CsvImportInputSchema,
+    bodyLimitBytes: CSV_IMPORT_JSON_BODY_LIMIT,
     timeoutMs: 30_000,
     handler: async ({ env, workspace, params, body }) => ({
       status: 201,

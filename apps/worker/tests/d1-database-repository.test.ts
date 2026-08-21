@@ -120,7 +120,7 @@ describe("D1 structured database repository", () => {
       .rejects.toMatchObject({ code: "DATABASE_MANAGE_DENIED", status: 403 });
   });
 
-  it("does not let a managed subject mutate a field without field write authorization", async () => {
+  it("lets a database owner override an explicit field denial for schema mutations", async () => {
     const repository = await createRepository();
     const owner = context("user-1");
     const managed = context("user-2", "editor");
@@ -133,10 +133,10 @@ describe("D1 structured database repository", () => {
       subject_type: "user", subject_id: managed.userId, can_read: true, can_write: false, base_revision: 1,
     });
 
-    await expect(repository.updateProperty(managed, database.id, property.id, { base_revision: 1, hidden: true }))
-      .rejects.toMatchObject({ code: "FIELD_WRITE_DENIED", status: 403 });
-    await expect(repository.deleteProperty(managed, database.id, property.id, { base_revision: 1 }))
-      .rejects.toMatchObject({ code: "FIELD_WRITE_DENIED", status: 403 });
+    const updated = await repository.updateProperty(managed, database.id, property.id, { base_revision: 1, name: "Renamed" });
+    expect(updated.name).toBe("Renamed");
+    await expect(repository.deleteProperty(managed, database.id, property.id, { base_revision: updated.revision }))
+      .resolves.toEqual({ id: property.id });
   });
 
   it("uses revision CAS for database and field permission upserts", async () => {
@@ -570,5 +570,117 @@ describe("D1 structured database repository", () => {
 
     await expect(repository.searchRecords(owner, database.id, { query: "C:\\build", limit: 10 }))
       .resolves.toMatchObject({ items: [expect.objectContaining({ id: escaped.id })] });
+  });
+
+  it("uses typed saved filters and rejects cursors from another view or search query", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Typed filters", description: "" });
+    const score = await repository.createProperty(owner, database.id, { name: "Score", type: "number", config: {}, position: 0 });
+    const complete = await repository.createProperty(owner, database.id, { name: "Complete", type: "checkbox", config: {}, position: 1 });
+    const tags = await repository.createProperty(owner, database.id, {
+      name: "Tags", type: "multi_select", config: { options: [{ id: "a", name: "A", color: "" }, { id: "b", name: "B", color: "" }] }, position: 2,
+    });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [score.id]: 2, [complete.id]: false, [tags.id]: ["a", "b"] } });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [score.id]: 2, [complete.id]: false, [tags.id]: ["a"] } });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [score.id]: 3, [complete.id]: true, [tags.id]: ["a"] } });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [score.id]: 4, [complete.id]: false, [tags.id]: null } });
+    const numericView = await repository.createView(owner, database.id, {
+      name: "Score", type: "table", position: 0,
+      config: { filters: [{ property_id: score.id, operator: "equals", value: 2 }], sorts: [], grouping: null, visible_columns: [score.id], page_size: 1, settings: {} },
+    });
+    const tagsView = await repository.createView(owner, database.id, {
+      name: "Tags", type: "table", position: 1,
+      config: { filters: [{ property_id: tags.id, operator: "equals", value: ["a", "b"] }], sorts: [], grouping: null, visible_columns: [tags.id], page_size: 1, settings: {} },
+    });
+    const checkboxView = await repository.createView(owner, database.id, {
+      name: "Incomplete", type: "table", position: 2,
+      config: { filters: [{ property_id: complete.id, operator: "equals", value: false }], sorts: [], grouping: null, visible_columns: [complete.id], page_size: 100, settings: {} },
+    });
+    const emptyTagsView = await repository.createView(owner, database.id, {
+      name: "No tags", type: "table", position: 3,
+      config: { filters: [{ property_id: tags.id, operator: "equals", value: [] }], sorts: [], grouping: null, visible_columns: [tags.id], page_size: 100, settings: {} },
+    });
+
+    const numeric = await repository.listRecords(owner, database.id, { view_id: numericView.id, limit: 100 });
+    expect(numeric.items).toHaveLength(1);
+    expect(numeric.items[0]?.values[score.id]).toBe(2);
+    await expect(repository.listRecords(owner, database.id, { view_id: tagsView.id, limit: 100, cursor: numeric.next_cursor }))
+      .rejects.toMatchObject({ code: "INVALID_CURSOR", status: 400 });
+    const revised = await repository.updateView(owner, database.id, numericView.id, {
+      base_revision: numericView.revision, name: "Score revised",
+    });
+    await expect(repository.listRecords(owner, database.id, { view_id: revised.id, limit: 100, cursor: numeric.next_cursor }))
+      .rejects.toMatchObject({ code: "INVALID_CURSOR", status: 400 });
+    await expect(repository.listRecords(owner, database.id, { view_id: tagsView.id, limit: 100 })).resolves.toMatchObject({ items: [expect.objectContaining({ values: { [tags.id]: ["a", "b"] } })] });
+    await expect(repository.listRecords(owner, database.id, { view_id: checkboxView.id, limit: 100 })).resolves.toMatchObject({ items: expect.arrayContaining([expect.objectContaining({ values: { [complete.id]: false } })]) });
+    await expect(repository.listRecords(owner, database.id, { view_id: emptyTagsView.id, limit: 100 })).resolves.toMatchObject({ items: [expect.objectContaining({ values: { [tags.id]: null } })] });
+    const search = await repository.searchRecords(owner, database.id, { query: "a", limit: 1 });
+    await expect(repository.searchRecords(owner, database.id, { query: "b", limit: 1, cursor: search.next_cursor }))
+      .rejects.toMatchObject({ code: "INVALID_CURSOR", status: 400 });
+  });
+
+  it("guards relation targets during single-record and template creation", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Relation writes", description: "" });
+    const target = await repository.createDatabase(owner, { name: "Relation target", description: "" });
+    const relation = await repository.createProperty(owner, database.id, {
+      name: "Related", type: "relation", config: { target_database_id: target.id }, position: 0,
+    });
+    const targetRecord = await repository.createRecord(owner, target.id, { note_id: null, values: {} });
+    await db.prepare(
+      `CREATE TRIGGER create_relation_race AFTER INSERT ON database_records
+       WHEN NEW.database_id = '${database.id}'
+       BEGIN
+         UPDATE database_records SET deleted_at = '${now}' WHERE id = '${targetRecord.id}';
+       END;`,
+    ).run();
+    await expect(repository.createRecord(owner, database.id, { note_id: null, values: { [relation.id]: targetRecord.id } }))
+      .rejects.toMatchObject({ code: "INVALID_RELATION_REFERENCE", status: 400 });
+    expect(await db.prepare("SELECT deleted_at FROM database_records WHERE id = ?").bind(targetRecord.id).first()).toEqual({ deleted_at: null });
+
+    await db.prepare("DROP TRIGGER create_relation_race").run();
+    await db.prepare(
+      `CREATE TRIGGER create_template_relation_race BEFORE INSERT ON database_templates
+       WHEN NEW.database_id = '${database.id}'
+       BEGIN
+         UPDATE database_records SET deleted_at = '${now}' WHERE id = '${targetRecord.id}';
+       END;`,
+    ).run();
+    await expect(repository.createTemplate(owner, database.id, { name: "Default", default_values: { [relation.id]: targetRecord.id } }))
+      .rejects.toMatchObject({ code: "INVALID_RELATION_REFERENCE", status: 400 });
+    expect(await db.prepare("SELECT deleted_at FROM database_records WHERE id = ?").bind(targetRecord.id).first()).toEqual({ deleted_at: null });
+  });
+
+  it("omits repeated CSV headers on bounded export pages", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "CSV pages", description: "" });
+    const title = await repository.createProperty(owner, database.id, { name: "Title\nwith newline", type: "text", config: {}, position: 0 });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "First" } });
+    await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "Second" } });
+    const first = await repository.exportCsv(owner, database.id, { property_ids: [title.id], cursor: null, page_size: 1, include_header: true });
+    const second = await repository.exportCsv(owner, database.id, { property_ids: [title.id], cursor: first.next_cursor, page_size: 1, include_header: false });
+
+    expect(first.csv).toMatch(/^"Title\nwith newline"\r\n/u);
+    expect(second.csv).not.toMatch(/^"Title\nwith newline"\r\n/u);
+  });
+
+  it("rejects reference-heavy CSV input before expanding unbounded guard sets", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Reference limit", description: "" });
+    const target = await repository.createDatabase(owner, { name: "Reference limit target", description: "" });
+    const relation = await repository.createProperty(owner, database.id, {
+      name: "Relations", type: "relation", config: { target_database_id: target.id, allow_multiple: true }, position: 0,
+    });
+    const rows = Array.from({ length: 500 }, (_, row) => Array.from({ length: 3 }, (_, column) => `target-${row}-${column}`).join(";"));
+
+    await expect(repository.importCsv(owner, database.id, {
+      csv: `Relations\r\n${rows.join("\r\n")}`,
+      header_property_ids: { Relations: relation.id },
+    })).rejects.toMatchObject({ code: "REFERENCE_LIMIT", status: 400 });
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM database_records WHERE workspace_id = ? AND database_id = ?").bind("ws-1", database.id).first()).toEqual({ count: 0 });
   });
 });

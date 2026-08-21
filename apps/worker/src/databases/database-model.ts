@@ -174,9 +174,28 @@ export function toComment(row: CommentRow, databaseId: string): DatabaseComment 
   };
 }
 
-export function encodeRecordCursor(record: Pick<DatabaseRecord, "updated_at" | "id">, sortValues?: readonly unknown[]) {
-  if (sortValues) {
-    return encodeURIComponent(JSON.stringify({ sort_values: sortValues, updated_at: record.updated_at, id: record.id }));
+export function cursorFingerprint(value: unknown) {
+  const source = JSON.stringify(value);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `v1-${(hash >>> 0).toString(16)}`;
+}
+
+export function encodeRecordCursor(
+  record: Pick<DatabaseRecord, "updated_at" | "id">,
+  sortValues?: readonly unknown[],
+  fingerprint?: string,
+) {
+  if (sortValues || fingerprint) {
+    return encodeURIComponent(JSON.stringify({
+      ...(sortValues ? { sort_values: sortValues } : {}),
+      ...(fingerprint ? { fingerprint } : {}),
+      updated_at: record.updated_at,
+      id: record.id,
+    }));
   }
   return encodeURIComponent(`${record.updated_at}\n${record.id}`);
 }
@@ -185,9 +204,9 @@ export function decodeRecordCursor(cursor: string) {
   try {
     const decoded = decodeURIComponent(cursor);
     if (decoded.startsWith("{")) {
-      const parsed = JSON.parse(decoded) as { sort_values?: unknown; updated_at?: unknown; id?: unknown };
-      if (!Array.isArray(parsed.sort_values) || typeof parsed.updated_at !== "string" || typeof parsed.id !== "string") throw new Error("invalid");
-      return { updatedAt: parsed.updated_at, id: parsed.id, sortValues: parsed.sort_values };
+      const parsed = JSON.parse(decoded) as { sort_values?: unknown; fingerprint?: unknown; updated_at?: unknown; id?: unknown };
+      if ((parsed.sort_values !== undefined && !Array.isArray(parsed.sort_values)) || (parsed.fingerprint !== undefined && typeof parsed.fingerprint !== "string") || typeof parsed.updated_at !== "string" || typeof parsed.id !== "string") throw new Error("invalid");
+      return { updatedAt: parsed.updated_at, id: parsed.id, sortValues: parsed.sort_values as unknown[] | undefined, fingerprint: parsed.fingerprint as string | undefined };
     }
     const separator = decoded.indexOf("\n");
     if (separator <= 0 || separator === decoded.length - 1) throw new Error("invalid");
@@ -201,6 +220,6 @@ export function placeholders(length: number) {
   return Array.from({ length }, () => "?").join(", ");
 }
 
-export function isUniqueGuardError(error: unknown, signature: "workspaces.id" | "workspaces.slug" | "users.email" | "database_records.id") {
+export function isUniqueGuardError(error: unknown, signature: "workspaces.id" | "workspaces.slug" | "users.email" | "database_records.id" | "databases.id") {
   return error instanceof Error && new RegExp(`(?:^|: )UNIQUE constraint failed: ${signature.replace(".", "\\.")}(?=:|$)`).test(error.message);
 }
