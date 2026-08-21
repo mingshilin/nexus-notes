@@ -1,8 +1,8 @@
 import type { QueueJob } from "@nexus/contracts";
 
 interface OcrRepository {
-  claimOcrJob(workspaceId: string, jobId: string, now: string): Promise<{ id: string; workspace_id: string; attachment_id: string; attempt_count: number; deadline: string } | null>;
-  completeOcrJob(workspaceId: string, jobId: string, text: string, now: string): Promise<void>;
+  claimOcrJob(job: QueueJob, now: string): Promise<{ id: string; workspace_id: string; attachment_id: string; attempt_count: number; deadline: string } | null>;
+  completeOcrJob(workspaceId: string, jobId: string, text: string, now: string): Promise<boolean | void>;
   failOcrJob(workspaceId: string, jobId: string, code: string, now: string): Promise<void>;
 }
 
@@ -22,14 +22,17 @@ export class OcrConsumer {
   async consume(job: QueueJob) {
     if (job.kind !== "ocr" || typeof job.payload.workspace_id !== "string" || typeof job.payload.attachment_id !== "string") return;
     const now = this.clock().toISOString();
-    const claimed = await this.repository.claimOcrJob(job.payload.workspace_id, job.job_id, now);
+    const claimed = await this.repository.claimOcrJob(job, now);
     if (!claimed) return;
     try {
       if (Date.parse(claimed.deadline) <= this.clock().getTime()) throw new Error("OCR_DEADLINE_EXCEEDED");
       const file = await this.files.get(`${claimed.workspace_id}/attachments/${claimed.attachment_id}`);
       if (!file) throw new Error("OCR_FILE_NOT_FOUND");
       const text = (await this.extractor.extract(file.body)).trim();
-      await this.repository.completeOcrJob(claimed.workspace_id, claimed.id, text, this.clock().toISOString());
+      const completed = await this.repository.completeOcrJob(claimed.workspace_id, claimed.id, text, this.clock().toISOString());
+      if (completed === false) {
+        await this.repository.failOcrJob(claimed.workspace_id, claimed.id, "OCR_SOURCE_STALE", this.clock().toISOString());
+      }
     } catch (error) {
       const code = error instanceof Error && /^[A-Z0-9_]+$/.test(error.message) ? error.message : "OCR_EXTRACTION_FAILED";
       await this.repository.failOcrJob(claimed.workspace_id, claimed.id, code, this.clock().toISOString());

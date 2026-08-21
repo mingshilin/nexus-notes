@@ -1,6 +1,7 @@
 import {
   AttachmentListRequestSchema,
   CreateAttachmentUploadInputSchema,
+  MAX_UPLOAD_BYTES,
   UploadCompleteInputSchema,
   KnowledgeDiagnosticsRequestSchema,
   OcrRetryInputSchema,
@@ -55,6 +56,42 @@ function contentDisposition(filename: string) {
   return `attachment; filename="${safe}"`;
 }
 
+async function readAttachmentBody(request: Request) {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null) {
+    const normalized = contentLength.trim();
+    if (!/^(0|[1-9]\d*)$/u.test(normalized) || !Number.isSafeInteger(Number(normalized))) {
+      throw new AttachmentServiceError("ATTACHMENT_CONTENT_LENGTH_INVALID", "Content-Length must be a non-negative integer", 400);
+    }
+    if (Number(normalized) > MAX_UPLOAD_BYTES) {
+      throw new AttachmentServiceError("ATTACHMENT_FILE_TOO_LARGE", "Attachment exceeds the 25 MB limit", 413);
+    }
+  }
+
+  const reader = request.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const accepted = Math.min(value.byteLength, MAX_UPLOAD_BYTES + 1 - total);
+    if (accepted > 0) chunks.push(value.subarray(0, accepted));
+    total += accepted;
+    if (total > MAX_UPLOAD_BYTES || accepted < value.byteLength) {
+      await reader.cancel("Attachment exceeds the 25 MB limit").catch(() => undefined);
+      throw new AttachmentServiceError("ATTACHMENT_FILE_TOO_LARGE", "Attachment exceeds the 25 MB limit", 413);
+    }
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
 export function registerAttachmentRoutes<TEnv>(
   registry: AttachmentRegistry<TEnv>,
   createService: (env: TEnv) => AttachmentRouteService,
@@ -80,7 +117,7 @@ export function registerAttachmentRoutes<TEnv>(
   registry.register({
     method: "PUT", path: "/api/v2/attachments/:attachmentId/content", auth: "workspace", minimumRole: "editor",
     handler: async ({ request, env, workspace, params }) => ({
-      data: { attachment: await createService(env).uploadContent(workspace!, params.attachmentId!, new Uint8Array(await request.arrayBuffer())) },
+      data: { attachment: await createService(env).uploadContent(workspace!, params.attachmentId!, await readAttachmentBody(request)) },
     }),
   });
   registry.register({

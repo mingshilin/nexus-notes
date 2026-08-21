@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { MAX_UPLOAD_BYTES } from "@nexus/contracts";
+
 type WorkerExports = Record<string, unknown>;
 
 async function loadWorker() {
@@ -67,5 +69,60 @@ describe("v2 attachment routes", () => {
     const response = await registry.fetch(request("/api/v2/attachments/attachment-1/ocr/retry", { method: "POST", body: JSON.stringify({ attachment_ids: ["attachment-2"] }) }), {});
     expect(response.status).toBe(400);
     expect((await response.json()).error.code).toBe("OCR_RETRY_PATH_MISMATCH");
+  });
+
+  it.each([
+    ["not-a-number", 400, "ATTACHMENT_CONTENT_LENGTH_INVALID"],
+    [String(MAX_UPLOAD_BYTES + 1), 413, "ATTACHMENT_FILE_TOO_LARGE"],
+  ])("rejects Content-Length %s before calling the upload service", async (contentLength, status, code) => {
+    const worker = await loadWorker();
+    const uploadContent = vi.fn();
+    const registry = (worker.createRouteRegistry as any)({
+      requestId: () => "req-length",
+      authenticate: vi.fn(async () => ({ userId: "user-1" })),
+      authorizeWorkspace: vi.fn(async () => workspace),
+    });
+    (worker.registerAttachmentRoutes as any)(registry, () => ({ uploadContent }));
+    const response = await registry.fetch(request("/api/v2/attachments/attachment-1/content", {
+      method: "PUT",
+      headers: { "content-length": contentLength, "content-type": "application/octet-stream" },
+    }), {});
+
+    expect(response.status).toBe(status);
+    expect((await response.json()).error.code).toBe(code);
+    expect(uploadContent).not.toHaveBeenCalled();
+  });
+
+  it("cancels an oversized streaming body before calling the upload service", async () => {
+    const worker = await loadWorker();
+    const uploadContent = vi.fn();
+    const cancel = vi.fn();
+    const chunk = new Uint8Array(1024 * 1024);
+    let emitted = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(chunk);
+        emitted += chunk.byteLength;
+      },
+      cancel,
+    });
+    const registry = (worker.createRouteRegistry as any)({
+      requestId: () => "req-stream",
+      authenticate: vi.fn(async () => ({ userId: "user-1" })),
+      authorizeWorkspace: vi.fn(async () => workspace),
+    });
+    (worker.registerAttachmentRoutes as any)(registry, () => ({ uploadContent }));
+    const streamRequest = new Request("https://beta.test/api/v2/attachments/attachment-1/content", {
+      method: "PUT",
+      headers: { "content-type": "application/octet-stream", "x-workspace-id": "ws-1" },
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    const response = await registry.fetch(streamRequest, {});
+
+    expect(response.status).toBe(413);
+    expect((await response.json()).error.code).toBe("ATTACHMENT_FILE_TOO_LARGE");
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(uploadContent).not.toHaveBeenCalled();
   });
 });

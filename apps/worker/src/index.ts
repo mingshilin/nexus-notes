@@ -25,6 +25,7 @@ export { KnowledgeService, KnowledgeServiceError } from "./knowledge/knowledge-s
 export { AttachmentService, AttachmentServiceError } from "./attachments/attachment-service";
 export { D1AttachmentRepository } from "./attachments/d1-attachment-repository";
 export { OcrConsumer } from "./attachments/ocr-consumer";
+export { OcrOutboxDispatcher } from "./attachments/ocr-outbox-dispatcher";
 export { registerAuthRoutes } from "./routes/auth";
 export { registerKnowledgeRoutes } from "./routes/knowledge";
 export { registerGraphRoutes } from "./routes/graph";

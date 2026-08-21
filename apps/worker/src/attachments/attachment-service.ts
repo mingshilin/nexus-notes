@@ -1,6 +1,5 @@
 import {
   MAX_UPLOAD_BYTES,
-  MAX_WORKSPACE_ATTACHMENT_BYTES,
   SUPPORTED_ATTACHMENT_MIME_TYPES,
   type Attachment,
   type CreateAttachmentUploadInput,
@@ -15,17 +14,25 @@ export interface AttachmentActorContext {
 }
 
 export interface AttachmentRepository {
-  getAttachmentUsage?(workspaceId: string): Promise<number>;
   reserveUpload?(input: { workspaceId: string; userId: string; input: CreateAttachmentUploadInput; now: string }): Promise<Attachment>;
   getAttachment(workspaceId: string, attachmentId: string, includeDeleted: boolean): Promise<Attachment | null>;
   listAttachments?(workspaceId: string, request: import("@nexus/contracts").AttachmentListRequest): Promise<{ items: Attachment[]; next_cursor: string | null }>;
   markUploaded?(workspaceId: string, attachmentId: string, now: string): Promise<void>;
   deleteAttachment?(workspaceId: string, attachmentId: string, now: string): Promise<void>;
-  ensureOcrJob?(workspaceId: string, userId: string, attachmentId: string, now: string): Promise<{ created: boolean; job_id: string; attempt: number; deadline: string; idempotency_key: string } | null>;
+  ensureOcrJob?(workspaceId: string, userId: string, attachmentId: string, now: string): Promise<{
+    created: boolean;
+    job_id: string;
+    source_revision: number;
+    attempt: number;
+    deadline: string;
+    idempotency_key: string;
+    outbox_id: string;
+  } | null>;
   retryOcr(workspaceId: string, userId: string, attachmentIds: string[], now: string): Promise<{
     queued: string[];
     ineligible: string[];
     duplicate: string[];
+    outbox_ids: string[];
   }>;
   diagnostics(workspaceId: string, request: KnowledgeDiagnosticsRequest): Promise<{
     items: Array<{ kind: "unfiled_note" | "orphan_note" | "duplicate_title" | "broken_link" | "failed_ocr"; entity_id: string; title: string; count: number }>;
@@ -39,8 +46,8 @@ interface PrivateFiles {
   delete?(key: string): Promise<void>;
 }
 
-interface JobQueue {
-  send?(message: unknown): Promise<unknown>;
+interface OutboxDispatcher {
+  dispatch(ids?: string[]): Promise<{ dispatched: number; failed: number }>;
 }
 
 export class AttachmentServiceError extends Error {
@@ -84,15 +91,15 @@ function signatureMatches(mimeType: string, bytes: Uint8Array) {
 
 export class AttachmentService {
   private readonly clock: () => Date;
-  private readonly queue?: JobQueue;
+  private readonly outbox?: OutboxDispatcher;
 
   constructor(
     private readonly repository: AttachmentRepository,
     private readonly files: PrivateFiles,
-    options: { clock?: () => Date; queue?: JobQueue } = {},
+    options: { clock?: () => Date; outbox?: OutboxDispatcher } = {},
   ) {
     this.clock = options.clock ?? (() => new Date());
-    this.queue = options.queue;
+    this.outbox = options.outbox;
   }
 
   async createUpload(context: AttachmentActorContext, input: CreateAttachmentUploadInput) {
@@ -102,19 +109,26 @@ export class AttachmentService {
     if (input.size_bytes > MAX_UPLOAD_BYTES) {
       throw new AttachmentServiceError("ATTACHMENT_FILE_TOO_LARGE", "Attachment exceeds the 25 MB limit", 413);
     }
-    const currentUsage = await this.repository.getAttachmentUsage?.(context.workspaceId) ?? 0;
-    if (currentUsage + input.size_bytes > MAX_WORKSPACE_ATTACHMENT_BYTES) {
-      throw new AttachmentServiceError("ATTACHMENT_QUOTA_EXCEEDED", "Workspace attachment quota exceeded", 403);
-    }
     if (!this.repository.reserveUpload) {
       throw new AttachmentServiceError("ATTACHMENT_UPLOAD_UNAVAILABLE", "Attachment upload is not configured", 503);
     }
-    return this.repository.reserveUpload({
-      workspaceId: context.workspaceId,
-      userId: context.userId,
-      input,
-      now: this.clock().toISOString(),
-    });
+    try {
+      return await this.repository.reserveUpload({
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+        input,
+        now: this.clock().toISOString(),
+      });
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? error.code : undefined;
+      if (code === "ATTACHMENT_QUOTA_EXCEEDED") {
+        throw new AttachmentServiceError(code, "Workspace attachment quota exceeded", 403);
+      }
+      if (code === "ATTACHMENT_NOTE_NOT_FOUND") {
+        throw new AttachmentServiceError(code, "Attachment note not found", 404);
+      }
+      throw error;
+    }
   }
 
   async uploadContent(context: AttachmentActorContext, attachmentId: string, body: Uint8Array) {
@@ -134,7 +148,7 @@ export class AttachmentService {
     }
     await this.files.put(objectKey(context.workspaceId, attachmentId), body, { httpMetadata: { contentType: attachment.mime_type } });
     await this.repository.markUploaded?.(context.workspaceId, attachmentId, this.clock().toISOString());
-    return attachment;
+    return this.getAttachment(context, attachmentId);
   }
 
   async listAttachments(context: AttachmentActorContext, request: import("@nexus/contracts").AttachmentListRequest) {
@@ -154,11 +168,7 @@ export class AttachmentService {
     }
     const job = await this.repository.ensureOcrJob?.(context.workspaceId, context.userId, attachmentId, this.clock().toISOString());
     if (job?.created) {
-      await this.queue?.send?.({
-        job_id: job.job_id, kind: "ocr", idempotency_key: job.idempotency_key, attempt: job.attempt,
-        deadline: job.deadline,
-        payload: { workspace_id: context.workspaceId, attachment_id: attachmentId },
-      });
+      await this.outbox?.dispatch([job.outbox_id]);
     }
     return attachment;
   }
@@ -188,15 +198,9 @@ export class AttachmentService {
   async retryOcr(context: AttachmentActorContext, input: OcrRetryInput) {
     const now = this.clock().toISOString();
     const result = await this.repository.retryOcr(context.workspaceId, context.userId, input.attachment_ids, now);
-    await Promise.all(result.queued.map((attachmentId) => this.queue?.send?.({
-      job_id: crypto.randomUUID(),
-      kind: "ocr",
-      idempotency_key: `ocr:${attachmentId}`,
-      attempt: 1,
-      deadline: new Date(this.clock().getTime() + 10 * 60_000).toISOString(),
-      payload: { workspace_id: context.workspaceId, attachment_id: attachmentId },
-    })));
-    return result;
+    if (result.outbox_ids.length > 0) await this.outbox?.dispatch(result.outbox_ids);
+    const { outbox_ids: _outboxIds, ...response } = result;
+    return response;
   }
 
   async diagnostics(context: AttachmentActorContext, request: KnowledgeDiagnosticsRequest) {

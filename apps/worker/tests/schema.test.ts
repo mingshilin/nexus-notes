@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const migrationPath = resolve(import.meta.dirname, "../migrations/0001_beta_schema.sql");
 const searchMigrationPath = resolve(import.meta.dirname, "../migrations/0002_search_document_sync.sql");
+const attachmentMigrationPath = resolve(import.meta.dirname, "../migrations/0003_private_attachments_ocr.sql");
 
 describe("Beta D1 schema", () => {
   it("creates all public Beta domain tables", () => {
@@ -46,5 +47,14 @@ describe("Beta D1 schema", () => {
     expect(sql).toMatch(/AFTER UPDATE ON search_documents/i);
     expect(sql).toMatch(/AFTER DELETE ON search_documents/i);
     expect(sql).toMatch(/INSERT INTO search_documents_fts[\s\S]*SELECT rowid/i);
+  });
+
+  it("keys OCR generations by tenant attachment source revision without user uniqueness", () => {
+    const sql = readFileSync(attachmentMigrationPath, "utf8");
+    const definition = sql.match(/CREATE TABLE beta_ocr_jobs \(([\s\S]*?)\n\);/i)?.[1];
+
+    expect(definition).toMatch(/source_revision INTEGER NOT NULL/i);
+    expect(definition).toMatch(/UNIQUE \(workspace_id, attachment_id, source_revision\)/i);
+    expect(definition).not.toMatch(/UNIQUE \(workspace_id, user_id,/i);
   });
 });

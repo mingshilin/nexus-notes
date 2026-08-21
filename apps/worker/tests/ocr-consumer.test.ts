@@ -20,7 +20,14 @@ describe("OcrConsumer", () => {
 
     await consumer.consume({ job_id: "job-1", kind: "ocr", idempotency_key: "ocr:attachment-1:2", attempt: 1, deadline: "2026-08-21T00:10:00.000Z", payload: { workspace_id: "ws-1", attachment_id: "attachment-1" } });
 
-    expect(repository.claimOcrJob).toHaveBeenCalledWith("ws-1", "job-1", "2026-08-21T00:00:00.000Z");
+    expect(repository.claimOcrJob).toHaveBeenCalledWith({
+      job_id: "job-1",
+      kind: "ocr",
+      idempotency_key: "ocr:attachment-1:2",
+      attempt: 1,
+      deadline: "2026-08-21T00:10:00.000Z",
+      payload: { workspace_id: "ws-1", attachment_id: "attachment-1" },
+    }, "2026-08-21T00:00:00.000Z");
     expect(repository.completeOcrJob).toHaveBeenCalledWith("ws-1", "job-1", "alpha OCR", "2026-08-21T00:00:00.000Z");
     expect(repository.failOcrJob).not.toHaveBeenCalled();
   });

@@ -28,6 +28,7 @@ import { D1AttachmentRepository } from "./attachments/d1-attachment-repository";
 import { AttachmentService } from "./attachments/attachment-service";
 import { registerAttachmentRoutes } from "./routes/attachments";
 import { OcrConsumer } from "./attachments/ocr-consumer";
+import { OcrOutboxDispatcher } from "./attachments/ocr-outbox-dispatcher";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -103,7 +104,10 @@ function createKnowledgeService(env: BetaWorkerEnv) {
 }
 
 function createAttachmentService(env: BetaWorkerEnv) {
-  return new AttachmentService(new D1AttachmentRepository(env.DB), env.FILES, { queue: env.JOBS });
+  const repository = new D1AttachmentRepository(env.DB);
+  return new AttachmentService(repository, env.FILES, {
+    outbox: new OcrOutboxDispatcher(repository, env.JOBS),
+  });
 }
 
 function createTextExtractor() {
@@ -156,6 +160,10 @@ export function createBetaWorker() {
     async queue(batch: MessageBatch<import("@nexus/contracts").QueueJob>, env: BetaWorkerEnv) {
       const consumer = new OcrConsumer(new D1AttachmentRepository(env.DB), env.FILES, createTextExtractor());
       await Promise.all(batch.messages.map(async (message) => consumer.consume(message.body)));
+    },
+    async scheduled(_controller: ScheduledController, env: BetaWorkerEnv) {
+      const repository = new D1AttachmentRepository(env.DB);
+      await new OcrOutboxDispatcher(repository, env.JOBS).dispatch();
     },
   };
 }
