@@ -29,6 +29,9 @@ database_id = "<PREVIEW_D1_DATABASE_ID>"
 binding = "FILES"
 bucket_name = "nexus-notes-public-beta-preview-files"
 
+[ai]
+binding = "AI"
+
 [[queues.producers]]
 binding = "JOBS"
 queue = "nexus-notes-public-beta-preview-jobs"

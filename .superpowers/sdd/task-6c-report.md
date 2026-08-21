@@ -683,3 +683,42 @@ Commit: independent B2.1 review-fix commit containing this report section; SHA i
 No B2.2, Cloudflare binding, Env, bootstrap, health, Wrangler, Web, legacy, deployment, or Task 7 files changed.
 
 Commit: independent B2.1 minor-fix commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C Fix B2.2: Native Cloudflare Queue Wiring
+
+### Scope
+
+This slice wires the existing B1 extractor and B2.1 repository-authorized consumer to native Cloudflare Queue messages. It changes Worker Env/bootstrap/health/preview configuration and Worker tests only; no Web, legacy, Task 7, deployment, secret, or AI UI changes were made.
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm run test -- tests/native-queue.test.ts` | RED: native messages were not acknowledged or retried because bootstrap passed only `message.body` to the consumer. |
+| `npm run test -- tests/health-ocr.test.ts tests/preview-config.test.ts` | RED: health omitted OCR capability and preview omitted `[ai]`. |
+| Native queue audit regression | RED: malformed native message acknowledged safely but emitted no sanitized audit code. |
+| Persisted/native attempt regression | RED: persisted attempt 2 plus native delivery 1 scheduled a 1-second rather than 2-second retry. |
+| Focused Worker suite after wiring | GREEN: PASS, 57 tests in 6 files. |
+
+### Implemented
+
+- `BetaWorkerEnv` now has optional typed `FILES`, `AI.toMarkdown`, and `JOBS` bindings. The attachment routes remain registered when optional storage/queue bindings are absent; scheduled outbox dispatch runs only when `JOBS` is configured.
+- Bootstrap creates `OcrExtractor` from the native private R2 and Workers AI bindings. The only R2 key supplied to it is the `object_key` returned by `claimOcrJob()`, never the Queue payload.
+- Native `queue(batch, env, ctx)` passes each complete Cloudflare message through B2.1, then invokes only that message's `retry({ delaySeconds })` for retry outcomes. B2.1 continues to ack safe/stale/terminal/success outcomes, records a static no-payload malformed-message audit code, and isolates every batch peer.
+- Retry policy now uses the stricter of native and persisted attempts. Missing `AI` or `FILES` becomes a terminal OCR-only safe code; health returns only `ocr: unconfigured|degraded|ready` and does not disclose resource/configuration values.
+- Preview config declares `[ai] binding = "AI"` without a secret. Native fake `MessageBatch`/`Message` tests use real D1 for authorized input, success/search write, retry, terminal, stale, malformed, duplicate, partial batch, attempt reconciliation, and missing bindings.
+
+No hard-cancel behavior is claimed: the B1 extractor's existing bounded/late-result handling remains the only cancellation behavior.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| Focused Worker/config tests | PASS, 57 tests in 6 files. |
+| `npm run test --workspace=@nexus/worker` | PASS, 164 tests in 33 files. |
+| `npm run typecheck` in `apps/worker` | PASS. |
+| `npm run beta:build` | PASS. |
+| `node scripts/verify-deploy-readiness.mjs --dist=apps/web/dist` | PASS; no forbidden initial OCR/Markdown preload. |
+| `git diff --check` | PASS. |
+
+Commit: independent B2.2 commit containing this report section; SHA is recorded in the final handoff.

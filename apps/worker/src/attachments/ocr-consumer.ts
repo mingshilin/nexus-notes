@@ -54,6 +54,7 @@ const PERSISTED_OCR_ERROR_CODES = new Set([
   "OCR_OBJECT_NOT_FOUND",
   "OCR_OBJECT_READ_FAILED",
   "OCR_OUTPUT_TOO_LARGE",
+  "OCR_STORAGE_UNAVAILABLE",
   "OCR_SOURCE_STALE",
   "OCR_TEXT_DECODE_FAILED",
   "OCR_TIMEOUT",
@@ -76,6 +77,14 @@ function safeAck(message: SafeMessage) {
     message.ack();
   } catch {
     // An acknowledgement failure must not poison unrelated batch messages.
+  }
+}
+
+function auditMalformedQueueMessage() {
+  try {
+    console.warn("OCR_QUEUE_MESSAGE_INVALID");
+  } catch {
+    // Audit sinks must not prevent a poison message from being acknowledged.
   }
 }
 
@@ -181,6 +190,7 @@ export class OcrConsumer {
   private async consumeMessage(message: SafeMessage): Promise<OcrConsumerOutcome> {
     const job = message.body;
     if (!isOcrJob(job)) {
+      auditMalformedQueueMessage();
       safeAck(message);
       return { outcome: "ack" };
     }
@@ -207,7 +217,7 @@ export class OcrConsumer {
       return { outcome: "ack" };
     } catch (error) {
       const code = errorCode(error);
-      const attempts = message.attempts;
+      const attempts = Math.max(message.attempts, claimed.attempt_count);
       const beforeDeadline = Date.parse(claimed.deadline) > this.clock().getTime();
       if (isRetryable(error) && attempts < MAX_QUEUE_DELIVERY_ATTEMPTS && beforeDeadline) {
         const persisted = await this.repository.retryOcrJob(claimed.workspace_id, claimed.id, code, this.clock().toISOString());

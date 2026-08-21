@@ -28,6 +28,7 @@ import { D1AttachmentRepository } from "./attachments/d1-attachment-repository";
 import { AttachmentService } from "./attachments/attachment-service";
 import { registerAttachmentRoutes } from "./routes/attachments";
 import { OcrConsumer } from "./attachments/ocr-consumer";
+import { OcrExtractionError, OcrExtractor } from "./attachments/ocr-extractor";
 import { OcrOutboxDispatcher } from "./attachments/ocr-outbox-dispatcher";
 
 class ConfigurationError extends Error {
@@ -105,13 +106,34 @@ function createKnowledgeService(env: BetaWorkerEnv) {
 
 function createAttachmentService(env: BetaWorkerEnv) {
   const repository = new D1AttachmentRepository(env.DB);
-  return new AttachmentService(repository, env.FILES, {
-    outbox: new OcrOutboxDispatcher(repository, env.JOBS),
+  return new AttachmentService(repository, env.FILES ?? {}, {
+    outbox: env.JOBS ? new OcrOutboxDispatcher(repository, env.JOBS) : undefined,
   });
 }
 
-function createTextExtractor() {
-  return { async extract(body: ReadableStream) { return new TextDecoder().decode(await new Response(body).arrayBuffer()); } };
+function createOcrExtractor(env: BetaWorkerEnv) {
+  return new OcrExtractor({
+    files: {
+      async get(key) {
+        if (!env.FILES) throw new OcrExtractionError("OCR_STORAGE_UNAVAILABLE", false);
+        const object = await env.FILES.get(key);
+        return object ? { body: object.body, size: object.size } : null;
+      },
+    },
+    ai: env.AI ? {
+      toMarkdown(file) {
+        return env.AI!.toMarkdown(file);
+      },
+    } : undefined,
+  });
+}
+
+function retryNativeMessage(message: Message<unknown>, delaySeconds: number) {
+  try {
+    message.retry({ delaySeconds });
+  } catch {
+    // The message remains unacknowledged if the platform retry call itself fails.
+  }
 }
 
 function allowedOrigins(env: BetaWorkerEnv) {
@@ -157,14 +179,17 @@ export function createBetaWorker() {
     fetch(request: Request, env: BetaWorkerEnv) {
       return createSecureGateway({ allowedOrigins: allowedOrigins(env), handler: registry }).fetch(request, env);
     },
-    async queue(batch: MessageBatch<import("@nexus/contracts").QueueJob>, env: BetaWorkerEnv) {
-      const consumer = new OcrConsumer(new D1AttachmentRepository(env.DB), env.FILES, createTextExtractor());
-      await Promise.all(batch.messages.map(async (message) => consumer.consume(message.body)));
+    async queue(batch: MessageBatch<unknown>, env: BetaWorkerEnv, _ctx: ExecutionContext) {
+      const consumer = new OcrConsumer(new D1AttachmentRepository(env.DB), createOcrExtractor(env));
+      await Promise.all(batch.messages.map(async (message) => {
+        const outcome = await consumer.consume(message);
+        if (outcome.outcome === "retry") retryNativeMessage(message, outcome.delaySeconds);
+      }));
     },
     async scheduled(_controller: ScheduledController, env: BetaWorkerEnv) {
       const repository = new D1AttachmentRepository(env.DB);
       await repository.recoverStaleOcrJobs(new Date().toISOString(), 50);
-      await new OcrOutboxDispatcher(repository, env.JOBS).dispatch();
+      if (env.JOBS) await new OcrOutboxDispatcher(repository, env.JOBS).dispatch();
     },
   };
 }

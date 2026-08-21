@@ -18,4 +18,12 @@ describe("preview Worker configuration", () => {
 
     expect(triggers).toContain('crons = ["*/1 * * * *"]');
   });
+
+  it("declares the native Workers AI binding without a secret value", () => {
+    const config = readFileSync(resolve(process.cwd(), "wrangler.preview.example.toml"), "utf8");
+
+    expect(config).toContain('[ai]');
+    expect(config).toContain('binding = "AI"');
+    expect(config).not.toMatch(/AI(?:_|_API)?(?:KEY|TOKEN|SECRET)\s*=/i);
+  });
 });
