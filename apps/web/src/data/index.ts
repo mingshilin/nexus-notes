@@ -1,4 +1,6 @@
 export * from "./api-client";
+export * from "./database-client";
+export * from "./database-state";
 export * from "./http-sync-transport";
 export * from "./knowledge-client";
 export * from "./local-store";

@@ -1,0 +1,207 @@
+import {
+  DatabaseViewConfigSchema,
+  type ApplyDatabaseTemplateInput,
+  type CreateDatabaseTemplateInput,
+  type CreateDatabaseViewInput,
+  type DatabaseProperty,
+  type DatabaseRecord,
+  type DatabaseTemplate,
+  type DatabaseView,
+  type UpdateDatabaseTemplateInput,
+  type UpdateDatabaseViewInput,
+  type WorkspaceContext,
+} from "@nexus/contracts";
+import { filterDatabaseFields } from "@nexus/domain";
+
+import { assertRevision, DatabaseRepositoryBase } from "./database-repository-base";
+import {
+  TEMPLATE_COLUMNS,
+  VIEW_COLUMNS,
+  DatabaseRepositoryError,
+  type TemplateRow,
+  type ViewRow,
+  toTemplate,
+  toView,
+} from "./database-model";
+import type { D1DatabaseRecordRepository } from "./d1-database-records";
+
+export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
+  constructor(
+    db: D1Database,
+    options: ConstructorParameters<typeof DatabaseRepositoryBase>[1],
+    private readonly records: D1DatabaseRecordRepository,
+  ) {
+    super(db, options);
+  }
+
+  async getDatabase(context: WorkspaceContext, databaseId: string) {
+    const fields = await this.access.fields(context, databaseId, "read");
+    const [viewsResult, templatesResult] = await Promise.all([
+      this.db.prepare(
+        `SELECT ${VIEW_COLUMNS} FROM database_views WHERE workspace_id = ? AND database_id = ? ORDER BY position, id`,
+      ).bind(context.workspaceId, databaseId).all<ViewRow>(),
+      this.db.prepare(
+        `SELECT ${TEMPLATE_COLUMNS} FROM database_templates WHERE workspace_id = ? AND database_id = ? ORDER BY updated_at DESC, id DESC`,
+      ).bind(context.workspaceId, databaseId).all<TemplateRow>(),
+    ]);
+    const visible = filterDatabaseFields({
+      properties: fields.properties,
+      readablePropertyIds: fields.readable,
+      records: [] as DatabaseRecord[],
+      templates: (templatesResult.results ?? []).map(toTemplate),
+    });
+    return {
+      database: fields.database,
+      role: fields.role,
+      properties: visible.properties,
+      views: (viewsResult.results ?? []).map(toView).map((view) => this.filterView(view, fields.readable)),
+      templates: visible.templates,
+    };
+  }
+
+  async createView(context: WorkspaceContext, databaseId: string, input: CreateDatabaseViewInput) {
+    const fields = await this.access.fields(context, databaseId, "write");
+    this.assertViewFields(input.config, fields.properties);
+    const now = this.now();
+    const view: DatabaseView = {
+      id: this.id(), workspace_id: context.workspaceId, database_id: databaseId,
+      name: input.name, type: input.type, config: input.config, position: input.position ?? 0,
+      revision: 1, created_at: now, updated_at: now,
+    };
+    await this.db.prepare(
+      `INSERT INTO database_views (id, workspace_id, database_id, name, type, config_json, position, revision, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+    ).bind(view.id, view.workspace_id, databaseId, view.name, view.type, JSON.stringify(view.config), view.position, now, now).run();
+    return view;
+  }
+
+  async updateView(context: WorkspaceContext, databaseId: string, viewId: string, input: UpdateDatabaseViewInput) {
+    const fields = await this.access.fields(context, databaseId, "write");
+    const view = await this.view(context.workspaceId, databaseId, viewId);
+    assertRevision(view.revision, input.base_revision);
+    const config = input.config ?? view.config;
+    this.assertViewFields(config, fields.properties);
+    const now = this.now();
+    const updated = { ...view, name: input.name ?? view.name, config, position: input.position ?? view.position, revision: view.revision + 1, updated_at: now };
+    await this.db.prepare(
+      `UPDATE database_views SET name = ?, config_json = ?, position = ?, revision = revision + 1, updated_at = ?
+       WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
+    ).bind(updated.name, JSON.stringify(config), updated.position, now, context.workspaceId, databaseId, viewId, input.base_revision).run();
+    return updated;
+  }
+
+  async deleteView(context: WorkspaceContext, databaseId: string, viewId: string, input: { base_revision: number }) {
+    await this.access.assert(context, databaseId, "write");
+    const view = await this.view(context.workspaceId, databaseId, viewId);
+    assertRevision(view.revision, input.base_revision);
+    await this.db.prepare(
+      "DELETE FROM database_views WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?",
+    ).bind(context.workspaceId, databaseId, viewId, input.base_revision).run();
+    return { id: viewId };
+  }
+
+  async createTemplate(context: WorkspaceContext, databaseId: string, input: CreateDatabaseTemplateInput) {
+    const fields = await this.access.fields(context, databaseId, "write");
+    const defaults = this.normalize(fields.properties, input.default_values, fields.writable);
+    const now = this.now();
+    const template: DatabaseTemplate = {
+      id: this.id(), workspace_id: context.workspaceId, database_id: databaseId,
+      name: input.name, default_values: defaults, revision: 1, created_at: now, updated_at: now,
+    };
+    await this.db.prepare(
+      `INSERT INTO database_templates (id, workspace_id, database_id, name, default_values_json, revision, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+    ).bind(template.id, context.workspaceId, databaseId, template.name, JSON.stringify(defaults), now, now).run();
+    return template;
+  }
+
+  async updateTemplate(context: WorkspaceContext, databaseId: string, templateId: string, input: UpdateDatabaseTemplateInput) {
+    const fields = await this.access.fields(context, databaseId, "write");
+    const template = await this.template(context.workspaceId, databaseId, templateId);
+    assertRevision(template.revision, input.base_revision);
+    const defaults = input.default_values === undefined
+      ? template.default_values
+      : this.normalize(fields.properties, input.default_values, fields.writable);
+    const now = this.now();
+    const updated = { ...template, name: input.name ?? template.name, default_values: defaults, revision: template.revision + 1, updated_at: now };
+    await this.db.prepare(
+      `UPDATE database_templates SET name = ?, default_values_json = ?, revision = revision + 1, updated_at = ?
+       WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
+    ).bind(updated.name, JSON.stringify(defaults), now, context.workspaceId, databaseId, templateId, input.base_revision).run();
+    return updated;
+  }
+
+  async deleteTemplate(context: WorkspaceContext, databaseId: string, templateId: string, input: { base_revision: number }) {
+    await this.access.assert(context, databaseId, "write");
+    const template = await this.template(context.workspaceId, databaseId, templateId);
+    assertRevision(template.revision, input.base_revision);
+    await this.db.prepare(
+      "DELETE FROM database_templates WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?",
+    ).bind(context.workspaceId, databaseId, templateId, input.base_revision).run();
+    return { id: templateId };
+  }
+
+  async applyTemplate(context: WorkspaceContext, databaseId: string, input: ApplyDatabaseTemplateInput) {
+    const fields = await this.access.fields(context, databaseId, "write");
+    const template = await this.template(context.workspaceId, databaseId, input.template_id);
+    const defaults = this.normalize(fields.properties, template.default_values, fields.writable);
+    return this.records.bulkEditRecords(context, databaseId, {
+      mutations: input.records.map((record) => ({ ...record, values: defaults })),
+    });
+  }
+
+  private async view(workspaceId: string, databaseId: string, viewId: string) {
+    const row = await this.db.prepare(
+      `SELECT ${VIEW_COLUMNS} FROM database_views WHERE workspace_id = ? AND database_id = ? AND id = ?`,
+    ).bind(workspaceId, databaseId, viewId).first<ViewRow>();
+    if (!row) throw new DatabaseRepositoryError("VIEW_NOT_FOUND", "Database view not found", 404);
+    return toView(row);
+  }
+
+  private async template(workspaceId: string, databaseId: string, templateId: string) {
+    const row = await this.db.prepare(
+      `SELECT ${TEMPLATE_COLUMNS} FROM database_templates WHERE workspace_id = ? AND database_id = ? AND id = ?`,
+    ).bind(workspaceId, databaseId, templateId).first<TemplateRow>();
+    if (!row) throw new DatabaseRepositoryError("TEMPLATE_NOT_FOUND", "Database template not found", 404);
+    return toTemplate(row);
+  }
+
+  private assertViewFields(config: DatabaseView["config"], properties: readonly DatabaseProperty[]) {
+    if (!DatabaseViewConfigSchema.safeParse(config).success) {
+      throw new DatabaseRepositoryError("INVALID_VIEW", "Database view configuration is invalid", 400);
+    }
+    const propertyIds = new Set(properties.map((property) => property.id));
+    const referenced = [
+      ...config.filters.map((filter) => filter.property_id), ...config.sorts.map((sort) => sort.property_id),
+      ...config.visible_columns, ...(config.grouping ? [config.grouping.property_id] : []),
+      ...(config.settings.card_properties ?? []),
+      ...(config.settings.date_property_id ? [config.settings.date_property_id] : []),
+      ...(config.settings.frozen_property_id ? [config.settings.frozen_property_id] : []),
+    ];
+    if (referenced.some((propertyId) => !propertyIds.has(propertyId))) {
+      throw new DatabaseRepositoryError("UNKNOWN_FIELD", "View references an unknown field", 400);
+    }
+  }
+
+  private filterView(view: DatabaseView, readable: ReadonlySet<string>) {
+    const settings = {
+      ...view.config.settings,
+      card_properties: view.config.settings.card_properties?.filter((id) => readable.has(id)),
+      date_property_id: view.config.settings.date_property_id && readable.has(view.config.settings.date_property_id)
+        ? view.config.settings.date_property_id : null,
+      frozen_property_id: view.config.settings.frozen_property_id && readable.has(view.config.settings.frozen_property_id)
+        ? view.config.settings.frozen_property_id : null,
+    };
+    return {
+      ...view,
+      config: {
+        ...view.config,
+        filters: view.config.filters.filter((filter) => readable.has(filter.property_id)),
+        sorts: view.config.sorts.filter((sort) => readable.has(sort.property_id)),
+        grouping: view.config.grouping && readable.has(view.config.grouping.property_id) ? view.config.grouping : null,
+        visible_columns: view.config.visible_columns.filter((propertyId) => readable.has(propertyId)),
+        settings,
+      },
+    };
+  }
+}

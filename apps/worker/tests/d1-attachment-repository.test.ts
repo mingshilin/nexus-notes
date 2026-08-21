@@ -40,10 +40,16 @@ afterEach(async () => {
 describe("D1AttachmentRepository attachment quota", () => {
   it("atomically admits only one concurrent reservation at the remaining workspace capacity", async () => {
     const { db, repository } = await fixture();
-    for (let index = 0; index < 40; index += 1) {
-      await repository.reserveUpload(upload("ws-1", "user-1", `seed-${index}`, 25 * 1024 * 1024));
-    }
-    await repository.reserveUpload(upload("ws-1", "user-1", "seed-tail", 23 * 1024 * 1024));
+    await db.batch([
+      ...Array.from({ length: 40 }, (_, index) => db.prepare(
+        `INSERT INTO beta_attachments (id, workspace_id, user_id, note_id, object_key, filename, mime_type, size_bytes, status, idempotency_key, revision, created_at, updated_at)
+         VALUES (?, 'ws-1', 'user-1', NULL, ?, ?, 'application/pdf', ?, 'uploading', ?, 1, ?, ?)`,
+      ).bind(`seed-${index}`, `ws-1/attachments/seed-${index}`, `seed-${index}.pdf`, 25 * 1024 * 1024, `seed-${index}`, now, now)),
+      db.prepare(
+        `INSERT INTO beta_attachments (id, workspace_id, user_id, note_id, object_key, filename, mime_type, size_bytes, status, idempotency_key, revision, created_at, updated_at)
+         VALUES ('seed-tail', 'ws-1', 'user-1', NULL, 'ws-1/attachments/seed-tail', 'seed-tail.pdf', 'application/pdf', 23 * 1024 * 1024, 'uploading', 'seed-tail', 1, ?, ?)`,
+      ).bind(now, now),
+    ]);
 
     const results = await Promise.allSettled([
       repository.reserveUpload(upload("ws-1", "user-1", "concurrent-a", 1024 * 1024)),

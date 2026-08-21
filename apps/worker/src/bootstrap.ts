@@ -30,6 +30,8 @@ import { registerAttachmentRoutes } from "./routes/attachments";
 import { OcrConsumer } from "./attachments/ocr-consumer";
 import { OcrExtractionError, OcrExtractor } from "./attachments/ocr-extractor";
 import { OcrOutboxDispatcher } from "./attachments/ocr-outbox-dispatcher";
+import { D1DatabaseRepository } from "./databases/d1-database-repository";
+import { registerDatabaseRoutes } from "./routes/databases";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -77,6 +79,10 @@ function createAuthService(env: BetaWorkerEnv) {
 
 function createNoteService(env: BetaWorkerEnv) {
   return new NoteService(new D1NoteRepository(env.DB));
+}
+
+function createDatabaseRepository(env: BetaWorkerEnv) {
+  return new D1DatabaseRepository(env.DB);
 }
 
 function createKnowledgeService(env: BetaWorkerEnv) {
@@ -170,6 +176,7 @@ export function createBetaWorker() {
   registerReminderRoutes(registry, createKnowledgeService);
   registerGraphRoutes(registry, createKnowledgeService);
   registerAttachmentRoutes(registry, createAttachmentService);
+  registerDatabaseRoutes(registry, createDatabaseRepository);
 
   return {
     fetch(request: Request, env: BetaWorkerEnv) {

@@ -1,6 +1,7 @@
 export * from "./api";
 export * from "./auth";
 export * from "./attachments";
+export * from "./databases";
 export * from "./jobs";
 export * from "./knowledge";
 export * from "./notes";

@@ -8,22 +8,30 @@ import {
   Sparkles,
   Users,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import type { Attachment, KnowledgeDiagnostic } from "@nexus/contracts";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import type { Attachment, Database, DatabaseRecord, KnowledgeDiagnostic } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient } from "../data/api-client";
 import { KnowledgeClient } from "../data/knowledge-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic, type RecoveryFilters } from "../knowledge/KnowledgeRecoveryPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
+import { DatabaseClient, type DatabaseBundle } from "../data/database-client";
+import { NormalizedCache } from "../data/normalized-cache";
 
 const domains = [
-  { label: "收集", icon: Inbox },
-  { label: "创作", icon: BookOpen },
-  { label: "整理", icon: Search },
-  { label: "协作", icon: Users },
-  { label: "运营", icon: Settings },
+  { label: "收集", icon: Inbox, target: "notes" as const },
+  { label: "创作", icon: BookOpen, target: "notes" as const },
+  { label: "整理", icon: Search, target: "notes" as const },
+  { label: "协作", icon: Users, target: "notes" as const },
+  { label: "运营", icon: Settings, target: "notes" as const },
+  { label: "数据库", icon: Boxes, target: "databases" as const },
 ];
+
+const LazyDatabaseWorkbench = lazy(async () => {
+  const module = await import("../databases/DatabaseWorkbench");
+  return { default: module.DatabaseWorkbench };
+});
 
 const defaultAuthClient = new AuthClient(new ApiClient());
 const initialRecoveryFilters: RecoveryFilters = { mimeType: "", ocrStatus: "" };
@@ -57,6 +65,14 @@ function AuthenticatedWorkspace({
 }) {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
+  const [activeDomain, setActiveDomain] = useState<"notes" | "databases">("notes");
+  const [databases, setDatabases] = useState<Database[]>([]);
+  const [selectedDatabaseId, setSelectedDatabaseId] = useState<string | null>(null);
+  const [databaseBundle, setDatabaseBundle] = useState<DatabaseBundle | null>(null);
+  const [databaseRecords, setDatabaseRecords] = useState<DatabaseRecord[]>([]);
+  const [databaseRecordsNextCursor, setDatabaseRecordsNextCursor] = useState<string | null>(null);
+  const [databaseLoading, setDatabaseLoading] = useState(false);
+  const [databaseError, setDatabaseError] = useState<string | null>(null);
   const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState<ServiceWorkerUpdate | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [diagnostics, setDiagnostics] = useState<KnowledgeDiagnostic[]>([]);
@@ -72,6 +88,8 @@ function AuthenticatedWorkspace({
   const [refreshVersion, setRefreshVersion] = useState(0);
   const requestControllers = useRef(new Set<AbortController>());
   const retryControllers = useRef(new Set<AbortController>());
+  const databaseControllers = useRef(new Set<AbortController>());
+  const databaseCache = useRef(new NormalizedCache());
   const attachmentQueryIdentity = useRef<string | null>(null);
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
 
@@ -105,6 +123,17 @@ function AuthenticatedWorkspace({
     retryControllers.current.clear();
   };
 
+  const abortDatabaseRequests = () => {
+    databaseControllers.current.forEach((controller) => controller.abort());
+    databaseControllers.current.clear();
+  };
+
+  const createDatabaseRequest = () => {
+    const controller = new AbortController();
+    databaseControllers.current.add(controller);
+    return controller;
+  };
+
   const createRetryRequest = () => {
     const controller = new AbortController();
     retryControllers.current.add(controller);
@@ -122,6 +151,7 @@ function AuthenticatedWorkspace({
   useEffect(() => () => {
     abortRecoveryRequests();
     abortRetryRequests();
+    abortDatabaseRequests();
   }, []);
 
   useEffect(() => {
@@ -183,6 +213,83 @@ function AuthenticatedWorkspace({
 
     return () => abortRecoveryRequests();
   }, [apiClient, workspaceId, filters.mimeType, filters.ocrStatus, refreshVersion]);
+
+  useEffect(() => {
+    if (activeDomain !== "databases") return undefined;
+    abortDatabaseRequests();
+    if (!workspaceId) {
+      setDatabases([]);
+      setSelectedDatabaseId(null);
+      setDatabaseBundle(null);
+      setDatabaseRecords([]);
+      setDatabaseError("未选择工作区，无法加载数据库。");
+      return undefined;
+    }
+    const controller = createDatabaseRequest();
+    const client = new DatabaseClient(apiClient, workspaceId);
+    setDatabaseLoading(true);
+    setDatabaseError(null);
+    void client.listDatabases(controller.signal).then((items) => {
+      if (controller.signal.aborted) return;
+      setDatabases(items);
+      setSelectedDatabaseId((current) => items.some((database) => database.id === current) ? current : items[0]?.id ?? null);
+    }).catch((error: unknown) => {
+      if (!isAborted(error, controller.signal)) setDatabaseError("数据库列表暂时无法加载。");
+    }).finally(() => {
+      databaseControllers.current.delete(controller);
+      if (!controller.signal.aborted) setDatabaseLoading(false);
+    });
+    return () => controller.abort();
+  }, [activeDomain, apiClient, workspaceId]);
+
+  useEffect(() => {
+    if (activeDomain !== "databases" || !workspaceId || !selectedDatabaseId) {
+      if (!selectedDatabaseId) {
+        setDatabaseBundle(null);
+        setDatabaseRecords([]);
+        setDatabaseRecordsNextCursor(null);
+      }
+      return undefined;
+    }
+    const controller = createDatabaseRequest();
+    const client = new DatabaseClient(apiClient, workspaceId);
+    setDatabaseLoading(true);
+    setDatabaseError(null);
+    setDatabaseBundle(null);
+    setDatabaseRecords([]);
+    setDatabaseRecordsNextCursor(null);
+    void Promise.all([
+      client.getDatabase(selectedDatabaseId, controller.signal),
+      client.listRecords(selectedDatabaseId, { limit: 100, signal: controller.signal }),
+    ]).then(([bundle, page]) => {
+      if (controller.signal.aborted) return;
+      setDatabaseBundle(bundle);
+      setDatabaseRecords(page.items);
+      setDatabaseRecordsNextCursor(page.next_cursor);
+      databaseCache.current.writeEntity({ workspaceId, type: "database", id: bundle.database.id, revision: bundle.database.revision, data: bundle.database });
+      for (const property of bundle.properties) {
+        databaseCache.current.writeEntity({ workspaceId, type: "database-property", id: property.id, revision: property.revision, data: property });
+      }
+      for (const record of page.items) {
+        databaseCache.current.writeEntity({ workspaceId, type: "database-record", id: record.id, revision: record.revision, data: record });
+      }
+    }).catch((error: unknown) => {
+      if (!isAborted(error, controller.signal)) setDatabaseError("数据库内容暂时无法加载。");
+    }).finally(() => {
+      databaseControllers.current.delete(controller);
+      if (!controller.signal.aborted) setDatabaseLoading(false);
+    });
+    return () => controller.abort();
+  }, [activeDomain, apiClient, selectedDatabaseId, workspaceId]);
+
+  const requestDatabasePage = useCallback((cursor: string | null) => {
+    if (!workspaceId || !selectedDatabaseId) return Promise.resolve({ items: [], next_cursor: null });
+    return new DatabaseClient(apiClient, workspaceId).listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, limit: 100 })
+      .then((page) => {
+        setDatabaseRecordsNextCursor(page.next_cursor);
+        return page;
+      });
+  }, [apiClient, selectedDatabaseId, workspaceId]);
 
   const loadMoreAttachments = () => {
     if (!workspaceId || !attachmentCursor || loading || refreshing) return;
@@ -254,8 +361,13 @@ function AuthenticatedWorkspace({
   const navigation = (
     <>
       <div className="brand-mark" aria-label="Nexus Notes">N</div>
-      {domains.map(({ label, icon: Icon }, index) => (
-        <button key={label} className={index === 1 ? "rail-item active" : "rail-item"} type="button">
+      {domains.map(({ label, icon: Icon, target }, index) => (
+        <button
+          key={label}
+          className={(target === "databases" ? activeDomain === "databases" : activeDomain === "notes" && index === 1) ? "rail-item active" : "rail-item"}
+          type="button"
+          onClick={() => { setActiveDomain(target); setActivePane("canvas"); }}
+        >
           <Icon aria-hidden="true" size={19} />
           <span>{label}</span>
         </button>
@@ -276,6 +388,25 @@ function AuthenticatedWorkspace({
           <p>保持专注、可靠并且随时可以恢复的知识工作台。</p>
         </button>
       ))}
+    </div>
+  );
+
+  const databaseContextualList = (
+    <div className="context-content">
+      <div className="context-heading"><div><small>STRUCTURE</small><h2>数据库</h2></div></div>
+      {databaseLoading && databases.length === 0 ? <p className="database-empty" role="status">正在加载数据库…</p> : null}
+      {databaseError ? <p className="database-operation-error" role="alert">{databaseError}</p> : null}
+      {databases.map((database) => (
+        <button
+          key={database.id}
+          className={database.id === selectedDatabaseId ? "note-row selected" : "note-row"}
+          type="button"
+          onClick={() => { setSelectedDatabaseId(database.id); setActivePane("canvas"); }}
+        >
+          <strong>{database.name}</strong><p>{database.description || "Structured database"}</p>
+        </button>
+      ))}
+      {!databaseLoading && !databaseError && databases.length === 0 ? <p className="database-empty">尚未创建数据库。</p> : null}
     </div>
   );
 
@@ -304,6 +435,27 @@ function AuthenticatedWorkspace({
     />
   );
 
+  const databaseCanvas = databaseBundle && workspaceId ? (
+    <Suspense fallback={<p className="database-empty" role="status">正在准备数据库视图…</p>}>
+      <LazyDatabaseWorkbench
+        database={databaseBundle.database}
+        properties={databaseBundle.properties}
+        records={databaseRecords}
+        recordsNextCursor={databaseRecordsNextCursor}
+        views={databaseBundle.views}
+        onTablePageRequest={requestDatabasePage}
+        onBoardMove={(input) => new DatabaseClient(apiClient, workspaceId).boardMove(databaseBundle.database.id, input)}
+        onCalendarAssign={(input) => new DatabaseClient(apiClient, workspaceId).calendarAssign(databaseBundle.database.id, input)}
+      />
+    </Suspense>
+  ) : (
+    <section className="database-workbench">
+      {databaseLoading ? <p className="database-empty" role="status">正在加载数据库内容…</p> : null}
+      {databaseError ? <p className="database-operation-error" role="alert">{databaseError}</p> : null}
+      {!databaseLoading && !databaseError ? <p className="database-empty">请选择数据库。</p> : null}
+    </section>
+  );
+
   return (
     <>
       {serviceWorkerUpdate ? (
@@ -317,15 +469,15 @@ function AuthenticatedWorkspace({
       ) : null}
       <AdaptiveWorkbench
         navigation={navigation}
-        contextualList={contextualList}
-        inspector={<div className="inspector-content"><small>页面信息</small><h3>Public Beta 重写计划</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
+        contextualList={activeDomain === "databases" ? databaseContextualList : contextualList}
+        inspector={<div className="inspector-content"><small>页面信息</small><h3>{activeDomain === "databases" ? databaseBundle?.database.name ?? "数据库" : "Public Beta 重写计划"}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
         inspectorOpen={inspectorOpen}
         activePane={activePane}
         onActivePaneChange={setActivePane}
         onInspectorOpen={openInspector}
         onInspectorClose={closeInspector}
       >
-        <article className="editor-document">
+        {activeDomain === "databases" ? databaseCanvas : <article className="editor-document">
           <header className="editor-toolbar">
             <span className="saved-state"><span /> 已保存</span>
             <div>
@@ -343,7 +495,7 @@ function AuthenticatedWorkspace({
             <div className="callout"><Sparkles size={18} /><p>视觉风格继续使用原有蓝色强调、玻璃层级和舒适圆角。</p></div>
             {recoveryPanel}
           </div>
-        </article>
+        </article>}
       </AdaptiveWorkbench>
     </>
   );

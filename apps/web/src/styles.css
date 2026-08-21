@@ -91,6 +91,46 @@ button { color: inherit; }
 .inspector-content p { color: hsl(var(--muted-foreground)); line-height: 1.7; }
 .mobile-toolbar, .mobile-bottom-nav, .workbench-context-drawer, .workbench-context-mobile { display: none; }
 
+.database-workbench { position: relative; min-width: 0; min-height: 100%; padding: clamp(20px, 3vw, 42px); }
+.database-workbench button, .database-workbench select { min-height: 36px; border: 1px solid var(--border-subtle); border-radius: 11px; padding: 7px 11px; background: var(--surface-elevated); cursor: pointer; }
+.database-workbench-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+.database-workbench-header h1 { margin: 5px 0; font-size: clamp(28px, 4vw, 46px); letter-spacing: -.04em; }
+.database-workbench-header p { margin: 0; color: hsl(var(--muted-foreground)); }
+.database-tools-trigger { color: var(--nexus-accent); white-space: nowrap; }
+.database-tools-drawer { position: absolute; top: 84px; right: clamp(20px, 3vw, 42px); z-index: 8; display: grid; width: min(320px, calc(100% - 40px)); gap: 16px; padding: 18px; border: 1px solid var(--border-subtle); border-radius: 18px; background: var(--surface-overlay); box-shadow: var(--shadow-md); backdrop-filter: blur(24px); }
+.database-tools-drawer header, .database-tools-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.database-tools-drawer label { display: grid; gap: 7px; color: hsl(var(--muted-foreground)); font-size: 12px; }
+.database-view-tabs { display: flex; max-width: 100%; gap: 7px; margin-bottom: 18px; overflow-x: auto; scrollbar-width: none; }
+.database-view-tabs button { flex: 0 0 auto; color: hsl(var(--muted-foreground)); background: transparent; }
+.database-view-tabs button.active { border-color: rgba(0,122,255,.28); color: var(--nexus-accent); background: rgba(0,122,255,.08); }
+.database-table-view, .database-board-view, .database-calendar-view { min-width: 0; }
+.database-table-scroll { max-width: 100%; overflow-x: auto; border: 1px solid var(--border-subtle); border-radius: 17px; background: rgba(255,255,255,.38); }
+.database-table-view table { width: 100%; min-width: 640px; border-collapse: collapse; }
+.database-table-view th, .database-table-view td { max-width: 300px; border-bottom: 1px solid var(--border-subtle); padding: 12px 14px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.database-table-view th { color: hsl(var(--muted-foreground)); background: rgba(255,255,255,.42); font-size: 11px; font-weight: 750; letter-spacing: .05em; }
+.database-table-view tr:last-child td { border-bottom: 0; }
+.database-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 2px; color: hsl(var(--muted-foreground)); font-size: 12px; }
+.database-pagination div { display: flex; gap: 7px; }
+.database-board-columns { display: flex; gap: 14px; max-width: 100%; padding-bottom: 8px; overflow-x: auto; scroll-snap-type: x proximity; }
+.database-board-column { flex: 0 0 min(300px, 82vw); min-height: 180px; padding: 12px; border: 1px solid var(--border-subtle); border-radius: 17px; background: rgba(255,255,255,.3); scroll-snap-align: start; }
+.database-board-column > header, .database-calendar-undated > header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.database-board-column > header span, .database-calendar-undated > header span { color: hsl(var(--muted-foreground)); font-size: 11px; }
+.database-board-card, .database-calendar-card { margin: 7px 0; padding: 10px 11px; border: 1px solid var(--border-subtle); border-radius: 12px; background: var(--surface-elevated); box-shadow: 0 4px 12px rgba(15,23,42,.04); cursor: grab; font-size: 12px; }
+.database-board-card:active, .database-calendar-card:active { cursor: grabbing; }
+.database-operation-error { margin: 0 0 10px; color: hsl(var(--destructive)); font-size: 12px; }
+.database-calendar-undated { margin-bottom: 14px; padding: 12px; border: 1px dashed rgba(0,122,255,.3); border-radius: 16px; background: rgba(0,122,255,.035); }
+.database-calendar-undated > div { display: flex; gap: 8px; max-width: 100%; overflow-x: auto; }
+.database-calendar-undated .database-calendar-card { flex: 0 0 180px; }
+.database-calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(118px, 1fr)); min-width: 826px; border-top: 1px solid var(--border-subtle); border-left: 1px solid var(--border-subtle); }
+.database-calendar-view { max-width: 100%; overflow-x: auto; }
+.database-calendar-day { min-height: 126px; padding: 8px; border-right: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); background: rgba(255,255,255,.27); }
+.database-calendar-day time { color: hsl(var(--muted-foreground)); font-size: 11px; font-weight: 750; }
+.database-calendar-day .database-calendar-card { overflow: hidden; padding: 6px 7px; text-overflow: ellipsis; white-space: nowrap; }
+.database-calendar-day > button { min-height: 26px; border: 0; padding: 3px 5px; color: var(--nexus-accent); background: transparent; font-size: 11px; }
+.database-calendar-more { position: sticky; right: 10px; bottom: 10px; z-index: 5; width: min(300px, calc(100vw - 48px)); margin: 12px 0 0 auto; padding: 14px; border: 1px solid var(--border-subtle); border-radius: 16px; background: var(--surface-overlay); box-shadow: var(--shadow-md); }
+.database-calendar-more header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.database-empty { color: hsl(var(--muted-foreground)); }
+
 .auth-page { display: grid; width: min(1120px, 100%); min-height: min(760px, calc(100dvh - 40px)); grid-template-columns: minmax(0, 1.1fr) minmax(360px, .9fr); overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-window); background: var(--surface-window); box-shadow: var(--shadow-lg); backdrop-filter: blur(30px) saturate(160%); }
 .auth-intro { position: relative; display: flex; flex-direction: column; justify-content: center; padding: clamp(48px, 7vw, 86px); overflow: hidden; border-right: 1px solid var(--border-subtle); background: linear-gradient(145deg, rgba(255,255,255,.54), rgba(255,255,255,.18)); }
 .auth-intro::after { position: absolute; right: -80px; bottom: -110px; width: 360px; height: 360px; border-radius: 50%; background: radial-gradient(circle, rgba(0,122,255,.18), transparent 68%); content: ""; }
@@ -150,6 +190,18 @@ button { color: inherit; }
   .knowledge-recovery-heading, .knowledge-recovery-row { align-items: flex-start; flex-wrap: wrap; }
   .knowledge-recovery-row span { flex: 1 1 12rem; }
   .knowledge-recovery-heading > button, .knowledge-recovery-row > button { min-height: 38px; }
+  .database-workbench { padding: 18px 14px max(28px, env(safe-area-inset-bottom)); }
+  .database-workbench-header { align-items: flex-start; gap: 12px; }
+  .database-workbench-header h1 { font-size: 30px; }
+  .database-tools-drawer { top: 70px; right: 14px; width: calc(100% - 28px); }
+  .database-table-view table { min-width: 560px; }
+}
+
+@media (max-width: 420px), (min-resolution: 2dppx) and (max-width: 780px) {
+  .database-workbench-header { display: grid; }
+  .database-tools-trigger { justify-self: start; }
+  .database-tools-actions { align-items: stretch; flex-direction: column; }
+  .database-calendar-grid { grid-template-columns: repeat(7, minmax(104px, 1fr)); min-width: 728px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
