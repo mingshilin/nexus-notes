@@ -234,3 +234,33 @@ Implementation commit: `11e111423486aa6fa412be517130880ff8f4fc79` (`fix: complet
 
 - A2.2 Web recovery filters/loading/retry refresh and layout regressions are intentionally not implemented or tested here.
 - Diagnostics retain the established key-ordered cross-kind cursor. The new `failed_ocr:{attachmentId}` key is globally unique and stable, but adding new diagnostic kinds whose keys sort before an already-issued cursor follows the existing cursor consistency model.
+
+## Task 6C A2.1 Review Fix: Discriminated Diagnostics Contract
+
+### TDD RED / Root Cause
+
+`KnowledgeDiagnosticSchema` was a single strict object with optional failed-OCR fields. It therefore accepted invalid combinations such as `kind: "failed_ocr"` with `ocr_status: "completed"`, missing `failure_count`, or an unrelated diagnostic carrying OCR recovery fields.
+
+| Command | Valid RED observed before production change |
+| --- | --- |
+| `npm run test --workspace=@nexus/contracts -- tests/knowledge-contracts.test.ts` | A `failed_ocr` diagnostic with `ocr_status: "completed"` was accepted, proving the broad optional schema did not enforce kind-specific state. |
+| `npm run test --workspace=@nexus/contracts -- tests/knowledge-contracts.test.ts` | A `failed_ocr` diagnostic missing `failure_count` was accepted. |
+
+### Implemented
+
+- Replaced the broad schema with a `kind`-discriminated union.
+- `failed_ocr` now requires positive `failure_count`, `ocr_status` limited to `failed | dead_letter`, and allowlisted `latest_error`.
+- `unfiled_note`, `orphan_note`, `duplicate_title`, and `broken_link` remain strict and reject all failed-OCR recovery fields.
+- Added an actual Worker route envelope assertion for a valid failed-OCR recovery diagnostic; no Worker production behavior, Web, or AI code changed.
+
+### GREEN / Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/contracts -- tests/knowledge-contracts.test.ts` | PASS, 6 tests. |
+| `npm run test --workspace=@nexus/worker -- tests/attachment-routes.test.ts tests/d1-attachment-repository.test.ts tests/attachment-service.test.ts` | PASS, 25 tests in 3 files. |
+| `npm run typecheck --workspace=@nexus/contracts` | PASS. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+Implementation commit: `b8e01b7327ba99321035cf13b45e4e0dad6a81b8` (`fix: discriminate OCR recovery diagnostics`).
