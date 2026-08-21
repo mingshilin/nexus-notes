@@ -84,3 +84,59 @@ Focused final verification: Worker attachment/repository/consumer tests PASS (10
 ### Remaining Blockers
 
 The review's remaining Critical/Important requirements are not complete in this attempt: atomic 1 GB D1 reservation plus streaming upload body limit, persistent queue outbox/recovery, unique workspace/attachment/source-revision migration and retry CAS, full image/PDF extractor configuration, aggregated failed-OCR diagnostics cursor changes, and the exhaustive requested real-D1 concurrency/cross-tenant/MIME test matrix. Full Beta/legacy/build/audit/readiness/preload gates were intentionally not claimed or rerun after this partial fix attempt.
+
+## Fix A1 Worker/D1 Consistency Slice
+
+### Status
+
+`DONE_WITH_CONCERNS`. This intentionally excludes Web Fix A2 and does not claim Task 6C complete.
+
+### TDD RED Evidence
+
+| Command | Valid RED observed before production changes |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/d1-attachment-repository.test.ts` | Real local D1 concurrent quota test admitted both final 1 MiB reservations; expected one winner and one rejection. |
+| `npm run test --workspace=@nexus/worker -- tests/attachment-routes.test.ts tests/attachment-service.test.ts` | Invalid/oversized `Content-Length` and oversized stream returned `200`; upload returned stale `uploading`, revision 1 metadata instead of refreshed `ready`, revision 2. |
+| `npm run test --workspace=@nexus/worker -- tests/attachment-service.test.ts -t "maps an atomic D1 reservation rejection"` | Repository quota error lacked the service/API `status: 403` mapping. |
+| `npm run test --workspace=@nexus/worker -- tests/ocr-outbox.test.ts tests/schema.test.ts` | `source_revision` did not exist, no OCR outbox message was persisted, and `OcrOutboxDispatcher` did not exist. |
+| `npm run test --workspace=@nexus/worker -- tests/attachment-service.test.ts -t "creates one idempotent OCR job|retries only failed OCR jobs"` | Service did not dispatch the winning outbox id and leaked internal `outbox_ids` in the response. |
+| `npm run test --workspace=@nexus/worker -- tests/ocr-consumer.test.ts -t "claims a tenant job once"` | Consumer claimed with only workspace/job id instead of the complete persisted queue message. |
+
+Miniflare initially rejected the future compatibility date and multiline `D1Database.exec()` fixture input. Those setup errors were corrected and rerun; they were not counted as behavioral RED evidence.
+
+### Implemented Design
+
+- Quota admission is now a tenant-scoped single D1 `INSERT ... SELECT` whose predicate includes current non-deleted bytes and the exact 1 GB cap. Delete is status-conditional and therefore releases a reservation once; usage remains derived from non-deleted rows.
+- Attachment routes reject malformed/oversized `Content-Length` before body reads, then consume a bounded stream only through byte `MAX_UPLOAD_BYTES + 1`, cancel on overflow, and never call unbounded `request.arrayBuffer()`.
+- OCR generations are unique on `(workspace_id, attachment_id, source_revision)` while retaining initiating `user_id`. Creation and retry use D1 batch transactions for job/CAS plus outbox insertion; only the winning transition returns dispatchable outbox ids.
+- Persisted messages contain job id, workspace, attachment, source revision, attempt, deadline, and idempotency key. Consumer claim compares every persisted value and current ready source revision, rejecting stale/deleted/cross-workspace work.
+- `OcrOutboxDispatcher` leaves failed sends unpublished and increments persistent attempts; later dispatch retries the same payload, and successful dispatch marks it once. A Worker scheduled entry point can drain recovery rows without creating jobs.
+- Content upload rereads metadata after the status transition and returns the real `ready` attachment.
+- Local D1 tests use Miniflare and execute the actual three Worker migrations. No Web or deployment files/actions were included.
+
+### Files
+
+- Worker migration and implementation: `apps/worker/migrations/0003_private_attachments_ocr.sql`, `apps/worker/src/attachments/*`, `apps/worker/src/routes/attachments.ts`, `apps/worker/src/bootstrap.ts`, and `apps/worker/src/index.ts`.
+- Worker tests: attachment route/service/repository/consumer/schema tests, `apps/worker/tests/ocr-outbox.test.ts`, and `apps/worker/tests/helpers/d1.ts`.
+- Test dependency declaration: `apps/worker/package.json` and `package-lock.json` (`miniflare` devDependency).
+
+### GREEN / Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/d1-attachment-repository.test.ts tests/attachment-routes.test.ts tests/attachment-service.test.ts tests/ocr-outbox.test.ts tests/ocr-consumer.test.ts tests/schema.test.ts` | PASS, 32 tests in 6 files. |
+| `npm run test --workspace=@nexus/worker` | PASS, 102 tests in 27 files. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+| `npm run test --workspace=@nexus/contracts -- tests/knowledge-contracts.test.ts` | PASS, 5 tests. |
+| `npm run typecheck --workspace=@nexus/contracts` | PASS. |
+| `git diff --check` | PASS. |
+
+Implementation commit: `edf61cc` (`fix: harden beta attachment consistency`).
+
+### Still Failing / Not Completed
+
+- No tests in the focused or full Worker suites remain failing at this commit.
+- Failed OCR diagnostics are still emitted once per historical job rather than grouped by attachment with a unique aggregate cursor. Stable aggregated diagnostic pagination remains unimplemented and untested.
+- Cross-tenant and concurrency paths use real local D1, and MIME/stream/path checks have focused service/route coverage, but a combined real-D1 plus R2 delete-then-download and MIME-signature end-to-end matrix is not present.
+- Outbox delivery is intentionally at-least-once: concurrent dispatchers can send the same unpublished row before either marks it, while the full-message consumer CAS prevents duplicate processing.
+- Web filter/loading/retry-refresh work is deferred to Fix A2. OCR image/PDF extraction quality was not changed in this Worker consistency slice. No deploy, readiness, full Beta/Web, or legacy build gates were run.
