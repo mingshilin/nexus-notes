@@ -4,15 +4,16 @@ export const MAX_OCR_EXTRACTED_TEXT_BYTES = 1024 * 1024;
 
 type SupportedOcrMimeType = "application/pdf" | "image/jpeg" | "image/png" | "image/webp" | "text/plain";
 
+export interface OcrOperationOptions {
+  signal?: AbortSignal;
+}
+
 export interface OcrObjectStore {
-  get(key: string): Promise<{ body: ReadableStream<Uint8Array>; size?: number } | null>;
+  get(key: string, options?: OcrOperationOptions): Promise<{ body: ReadableStream<Uint8Array>; size?: number } | null>;
 }
 
 export interface OcrAiBinding {
-  toMarkdown(file: { name: string; blob: Blob }): Promise<
-    | { format: "markdown"; data: string }
-    | { format: "error"; error: string }
-  >;
+  toMarkdown(file: { name: string; blob: Blob }, options?: OcrOperationOptions): Promise<unknown>;
 }
 
 export interface OcrExtractionRequest {
@@ -52,7 +53,16 @@ function timeoutError(request: Pick<OcrExtractionRequest, "deadline">) {
     : new OcrExtractionError("OCR_TIMEOUT", true);
 }
 
-async function guarded<T>(operation: Promise<T>, request: Pick<OcrExtractionRequest, "deadline" | "signal">, timeoutMs: number) {
+async function cancelObject(object: { body: ReadableStream<Uint8Array> } | null | undefined) {
+  await object?.body.cancel().catch(() => undefined);
+}
+
+async function guarded<T>(
+  operation: Promise<T>,
+  request: Pick<OcrExtractionRequest, "deadline" | "signal">,
+  timeoutMs: number,
+  options: { abort?: () => void; onLateResolve?: (value: T) => void | Promise<void> } = {},
+) {
   assertActive(request);
   const deadlineMs = request.deadline ? request.deadline.getTime() - Date.now() : Number.POSITIVE_INFINITY;
   const waitMs = Math.min(timeoutMs, deadlineMs);
@@ -60,16 +70,30 @@ async function guarded<T>(operation: Promise<T>, request: Pick<OcrExtractionRequ
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   let abort: (() => void) | undefined;
+  let settled = false;
+  let timedOut = false;
+  const watched = operation.then(
+    async (value) => {
+      if (settled) await options.onLateResolve?.(value);
+      return value;
+    },
+    (error) => Promise.reject(error),
+  );
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(timeoutError(request)), waitMs);
+    timer = setTimeout(() => {
+      timedOut = true;
+      options.abort?.();
+      reject(timeoutError(request));
+    }, waitMs);
   });
   const cancellation = new Promise<never>((_resolve, reject) => {
-    abort = () => reject(new OcrExtractionError("OCR_CANCELLED", true));
+    abort = () => reject(timedOut ? timeoutError(request) : new OcrExtractionError("OCR_CANCELLED", true));
     request.signal?.addEventListener("abort", abort, { once: true });
   });
   try {
-    return await Promise.race([operation, timeout, cancellation]);
+    return await Promise.race([watched, timeout, cancellation]);
   } finally {
+    settled = true;
     if (timer !== undefined) clearTimeout(timer);
     if (abort) request.signal?.removeEventListener("abort", abort);
   }
@@ -79,6 +103,7 @@ async function readBoundedObject(
   object: { body: ReadableStream<Uint8Array>; size?: number },
   request: OcrExtractionRequest,
   timeoutMs: number,
+  abort: () => void,
 ) {
   if (!Number.isSafeInteger(request.sizeBytes) || request.sizeBytes <= 0 || request.sizeBytes > MAX_UPLOAD_BYTES) {
     throw new OcrExtractionError("OCR_INPUT_TOO_LARGE", false);
@@ -93,7 +118,7 @@ async function readBoundedObject(
   let total = 0;
   try {
     while (true) {
-      const { done, value } = await guarded(reader.read(), request, timeoutMs);
+      const { done, value } = await guarded(reader.read(), request, timeoutMs, { abort });
       if (done) break;
       const accepted = Math.min(value.byteLength, MAX_UPLOAD_BYTES + 1 - total);
       if (accepted > 0) chunks.push(value.subarray(0, accepted));
@@ -116,7 +141,35 @@ async function readBoundedObject(
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  assertActive(request);
   return bytes;
+}
+
+function markdownText(response: unknown) {
+  try {
+    if (!response || typeof response !== "object") throw new OcrExtractionError("OCR_AI_INVALID_RESPONSE", true);
+    const record = response as { format?: unknown; data?: unknown; error?: unknown };
+    if (record.format === "error") {
+      if (typeof record.error !== "string" || !record.error.trim()) {
+        throw new OcrExtractionError("OCR_AI_INVALID_RESPONSE", true);
+      }
+      throw new OcrExtractionError("OCR_AI_FORMAT_ERROR", false);
+    }
+    if (record.format !== "markdown" || typeof record.data !== "string") {
+      throw new OcrExtractionError("OCR_AI_INVALID_RESPONSE", true);
+    }
+    return record.data;
+  } catch (error) {
+    if (error instanceof OcrExtractionError) throw error;
+    throw new OcrExtractionError("OCR_AI_INVALID_RESPONSE", true);
+  }
+}
+
+function assertBoundedText(text: string) {
+  if (new TextEncoder().encode(text).byteLength > MAX_OCR_EXTRACTED_TEXT_BYTES) {
+    throw new OcrExtractionError("OCR_OUTPUT_TOO_LARGE", false);
+  }
+  if (!text.trim()) throw new OcrExtractionError("OCR_EMPTY_RESULT", false);
 }
 
 export class OcrExtractor {
@@ -130,45 +183,71 @@ export class OcrExtractor {
     if (!isSupportedMimeType(request.mimeType)) {
       throw new OcrExtractionError("OCR_UNSUPPORTED_MIME", false);
     }
-    assertActive(request);
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (request.signal?.aborted) abort();
+    request.signal?.addEventListener("abort", abort, { once: true });
+    const activeRequest = { ...request, signal: controller.signal };
 
-    let object: { body: ReadableStream<Uint8Array>; size?: number } | null;
     try {
-      object = await guarded(this.dependencies.files.get(request.objectKey), request, this.timeoutMs);
-    } catch (error) {
-      if (error instanceof OcrExtractionError) throw error;
-      throw new OcrExtractionError("OCR_OBJECT_READ_FAILED", true);
-    }
-    if (!object) throw new OcrExtractionError("OCR_OBJECT_NOT_FOUND", false);
-
-    const bytes = await readBoundedObject(object, request, this.timeoutMs);
-    if (request.mimeType === "text/plain") {
+      assertActive(activeRequest);
+      let object: { body: ReadableStream<Uint8Array>; size?: number } | null;
       try {
-        const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-        if (!text.trim()) throw new OcrExtractionError("OCR_EMPTY_RESULT", false);
-        return text;
+        object = await guarded(
+          this.dependencies.files.get(request.objectKey, { signal: controller.signal }),
+          activeRequest,
+          this.timeoutMs,
+          { abort, onLateResolve: cancelObject },
+        );
       } catch (error) {
         if (error instanceof OcrExtractionError) throw error;
-        throw new OcrExtractionError("OCR_TEXT_DECODE_FAILED", false);
+        throw new OcrExtractionError("OCR_OBJECT_READ_FAILED", true);
       }
-    }
+      if (!object) throw new OcrExtractionError("OCR_OBJECT_NOT_FOUND", false);
+      try {
+        assertActive(activeRequest);
+      } catch (error) {
+        await cancelObject(object);
+        throw error;
+      }
 
-    if (!this.dependencies.ai) throw new OcrExtractionError("OCR_AI_UNAVAILABLE", false);
+      const bytes = await readBoundedObject(object, activeRequest, this.timeoutMs, abort);
+      if (request.mimeType === "text/plain") {
+        try {
+          const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+          assertActive(activeRequest);
+          assertBoundedText(text);
+          assertActive(activeRequest);
+          return text;
+        } catch (error) {
+          if (error instanceof OcrExtractionError) throw error;
+          throw new OcrExtractionError("OCR_TEXT_DECODE_FAILED", false);
+        }
+      }
 
-    const blob = new Blob([bytes], { type: request.mimeType });
-    let response: Awaited<ReturnType<OcrAiBinding["toMarkdown"]>>;
-    try {
-      response = await guarded(this.dependencies.ai!.toMarkdown({ name: request.filename, blob }), request, this.timeoutMs);
-    } catch (error) {
-      if (error instanceof OcrExtractionError) throw error;
-      throw new OcrExtractionError("OCR_AI_REQUEST_FAILED", true);
+      if (!this.dependencies.ai) throw new OcrExtractionError("OCR_AI_UNAVAILABLE", false);
+
+      const blob = new Blob([bytes], { type: request.mimeType });
+      let response: Awaited<ReturnType<OcrAiBinding["toMarkdown"]>>;
+      try {
+        response = await guarded(
+          this.dependencies.ai.toMarkdown({ name: request.filename, blob }, { signal: controller.signal }),
+          activeRequest,
+          this.timeoutMs,
+          { abort },
+        );
+      } catch (error) {
+        if (error instanceof OcrExtractionError) throw error;
+        throw new OcrExtractionError("OCR_AI_REQUEST_FAILED", true);
+      }
+      assertActive(activeRequest);
+      const text = markdownText(response);
+      assertActive(activeRequest);
+      assertBoundedText(text);
+      assertActive(activeRequest);
+      return text;
+    } finally {
+      request.signal?.removeEventListener("abort", abort);
     }
-    if (response.format === "error") throw new OcrExtractionError("OCR_AI_FORMAT_ERROR", false);
-    if (!response.data.trim()) throw new OcrExtractionError("OCR_EMPTY_RESULT", false);
-    if (new TextEncoder().encode(response.data).byteLength > MAX_OCR_EXTRACTED_TEXT_BYTES) {
-      throw new OcrExtractionError("OCR_OUTPUT_TOO_LARGE", false);
-    }
-    assertActive(request);
-    return response.data;
   }
 }

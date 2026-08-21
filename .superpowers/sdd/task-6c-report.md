@@ -517,3 +517,31 @@ This B1 slice adds only the typed Worker-side OCR extraction adapter and fake ob
 No Queue ack/retry/dead-letter wiring, D1/search completion, Beta `Env.AI`, preview `[ai]`, bootstrap, or frontend changes are included. B2 must inject the authorized object key and binding, then own queue state transitions.
 
 Commit: independent B1 commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C Fix B1 Review Fix: Bounded, Runtime-Safe Extraction
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/ocr-extractor.test.ts` | RED: 7 expected failures. Local text over 1 MiB returned successfully; malformed AI payloads leaked `TypeError` or an over-broad format error; a late R2 body was not cancelled. |
+| Same focused command | GREEN: PASS, 18 tests. |
+
+### Review Fixes
+
+- Local `text/plain` output now uses the same UTF-8 byte limit as AI output and returns terminal `OCR_OUTPUT_TOO_LARGE` above 1 MiB.
+- AI responses are treated as runtime `unknown`. Unknown formats, missing/non-string Markdown data, missing/unsafe error data, null, and property-access failures map to retryable `OCR_AI_INVALID_RESPONSE`; documented safe provider error results remain terminal `OCR_AI_FORMAT_ERROR`.
+- A per-extraction AbortController propagates a signal to the injected object-store and AI adapter, checks cancellation/deadline before and after each asynchronous boundary, cancels a body that resolves after timeout, and never parses a late AI result. Tests assert Blob name, MIME, and exact source bytes.
+
+### Platform Limitation
+
+Cloudflare's native `env.AI.toMarkdown` binding does not provide a hard-cancellation API. The B1 adapter passes an advisory signal to its injected AI adapter and ignores late results; B2 must bridge `env.AI.toMarkdown` without claiming that an already-issued Cloudflare AI request is forcibly cancelled.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/ocr-extractor.test.ts` | PASS, 18 tests. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+
+Commit: independent B1 review-fix commit containing this report section; SHA is recorded in the final handoff.

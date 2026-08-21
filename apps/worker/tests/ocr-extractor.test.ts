@@ -28,6 +28,17 @@ function fakeStore(objects: Record<string, { bytes: Uint8Array; size?: number }>
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}
+
+async function flushAsyncWork() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 function request(overrides: Partial<Parameters<OcrExtractor["extract"]>[0]> = {}) {
   return {
     objectKey: "ws-1/attachments/attachment-1",
@@ -50,7 +61,16 @@ describe("OcrExtractor", () => {
     const extractor = new OcrExtractor({ files: store });
 
     await expect(extractor.extract(request({ filename: "note.txt", mimeType: "text/plain", sizeBytes: 10 }))).resolves.toBe("local text");
-    expect(store.get).toHaveBeenCalledWith("ws-1/attachments/attachment-1");
+    expect(store.get).toHaveBeenCalledWith("ws-1/attachments/attachment-1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  });
+
+  it("rejects local UTF-8 text larger than the extracted-text bound", async () => {
+    const bytes = new TextEncoder().encode("a".repeat(MAX_OCR_EXTRACTED_TEXT_BYTES + 1));
+    const extractor = new OcrExtractor({
+      files: fakeStore({ "ws-1/attachments/attachment-1": { bytes } }),
+    });
+
+    await expectExtractionError(extractor.extract(request({ filename: "large.txt", mimeType: "text/plain", sizeBytes: bytes.byteLength })), "OCR_OUTPUT_TOO_LARGE", false);
   });
 
   it.each([
@@ -59,14 +79,18 @@ describe("OcrExtractor", () => {
     ["image/png", "scan.png"],
     ["image/webp", "scan.webp"],
   ] as const)("converts %s through the injected Workers AI binding", async (mimeType, filename) => {
+    const sourceBytes = new Uint8Array([1, 2, 3]);
     const store = fakeStore({
-      "ws-1/attachments/attachment-1": { bytes: new Uint8Array([1, 2, 3]) },
+      "ws-1/attachments/attachment-1": { bytes: sourceBytes },
     });
     const ai = { toMarkdown: vi.fn(async () => ({ id: "conversion-1", name: filename, mimeType, format: "markdown" as const, tokens: 2, data: "# Converted" })) };
     const extractor = new OcrExtractor({ files: store, ai });
 
     await expect(extractor.extract(request({ filename, mimeType, sizeBytes: 3 }))).resolves.toBe("# Converted");
-    expect(ai.toMarkdown).toHaveBeenCalledWith(expect.objectContaining({ name: filename, blob: expect.any(Blob) }));
+    const conversionInput = ai.toMarkdown.mock.calls[0]?.[0];
+    expect(conversionInput).toEqual(expect.objectContaining({ name: filename, blob: expect.any(Blob) }));
+    expect(conversionInput?.blob.type).toBe(mimeType);
+    expect(new Uint8Array(await conversionInput!.blob.arrayBuffer())).toEqual(sourceBytes);
   });
 
   it("returns stable terminal errors for unavailable objects, bindings, unsupported MIME, provider errors, and empty output", async () => {
@@ -88,6 +112,21 @@ describe("OcrExtractor", () => {
       ai: { toMarkdown: vi.fn(async () => ({ id: "conversion-1", name: "scan.pdf", mimeType: "application/pdf", format: "markdown" as const, tokens: 0, data: "   " })) },
     });
     await expectExtractionError(emptyOutput.extract(request()), "OCR_EMPTY_RESULT", false);
+  });
+
+  it.each([
+    [{ format: "unknown" }, "OCR_AI_INVALID_RESPONSE", true],
+    [{ format: "markdown" }, "OCR_AI_INVALID_RESPONSE", true],
+    [{ format: "markdown", data: 42 }, "OCR_AI_INVALID_RESPONSE", true],
+    [{ format: "error" }, "OCR_AI_INVALID_RESPONSE", true],
+    [null, "OCR_AI_INVALID_RESPONSE", true],
+  ])("maps malformed AI conversion payload %# to a stable retryable error", async (payload, code, retryable) => {
+    const extractor = new OcrExtractor({
+      files: fakeStore({ "ws-1/attachments/attachment-1": { bytes: new Uint8Array([1]) } }),
+      ai: { toMarkdown: vi.fn(async () => payload) },
+    });
+
+    await expectExtractionError(extractor.extract(request({ sizeBytes: 1 })), code, retryable);
   });
 
   it("cancels oversized objects before conversion and rejects oversized extracted text", async () => {
@@ -130,6 +169,39 @@ describe("OcrExtractor", () => {
     const object = { "ws-1/attachments/attachment-1": { bytes: new Uint8Array([1]) } };
     const deadline = new OcrExtractor({ files: fakeStore(object), ai: { toMarkdown: vi.fn() } });
     await expectExtractionError(deadline.extract(request({ deadline: new Date(Date.now() - 1) })), "OCR_DEADLINE_EXCEEDED", false);
+  });
+
+  it("passes a cancellation signal to dependencies, cancels a late object body, and ignores a late AI result", async () => {
+    const lateObject = deferred<{ body: ReadableStream<Uint8Array>; size: number } | null>();
+    const lateObjectCancel = vi.fn();
+    const files: OcrObjectStore = { get: vi.fn(() => lateObject.promise) };
+    const ai = { toMarkdown: vi.fn() };
+    const objectTimeout = new OcrExtractor({ files, ai }, { timeoutMs: 25 });
+
+    await expectExtractionError(objectTimeout.extract(request()), "OCR_TIMEOUT", true);
+    lateObject.resolve({ body: stream(new Uint8Array([1]), lateObjectCancel), size: 1 });
+    await flushAsyncWork();
+    expect(lateObjectCancel).toHaveBeenCalledOnce();
+    expect(ai.toMarkdown).not.toHaveBeenCalled();
+    expect(files.get.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ signal: expect.any(AbortSignal) }));
+
+    const lateAi = deferred<unknown>();
+    const dataRead = vi.fn(() => "# late");
+    const latePayload = { format: "markdown" as const } as { format: "markdown"; data?: string };
+    Object.defineProperty(latePayload, "data", { get: dataRead });
+    const immediateFiles = fakeStore({ "ws-1/attachments/attachment-1": { bytes: new Uint8Array([1]) } });
+    const conversionTimeout = new OcrExtractor({
+      files: immediateFiles,
+      ai: { toMarkdown: vi.fn((_file: unknown, options: { signal?: AbortSignal }) => {
+        expect(options.signal).toBeInstanceOf(AbortSignal);
+        return lateAi.promise;
+      }) },
+    }, { timeoutMs: 25 });
+
+    await expectExtractionError(conversionTimeout.extract(request({ sizeBytes: 1 })), "OCR_TIMEOUT", true);
+    lateAi.resolve(latePayload);
+    await flushAsyncWork();
+    expect(dataRead).not.toHaveBeenCalled();
   });
 
   it("rejects malformed UTF-8 text without sending it to AI", async () => {
