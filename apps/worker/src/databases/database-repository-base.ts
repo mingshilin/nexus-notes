@@ -23,6 +23,11 @@ interface ReferenceItem {
   target_database_id?: string;
 }
 
+interface ReferenceCollector {
+  add(values: Readonly<Record<string, unknown>>): void;
+  items(): ReferenceItem[];
+}
+
 const MAX_REFERENCE_ITEMS = 1_000;
 
 export interface D1DatabaseRepositoryOptions {
@@ -89,31 +94,36 @@ export abstract class DatabaseRepositoryBase {
     properties: readonly DatabaseProperty[],
     values: Readonly<Record<string, unknown>>,
   ) {
-    await this.validateReferenceItems(context, this.referenceItems(properties, [values]));
+    const collector = this.referenceCollector(properties);
+    collector.add(values);
+    await this.validateReferenceItems(context, collector.items());
   }
 
-  protected referenceItems(properties: readonly DatabaseProperty[], valuesList: readonly Readonly<Record<string, unknown>>[]) {
+  protected referenceCollector(properties: readonly DatabaseProperty[]): ReferenceCollector {
     const items = new Map<string, ReferenceItem>();
-    for (const values of valuesList) {
-      for (const property of properties) {
-        if (property.type !== "member" && property.type !== "relation") continue;
-        const value = values[property.id];
-        const ids = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
-        const targetDatabaseId = property.type === "relation" && typeof (property.config as Record<string, unknown>).target_database_id === "string"
-          ? (property.config as Record<string, unknown>).target_database_id as string
-          : undefined;
-        for (const id of ids) {
-          const item: ReferenceItem = property.type === "member"
-            ? { kind: "member", property_id: property.id, id }
-            : { kind: "relation", property_id: property.id, id, target_database_id: targetDatabaseId };
-          items.set(`${item.kind}:${item.property_id}:${item.target_database_id ?? ""}:${item.id}`, item);
+    return {
+      add: (values) => {
+        for (const property of properties) {
+          if (property.type !== "member" && property.type !== "relation") continue;
+          const value = values[property.id];
+          const ids = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+          const targetDatabaseId = property.type === "relation" && typeof (property.config as Record<string, unknown>).target_database_id === "string"
+            ? (property.config as Record<string, unknown>).target_database_id as string
+            : undefined;
+          for (const id of ids) {
+            const item: ReferenceItem = property.type === "member"
+              ? { kind: "member", property_id: property.id, id }
+              : { kind: "relation", property_id: property.id, id, target_database_id: targetDatabaseId };
+            const key = `${item.kind}:${item.property_id}:${item.target_database_id ?? ""}:${item.id}`;
+            if (!items.has(key) && items.size >= MAX_REFERENCE_ITEMS) {
+              throw new DatabaseRepositoryError("REFERENCE_LIMIT", "Too many distinct references", 400);
+            }
+            items.set(key, item);
+          }
         }
-      }
-    }
-    if (items.size > MAX_REFERENCE_ITEMS) {
-      throw new DatabaseRepositoryError("REFERENCE_LIMIT", "Too many distinct references", 400);
-    }
-    return [...items.values()];
+      },
+      items: () => [...items.values()],
+    };
   }
 
   protected async validateReferenceItems(context: WorkspaceContext, items: readonly ReferenceItem[]) {

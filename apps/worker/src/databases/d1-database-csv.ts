@@ -78,15 +78,17 @@ export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
       throw new DatabaseRepositoryError("CSV_DUPLICATE_PROPERTY", "CSV headers map to duplicate properties", 400);
     }
     const normalizedRows: Record<string, unknown>[] = [];
+    const referenceCollector = this.referenceCollector(fields.properties);
     for (const row of parsed.rows) {
       const values = this.normalize(
         fields.properties,
         Object.fromEntries(mapped.map((property, index) => [property.id, coerceCsvValue(property, row[index] ?? "")])),
         fields.writable,
       );
+      referenceCollector.add(values);
       normalizedRows.push(values);
     }
-    const references = this.referenceItems(fields.properties, normalizedRows);
+    const references = referenceCollector.items();
     await this.validateReferenceItems(context, references);
     const now = this.now();
     const records = normalizedRows.map((values) => ({

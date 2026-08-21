@@ -105,7 +105,9 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
   async createTemplate(context: WorkspaceContext, databaseId: string, input: CreateDatabaseTemplateInput) {
     const fields = await this.access.fields(context, databaseId, "write");
     const defaults = this.normalize(fields.properties, input.default_values, fields.writable);
-    const references = this.referenceItems(fields.properties, [defaults]);
+    const referenceCollector = this.referenceCollector(fields.properties);
+    referenceCollector.add(defaults);
+    const references = referenceCollector.items();
     await this.validateReferenceItems(context, references);
     const now = this.now();
     const template: DatabaseTemplate = {
@@ -136,7 +138,9 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
     const defaults = input.default_values === undefined
       ? template.default_values
       : this.normalize(fields.properties, input.default_values, fields.writable);
-    const references = this.referenceItems(fields.properties, [defaults]);
+    const referenceCollector = this.referenceCollector(fields.properties);
+    referenceCollector.add(defaults);
+    const references = referenceCollector.items();
     await this.validateReferenceItems(context, references);
     const now = this.now();
     const updated = { ...template, name: input.name ?? template.name, default_values: defaults, revision: template.revision + 1, updated_at: now };

@@ -41,7 +41,7 @@ function revisionGuard(
 ) {
   return db.prepare(
     `INSERT INTO workspaces (id, owner_user_id, slug, name, revision, created_at, updated_at)
-     SELECT id, owner_user_id, slug, name, revision, created_at, updated_at
+     SELECT id, owner_user_id, slug || ':record-revision-guard', name, revision, created_at, updated_at
      FROM workspaces
      WHERE id = ? AND (
        NOT EXISTS (SELECT 1 FROM databases WHERE workspace_id = ? AND id = ?)
@@ -59,21 +59,23 @@ function revisionGuard(
 }
 
 function isRecordRevisionGuardError(error: unknown) {
-  return isUniqueGuardError(error, "workspaces.slug");
+  return isUniqueGuardError(error, "workspaces.id");
 }
 
 export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
   async createRecord(context: WorkspaceContext, databaseId: string, input: CreateDatabaseRecordInput) {
     const fields = await this.access.fields(context, databaseId, "write");
     const values = this.normalize(fields.properties, input.values ?? {}, fields.writable);
-    await this.validateReferences(context, fields.properties, values);
+    const referenceCollector = this.referenceCollector(fields.properties);
+    referenceCollector.add(values);
+    const references = referenceCollector.items();
+    await this.validateReferenceItems(context, references);
     const now = this.now();
     const record: DatabaseRecord = {
       id: this.id(), workspace_id: context.workspaceId, database_id: databaseId,
       note_id: input.note_id ?? null, values, created_by: context.userId, updated_by: context.userId,
       revision: 1, created_at: now, updated_at: now,
     };
-    const references = this.referenceItems(fields.properties, [values]);
     const statements = [...this.referenceGuards(context, references), ...this.createRecordStatements(record)];
     if (record.note_id) {
       const note = await this.db.prepare(
@@ -188,14 +190,16 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     const rows = await this.recordRows(context.workspaceId, databaseId, recordIds);
     const byId = new Map(rows.map((row) => [row.id, row]));
     const prepared = [] as Array<{ mutation: BulkEditRecordsInput["mutations"][number]; values: Record<string, unknown> }>;
+    const referenceCollector = this.referenceCollector(fields.properties);
     for (const mutation of input.mutations) {
       const row = byId.get(mutation.record_id);
       if (!row) throw new DatabaseRepositoryError("RECORD_NOT_FOUND", "Database record not found", 404);
       assertRevision(row.revision, mutation.base_revision);
       const values = this.normalize(fields.properties, mutation.values, fields.writable);
+      referenceCollector.add(values);
       prepared.push({ mutation, values });
     }
-    const references = this.referenceItems(fields.properties, prepared.map((item) => item.values));
+    const references = referenceCollector.items();
     await this.validateReferenceItems(context, references);
     const now = this.now();
     const expected = prepared.map(({ mutation }) => ({ record_id: mutation.record_id, revision: mutation.base_revision }));

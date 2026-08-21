@@ -326,3 +326,43 @@ The requested Web scope explicitly requires browseable/selectable database- and 
 - Performance/readability: collection fetches remain bounded at 100, calendar expansion is segmented, CSV strings remain page-bounded Blob parts, and the workbench remains lazy. No new quadratic path is introduced beyond existing bounded record/property scans.
 - Scope: only the 16 Web source/test files above plus this report are staged for Wave 4A. Existing `apps/worker` and `packages/domain` modifications remain unstaged for the sequential backend wave.
 - Residual concern: the repository still has no real-browser 390px/200%/mobile-keyboard gate. This wave retains jsdom coverage for viewport, `visualViewport`, inert state, focus, and scroll-owner transfer; real-browser evidence remains the Task 11 gate.
+
+## Task 7 Review Fix Wave 4B - Worker and Domain
+
+### RED evidence
+
+- Preserved prior RED evidence above for stale transaction revision classification, overlong member/relation IDs, and over-limit reference arrays.
+- Added `returns REFERENCE_LIMIT before normalizing later CSV rows or bulk mutations`. Before the incremental collector change, the focused Worker run failed as expected: the CSV path returned `INVALID_FIELD_VALUE` from the later malformed row instead of `REFERENCE_LIMIT` after the 1,001st distinct reference.
+- Added exact 1,000/1,001 boundary coverage for single-record create, template create, bulk edit, and CSV import, plus transaction-time member guard classification and relation-default application to a stale record.
+
+### GREEN evidence
+
+- `npm run test --workspace @nexus/worker -- tests/d1-database-repository.test.ts tests/database-routes.test.ts --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=dot`: passed `2/2` files and `35/35` tests.
+- `npm run test --workspace @nexus/domain -- tests/database-values.test.ts --reporter=dot`: passed `1/1` file and `4/4` tests.
+- `npm run test --workspace @nexus/contracts -- tests/database-contracts.test.ts --reporter=dot`: passed `1/1` file and `5/5` tests.
+- `npm run test --workspace @nexus/worker -- --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=dot`: passed `37/37` files and `211/211` tests in `135.53s`. Existing poison-message tests emit expected `OCR_QUEUE_MESSAGE_INVALID` stderr lines.
+- `npm run typecheck --workspace @nexus/worker`, `@nexus/domain`, and `@nexus/contracts`: all exited `0`.
+- `npm run beta:build`: passed Web, Worker, contracts, domain, testkit, and UI builds. Web output retained the lazy `DatabaseWorkbench` chunk and had no large-chunk warning.
+- `npm run verify:deploy`: passed local deploy readiness checks.
+- `git diff --check`: passed with no output.
+- Chunk/preload audit after build: `modulepreload_count=0`, `database_workbench_chunk_count=1`, `markdown_ocr_named_assets=0`.
+
+### Requirement mapping
+
+1. Record revision guards now use the `workspaces.id` conflict signature, distinct from relation `workspaces.slug` and member `users.email` guards. A stale bulk/template-application mutation containing valid relations returns `REVISION_CONFLICT`; disappearing relation/member references retain their specific errors. Board and calendar writes continue through the same guarded record update path.
+2. Domain normalization rejects member/relation IDs longer than `128` characters and multi-value arrays longer than `100` items before repository expansion.
+3. A bounded reference collector deduplicates by kind/property/target/id and throws at the 1,001st distinct item while CSV rows and bulk mutations are being normalized. Single-record and template paths use the same bounded collector before validation, guard statements, or JSON bindings. Tests cover exact 1,000 acceptance and 1,001 rejection across all four input paths.
+
+### Files changed in this wave
+
+- Worker sources: `apps/worker/src/databases/database-repository-base.ts`, `d1-database-records.ts`, `d1-database-csv.ts`, and `d1-database-views.ts`.
+- Worker tests: `apps/worker/tests/d1-database-repository.test.ts`.
+- Domain source/test: `packages/domain/src/database-values.ts` and `packages/domain/tests/database-values.test.ts`.
+- Evidence: `.superpowers/sdd/task-7-report.md`.
+
+### Self-review
+
+- Correctness: checked distinct-reference deduplication, exact cap boundaries, early cap failure, member/relation transaction races, stale revision precedence, scalar versus array normalization, and atomic rollback behavior.
+- Security/resources: IDs and arrays are bounded at the domain boundary; reference guard sets and JSON bindings cannot exceed the 1,000-item cap. No SQL, deployment, secret, remote, migration, or Web files were changed.
+- Compatibility: `/api/v2` envelopes, `WorkspaceContext`, D1 rollback, and detach-before-delete behavior remain unchanged. No contracts changes were required because existing `EntityIdSchema` already enforces the 128-character ID bound.
+- Residual concern: full Worker validation uses a serial fork pool to avoid the known Miniflare contention/timeout behavior; no test timeout or assertion was changed. Real-browser Web evidence remains outside this backend wave.

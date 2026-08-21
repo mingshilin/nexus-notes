@@ -72,4 +72,20 @@ describe("database property value normalization", () => {
     expect(() => normalizeDatabaseValues(properties, { due: "2026-08-21T12:30:00.000Z" }))
       .toThrow(expect.objectContaining({ code: "INVALID_FIELD_VALUE", propertyId: "due" }));
   });
+
+  it("bounds member and relation IDs and multi-value arrays", async () => {
+    const { normalizeDatabaseValues } = await loadDomain() as { normalizeDatabaseValues: Function };
+    const scalar = property("member", "member");
+    const multiple = property("relation", "relation", { allow_multiple: true, target_database_id: "db-2" });
+    const maxId = "r".repeat(128);
+
+    expect(normalizeDatabaseValues([scalar, multiple], {
+      member: maxId,
+      relation: Array.from({ length: 100 }, (_, index) => `record-${index}`),
+    })).toMatchObject({ member: maxId, relation: expect.arrayContaining(["record-99"]) });
+    expect(() => normalizeDatabaseValues([scalar], { member: "r".repeat(129) }))
+      .toThrow(expect.objectContaining({ code: "INVALID_FIELD_VALUE", propertyId: "member" }));
+    expect(() => normalizeDatabaseValues([multiple], { relation: Array.from({ length: 101 }, (_, index) => `record-${index}`) }))
+      .toThrow(expect.objectContaining({ code: "INVALID_FIELD_VALUE", propertyId: "relation" }));
+  });
 });

@@ -505,6 +505,83 @@ describe("D1 structured database repository", () => {
     expect(prepareCount).toBeLessThanOrEqual(12);
   });
 
+  it("returns REFERENCE_LIMIT before normalizing later CSV rows or bulk mutations", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Incremental references", description: "" });
+    const target = await repository.createDatabase(owner, { name: "Incremental target", description: "" });
+    const relation = await repository.createProperty(owner, database.id, {
+      name: "Relation", type: "relation", config: { target_database_id: target.id, allow_multiple: true }, position: 0,
+    });
+    const amount = await repository.createProperty(owner, database.id, { name: "Amount", type: "number", config: {}, position: 1 });
+    const referenceGroups = Array.from({ length: 10 }, (_, group) => Array.from(
+      { length: 100 }, (_, index) => `target-${group * 100 + index}`,
+    ));
+    const csvRows = [
+      ...referenceGroups.map((ids) => `${ids.join(";")},1`),
+      "target-1000,1",
+      "target-1001,not-a-number",
+    ];
+
+    await expect(repository.importCsv(owner, database.id, {
+      csv: `Relation,Amount\r\n${csvRows.join("\r\n")}`,
+      header_property_ids: { Relation: relation.id, Amount: amount.id },
+    })).rejects.toMatchObject({ code: "REFERENCE_LIMIT", status: 400 });
+
+    const records = await Promise.all(Array.from({ length: 12 }, () => repository.createRecord(owner, database.id, { note_id: null, values: {} })));
+    await expect(repository.bulkEditRecords(owner, database.id, {
+      mutations: [
+        ...referenceGroups.map((ids, index) => ({ record_id: records[index]!.id, base_revision: 1, values: { [relation.id]: ids } })),
+        { record_id: records[10]!.id, base_revision: 1, values: { [relation.id]: ["target-1000"] } },
+        { record_id: records[11]!.id, base_revision: 1, values: { [relation.id]: ["target-1001"], [amount.id]: "not-a-number" } },
+      ],
+    })).rejects.toMatchObject({ code: "REFERENCE_LIMIT", status: 400 });
+  });
+
+  it("enforces the exact distinct-reference boundary for records, templates, bulk edits, and CSV", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Reference boundaries", description: "" });
+    const target = await repository.createDatabase(owner, { name: "Boundary target", description: "" });
+    const targets = Array.from({ length: 101 }, (_, index) => ({ id: `boundary-target-${index}` }));
+    await db.prepare(
+      `INSERT INTO database_records
+       (id, workspace_id, database_id, note_id, created_by, updated_by, revision, created_at, updated_at)
+       SELECT json_extract(value, '$.id'), 'ws-1', ?, NULL, 'user-1', 'user-1', 1, ?, ? FROM json_each(?)`,
+    ).bind(target.id, now, now, JSON.stringify(targets)).run();
+    const relations = await Promise.all(Array.from({ length: 11 }, (_, position) => repository.createProperty(owner, database.id, {
+      name: `Relation ${position}`, type: "relation", config: { target_database_id: target.id, allow_multiple: true }, position,
+    })));
+    const references = targets.slice(0, 100).map((targetRecord) => targetRecord.id);
+    const atLimit = Object.fromEntries(relations.slice(0, 10).map((property: any) => [property.id, references]));
+    const overLimit = { ...atLimit, [relations[10]!.id]: [targets[100]!.id] };
+
+    await expect(repository.createRecord(owner, database.id, { note_id: null, values: atLimit })).resolves.toMatchObject({ values: atLimit });
+    await expect(repository.createRecord(owner, database.id, { note_id: null, values: overLimit }))
+      .rejects.toMatchObject({ code: "REFERENCE_LIMIT", status: 400 });
+    await expect(repository.createTemplate(owner, database.id, { name: "At limit", default_values: atLimit })).resolves.toMatchObject({ default_values: atLimit });
+    await expect(repository.createTemplate(owner, database.id, { name: "Over limit", default_values: overLimit }))
+      .rejects.toMatchObject({ code: "REFERENCE_LIMIT", status: 400 });
+
+    const source = await repository.createRecord(owner, database.id, { note_id: null, values: {} });
+    await expect(repository.bulkEditRecords(owner, database.id, {
+      mutations: [{ record_id: source.id, base_revision: source.revision, values: atLimit }],
+    })).resolves.toMatchObject({ items: [expect.objectContaining({ values: atLimit })] });
+    await expect(repository.bulkEditRecords(owner, database.id, {
+      mutations: [{ record_id: source.id, base_revision: source.revision + 1, values: overLimit }],
+    })).rejects.toMatchObject({ code: "REFERENCE_LIMIT", status: 400 });
+
+    const atLimitHeaders = relations.slice(0, 10);
+    await expect(repository.importCsv(owner, database.id, {
+      csv: `${atLimitHeaders.map((property: any) => property.name).join(",")}\r\n${atLimitHeaders.map(() => references.join(";")).join(",")}`,
+      header_property_ids: Object.fromEntries(atLimitHeaders.map((property: any) => [property.name, property.id])),
+    })).resolves.toMatchObject({ imported_count: 1 });
+    await expect(repository.importCsv(owner, database.id, {
+      csv: `${relations.map((property: any) => property.name).join(",")}\r\n${[...relations.slice(0, 10).map(() => references.join(";")), targets[100]!.id].join(",")}`,
+      header_property_ids: Object.fromEntries(relations.map((property: any) => [property.name, property.id])),
+    })).rejects.toMatchObject({ code: "REFERENCE_LIMIT", status: 400 });
+  });
+
   it("rolls back a bulk edit when a referenced target disappears inside its transaction", async () => {
     const repository = await createRepository();
     const owner = context("user-1");
@@ -528,6 +605,30 @@ describe("D1 structured database repository", () => {
     })).rejects.toMatchObject({ code: "INVALID_RELATION_REFERENCE", status: 400 });
     expect((await repository.getRecord(owner, database.id, source.id)).values).toEqual({});
     expect(await db.prepare("SELECT deleted_at FROM database_records WHERE id = ?").bind(targetRecord.id).first()).toEqual({ deleted_at: null });
+  });
+
+  it("classifies a transaction-time stale revision with valid relations as a revision conflict", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Revision guard", description: "" });
+    const target = await repository.createDatabase(owner, { name: "Revision target", description: "" });
+    const relation = await repository.createProperty(owner, database.id, {
+      name: "Relation", type: "relation", config: { target_database_id: target.id }, position: 0,
+    });
+    const source = await repository.createRecord(owner, database.id, { note_id: null, values: {} });
+    const targetRecord = await repository.createRecord(owner, target.id, { note_id: null, values: {} });
+    await db.prepare(
+      `CREATE TRIGGER stale_revision_race AFTER UPDATE ON database_records
+       WHEN NEW.id = '${source.id}'
+       BEGIN
+         UPDATE database_records SET revision = revision + 1 WHERE id = NEW.id;
+       END;`,
+    ).run();
+
+    await expect(repository.bulkEditRecords(owner, database.id, {
+      mutations: [{ record_id: source.id, base_revision: 1, values: { [relation.id]: targetRecord.id } }],
+    })).rejects.toMatchObject({ code: "REVISION_CONFLICT", status: 409 });
+    expect(await repository.getRecord(owner, database.id, source.id)).toMatchObject({ revision: 1, values: {} });
   });
 
   it("executes a saved view server-side with visible fields, filters, sorts, page size, and keyset cursors", async () => {
@@ -707,6 +808,54 @@ describe("D1 structured database repository", () => {
     await expect(repository.createTemplate(owner, database.id, { name: "Default", default_values: { [relation.id]: targetRecord.id } }))
       .rejects.toMatchObject({ code: "INVALID_RELATION_REFERENCE", status: 400 });
     expect(await db.prepare("SELECT deleted_at FROM database_records WHERE id = ?").bind(targetRecord.id).first()).toEqual({ deleted_at: null });
+  });
+
+  it("retains member-specific failures when a member disappears inside a transaction", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Member guard", description: "" });
+    const member = await repository.createProperty(owner, database.id, {
+      name: "Member", type: "member", config: {}, position: 0,
+    });
+    await db.prepare(
+      "INSERT INTO workspace_members (workspace_id, user_id, role, joined_at, updated_at) VALUES ('ws-1', 'user-1', 'owner', ?, ?)",
+    ).bind(now, now).run();
+    await db.prepare(
+      `CREATE TRIGGER member_reference_race AFTER INSERT ON database_records
+       WHEN NEW.database_id = '${database.id}'
+       BEGIN
+         DELETE FROM workspace_members WHERE workspace_id = 'ws-1' AND user_id = 'user-1';
+       END;`,
+    ).run();
+
+    await expect(repository.createRecord(owner, database.id, { note_id: null, values: { [member.id]: "user-1" } }))
+      .rejects.toMatchObject({ code: "INVALID_MEMBER_REFERENCE", status: 400 });
+    expect(await db.prepare("SELECT role FROM workspace_members WHERE workspace_id = 'ws-1' AND user_id = 'user-1'").first())
+      .toEqual({ role: "owner" });
+  });
+
+  it("returns REVISION_CONFLICT when applying relation defaults to a stale record", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Template conflict", description: "" });
+    const target = await repository.createDatabase(owner, { name: "Template relation target", description: "" });
+    const title = await repository.createProperty(owner, database.id, { name: "Title", type: "text", config: {}, position: 0 });
+    const relation = await repository.createProperty(owner, database.id, {
+      name: "Relation", type: "relation", config: { target_database_id: target.id }, position: 1,
+    });
+    const targetRecord = await repository.createRecord(owner, target.id, { note_id: null, values: {} });
+    const source = await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "Initial" } });
+    const template = await repository.createTemplate(owner, database.id, {
+      name: "Related", default_values: { [relation.id]: targetRecord.id },
+    });
+    await repository.updateRecord(owner, database.id, source.id, {
+      base_revision: source.revision, values: { [title.id]: "Current" },
+    });
+
+    await expect(repository.applyTemplate(owner, database.id, {
+      template_id: template.id,
+      records: [{ record_id: source.id, base_revision: source.revision }],
+    })).rejects.toMatchObject({ code: "REVISION_CONFLICT", status: 409 });
   });
 
   it("omits repeated CSV headers on bounded export pages", async () => {

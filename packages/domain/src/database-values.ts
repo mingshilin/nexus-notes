@@ -33,12 +33,16 @@ export class DatabaseValueError extends Error {
   }
 }
 
+const MAX_REFERENCE_ID_LENGTH = 128;
+const MAX_REFERENCE_ARRAY_LENGTH = 100;
+
 function invalid(property: DatabaseValueProperty): never {
   throw new DatabaseValueError("INVALID_FIELD_VALUE", property.id, `Invalid value for ${property.id}`);
 }
 
 function stringIds(value: unknown, property: DatabaseValueProperty) {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) invalid(property);
+  if (!Array.isArray(value) || value.length > MAX_REFERENCE_ARRAY_LENGTH
+    || value.some((item) => typeof item !== "string" || !item.trim() || item.trim().length > MAX_REFERENCE_ID_LENGTH)) invalid(property);
   return [...new Set((value as string[]).map((item) => item.trim()))];
 }
 
@@ -64,7 +68,7 @@ function isCalendarDate(value: string) {
 function normalizeSingleOrMultiple(value: unknown, property: DatabaseValueProperty) {
   const multiple = property.config.allow_multiple === true;
   if (multiple) return stringIds(value, property);
-  if (typeof value !== "string" || !value.trim()) invalid(property);
+  if (typeof value !== "string" || !value.trim() || value.trim().length > MAX_REFERENCE_ID_LENGTH) invalid(property);
   return value.trim();
 }
 
