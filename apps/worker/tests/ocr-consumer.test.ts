@@ -130,6 +130,18 @@ describe("OcrConsumer outcomes", () => {
       .toEqual({ status: "failed", last_error_code: "OCR_EXTRACTION_FAILED" });
   });
 
+  it("preserves the stable B1 unsupported-MIME code in the persisted OCR failure", async () => {
+    const { OcrConsumer, db, repository, job } = await fixture();
+    const extractor = { extract: vi.fn(async () => { throw new Error("OCR_UNSUPPORTED_MIME"); }) };
+    const message = new FakeMessage(job);
+
+    await expect(consumer(OcrConsumer, repository, extractor).consume(message)).resolves.toEqual({ outcome: "ack" });
+
+    expect(message.ack).toHaveBeenCalledOnce();
+    expect(await db.prepare("SELECT status, last_error_code FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first())
+      .toEqual({ status: "failed", last_error_code: "OCR_UNSUPPORTED_MIME" });
+  });
+
   it("acks terminal failures and dead-letters an exhausted retryable delivery", async () => {
     const terminalFixture = await fixture();
     const terminal = new FakeMessage(terminalFixture.job);

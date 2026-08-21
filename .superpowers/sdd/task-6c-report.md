@@ -657,3 +657,29 @@ No B2.2 Queue retry invocation, Cloudflare binding, Env, bootstrap, health, Wran
 | `git diff --check` | PASS. |
 
 Commit: independent B2.1 review-fix commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C Fix B2.1 Minor: Preserve Unsupported MIME
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm exec vitest run --config vitest.config.ts tests/ocr-consumer.test.ts` | RED: B1's stable `OCR_UNSUPPORTED_MIME` terminal error was persisted as generic `OCR_EXTRACTION_FAILED`. |
+| Same focused command after the allowlist update | GREEN: PASS, 16 tests. |
+
+### Implemented
+
+- Added only `OCR_UNSUPPORTED_MIME` to the consumer's explicit persisted-error allowlist.
+- Added real D1 coverage that verifies the known B1 code remains intact while unknown errors continue to map to the generic safe code.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| Consumer focused Worker suite | PASS, 16 tests. |
+| `npm run typecheck` in `apps/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+No B2.2, Cloudflare binding, Env, bootstrap, health, Wrangler, Web, legacy, deployment, or Task 7 files changed.
+
+Commit: independent B2.1 minor-fix commit containing this report section; SHA is recorded in the final handoff.
