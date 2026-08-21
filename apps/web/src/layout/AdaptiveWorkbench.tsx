@@ -13,7 +13,7 @@ export interface AdaptiveWorkbenchProps {
   inspectorOpen: boolean;
   activePane?: "context" | "canvas";
   onActivePaneChange?: (pane: "context" | "canvas") => void;
-  onInspectorOpen?: () => void;
+  onInspectorOpen?: (opener: HTMLElement) => void;
   onInspectorClose: () => void;
   children: ReactNode;
 }
@@ -43,51 +43,52 @@ export function AdaptiveWorkbench({
   const mobileChrome = useMobileChrome();
   const mobile = currentMode === "mobile";
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const modalOpen = inspectorOpen && Boolean(inspector);
 
   useEffect(() => {
-    if (inspectorOpen) closeButtonRef.current?.focus();
-  }, [inspectorOpen]);
+    if (modalOpen) closeButtonRef.current?.focus();
+  }, [modalOpen]);
 
   return (
     <Surface variant="window" className="adaptive-workbench" data-mode={currentMode}>
       {!mobile ? (
-        <nav className="workbench-rail" aria-label="主导航" aria-hidden={inspectorOpen || undefined} inert={inspectorOpen || undefined}>
+        <nav className="workbench-rail" aria-label="主导航" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
           {navigation}
         </nav>
       ) : (
-        <header className="mobile-toolbar" data-visible={mobileChrome.visible} aria-hidden={inspectorOpen || undefined} inert={inspectorOpen || undefined}>
+        <header className="mobile-toolbar" data-visible={mobileChrome.visible} aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
           <strong>Nexus Notes</strong>
           {inspector && !inspectorOpen ? (
-            <button type="button" onClick={onInspectorOpen}>检查器</button>
+            <button type="button" onClick={(event) => onInspectorOpen?.(event.currentTarget)}>检查器</button>
           ) : null}
         </header>
       )}
 
       {currentMode === "desktop" && contextualList ? (
-        <aside className="workbench-context" aria-label="上下文列表" aria-hidden={inspectorOpen || undefined} inert={inspectorOpen || undefined}>
+        <aside className="workbench-context" aria-label="上下文列表" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
           {contextualList}
         </aside>
       ) : null}
 
       {currentMode === "tablet" && activePane === "context" && contextualList ? (
-        <aside className="workbench-context-drawer" aria-label="上下文列表" data-testid="task-pane" aria-hidden={inspectorOpen || undefined} inert={inspectorOpen || undefined}>
+        <aside className="workbench-context-drawer" aria-label="上下文列表" data-testid="task-pane" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
           {contextualList}
         </aside>
       ) : null}
 
       {mobile ? (
         activePane === "context" && contextualList ? (
-          <main className="workbench-context-mobile" data-testid="task-pane" data-scroll-owner={inspectorOpen ? undefined : "page"} aria-hidden={inspectorOpen || undefined} inert={inspectorOpen || undefined}>
+          <main className="workbench-context-mobile" data-testid="task-pane" data-scroll-owner={modalOpen ? undefined : "page"} aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
             {contextualList}
           </main>
         ) : (
-          <Canvas mobile modalOpen={inspectorOpen}>{children}</Canvas>
+          <Canvas mobile modalOpen={modalOpen}>{children}</Canvas>
         )
       ) : (
-        <Canvas modalOpen={inspectorOpen}>{children}</Canvas>
+        <Canvas modalOpen={modalOpen}>{children}</Canvas>
       )}
 
-      {inspectorOpen && inspector ? (
+      {modalOpen ? (
         <div className="inspector-backdrop" onMouseDown={onInspectorClose} onKeyDown={(event) => { if (event.key === "Escape") onInspectorClose(); }}>
           <Surface
             as="aside"
@@ -109,7 +110,7 @@ export function AdaptiveWorkbench({
       ) : null}
 
       {mobile ? (
-        <nav className="mobile-bottom-nav" data-visible={mobileChrome.visible} aria-label="移动端主导航" aria-hidden={inspectorOpen || undefined} inert={inspectorOpen || undefined}>
+        <nav className="mobile-bottom-nav" data-visible={mobileChrome.visible} aria-label="移动端主导航" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
           <button type="button" onClick={() => onActivePaneChange?.("canvas")}>首页</button>
           <button type="button">搜索</button>
           <button type="button">创建</button>

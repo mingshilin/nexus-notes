@@ -36,6 +36,24 @@ describe("live knowledge recovery", () => {
     expect(previousSignal.aborted).toBe(true);
   });
 
+  it("clears an old attachment cursor when a new MIME query fails", async () => {
+    let attachmentCalls = 0;
+    const apiClient = { request: vi.fn((request: { path: string }) => {
+      if (request.path.startsWith("/api/v2/attachments")) {
+        attachmentCalls += 1;
+        return attachmentCalls === 1 ? Promise.resolve(attachment("attachment-1", "old-cursor")) : Promise.reject(new Error("filtered load failed"));
+      }
+      return Promise.resolve(diagnostic());
+    }) };
+    render(<App authClient={authClient as any} apiClient={apiClient as any} workspaceId="ws-1" turnstileSiteKey="test" />);
+
+    await screen.findByRole("button", { name: "加载更多附件" });
+    fireEvent.change(screen.getByRole("combobox", { name: "附件类型过滤" }), { target: { value: "application/pdf" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("附件暂时无法加载");
+    expect(screen.queryByRole("button", { name: "加载更多附件" })).not.toBeInTheDocument();
+    expect(apiClient.request.mock.calls.some(([request]) => request.path.includes("cursor=old-cursor") && request.path.includes("mime_type=application%2Fpdf"))).toBe(false);
+  });
+
   it("appends the requested attachment cursor and keeps the prior page retryable after a pagination failure", async () => {
     let attachmentCalls = 0;
     const apiClient = { request: vi.fn((request: { path: string }) => {
@@ -99,5 +117,16 @@ describe("live knowledge recovery", () => {
     expect(document.querySelectorAll('[data-scroll-owner]')).toHaveLength(1);
     expect(dialog).toHaveAttribute("data-scroll-owner", "inspector");
     expect(dialog).toHaveClass("workbench-inspector");
+  });
+
+  it("returns focus to the inspector opener after closing", async () => {
+    const apiClient = { request: vi.fn(async (request: { path: string }) => request.path.startsWith("/api/v2/attachments") ? attachment("attachment-1") : diagnostic()) };
+    render(<App authClient={authClient as any} apiClient={apiClient as any} workspaceId="ws-1" turnstileSiteKey="test" />);
+
+    const opener = await screen.findByRole("button", { name: "打开检查器" });
+    fireEvent.click(opener);
+    fireEvent.click(await screen.findByRole("button", { name: "关闭检查器" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "检查器" })).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(opener);
   });
 });

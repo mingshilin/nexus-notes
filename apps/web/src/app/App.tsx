@@ -71,6 +71,22 @@ function AuthenticatedWorkspace({
   const [retryingIds, setRetryingIds] = useState<Set<string>>(new Set());
   const [refreshVersion, setRefreshVersion] = useState(0);
   const requestControllers = useRef(new Set<AbortController>());
+  const attachmentQueryIdentity = useRef<string | null>(null);
+  const inspectorOpenerRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!inspectorOpen && inspectorOpenerRef.current) {
+      inspectorOpenerRef.current.focus();
+      inspectorOpenerRef.current = null;
+    }
+  }, [inspectorOpen]);
+
+  const openInspector = (opener?: HTMLElement) => {
+    inspectorOpenerRef.current = opener ?? null;
+    setInspectorOpen(true);
+  };
+
+  const closeInspector = () => setInspectorOpen(false);
 
   const abortRecoveryRequests = () => {
     requestControllers.current.forEach((controller) => controller.abort());
@@ -93,6 +109,11 @@ function AuthenticatedWorkspace({
 
   useEffect(() => {
     abortRecoveryRequests();
+    const nextQueryIdentity = `${workspaceId ?? ""}\u0000${filters.mimeType}\u0000${filters.ocrStatus}`;
+    if (attachmentQueryIdentity.current !== null && attachmentQueryIdentity.current !== nextQueryIdentity) {
+      setAttachmentCursor(null);
+    }
+    attachmentQueryIdentity.current = nextQueryIdentity;
     if (!workspaceId) {
       setAttachments([]);
       setDiagnostics([]);
@@ -278,15 +299,15 @@ function AuthenticatedWorkspace({
         inspectorOpen={inspectorOpen}
         activePane={activePane}
         onActivePaneChange={setActivePane}
-        onInspectorOpen={() => setInspectorOpen(true)}
-        onInspectorClose={() => setInspectorOpen(false)}
+        onInspectorOpen={openInspector}
+        onInspectorClose={closeInspector}
       >
         <article className="editor-document">
           <header className="editor-toolbar">
             <span className="saved-state"><span /> 已保存</span>
             <div>
               <button type="button" aria-label="通知"><Bell size={17} /></button>
-              <button type="button" aria-label="打开检查器" onClick={() => setInspectorOpen(true)}><Boxes size={17} /></button>
+              <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>
             </div>
           </header>
           <div className="editor-copy">

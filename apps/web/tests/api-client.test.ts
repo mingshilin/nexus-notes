@@ -50,6 +50,41 @@ describe("ApiClient", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
+  it("starts a fresh controlled fetch when an active query signal was aborted", async () => {
+    const web = await loadWeb();
+    const pending: Array<{ resolve(response: Response): void; reject(error: unknown): void }> = [];
+    const fetchImpl = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((resolve, reject) => {
+      pending.push({ resolve, reject });
+      (init.signal as AbortSignal).addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    const firstController = new AbortController();
+    const first = client.request<{ items: string[] }>({
+      path: "/api/v2/knowledge/diagnostics?limit=50",
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "diagnostics:ws-1", signal: firstController.signal },
+    });
+    const firstRejected = first.then(
+      () => { throw new Error("Expected the aborted query to reject"); },
+      (error) => error,
+    );
+
+    firstController.abort();
+    const second = client.request<{ items: string[] }>({
+      path: "/api/v2/knowledge/diagnostics?limit=50",
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "diagnostics:ws-1", signal: new AbortController().signal },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    pending[1]?.resolve(success({ items: ["fresh"] }));
+    await expect(second).resolves.toEqual({ items: ["fresh"] });
+    await expect(firstRejected).resolves.toMatchObject({ name: "AbortError" });
+  });
+
   it("retries retryable GET failures up to the policy bound", async () => {
     const web = await loadWeb();
     const responses = [unavailable(), unavailable(), success({ id: "note-1" })];

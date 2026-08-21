@@ -108,4 +108,25 @@ describe("adaptive workbench", () => {
     expect(screen.getByTestId("task-pane")).toHaveTextContent("Notes");
     expect(container.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);
   });
+
+  it("keeps the page active when inspectorOpen has no inspector content", async () => {
+    const web = await loadWeb();
+    const AdaptiveWorkbench = web.AdaptiveWorkbench as ComponentType<WorkbenchProps>;
+    const { container } = render(createElement(
+      AdaptiveWorkbench,
+      {
+        mode: "desktop",
+        navigation: "Navigation",
+        contextualList: "Notes",
+        inspector: undefined,
+        inspectorOpen: true,
+        onInspectorClose: vi.fn(),
+      },
+      "Editor",
+    ));
+
+    expect(screen.queryByRole("dialog", { name: "检查器" })).not.toBeInTheDocument();
+    expect(container.querySelector(".workbench-canvas")).not.toHaveAttribute("aria-hidden");
+    expect(container.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);
+  });
 });

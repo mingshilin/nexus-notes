@@ -81,7 +81,7 @@ export class ApiClient {
   private readonly fetchImpl: typeof fetch;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly random: () => number;
-  private readonly activeQueries = new Map<string, Promise<unknown>>();
+  private readonly activeQueries = new Map<string, { promise: Promise<unknown>; signal?: AbortSignal }>();
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = options.baseUrl?.replace(/\/$/, "") ?? "";
@@ -94,15 +94,17 @@ export class ApiClient {
     const dedupeKey = options.requestClass === "query" ? options.policy.dedupeKey : undefined;
     if (dedupeKey) {
       const active = this.activeQueries.get(dedupeKey);
-      if (active) return active as Promise<T>;
+      if (active && !active.signal?.aborted) return active.promise as Promise<T>;
+      if (active) this.activeQueries.delete(dedupeKey);
     }
 
     const promise = this.execute<T>(options);
     if (!dedupeKey) return promise;
 
-    this.activeQueries.set(dedupeKey, promise);
+    const active = { promise, signal: options.policy.signal };
+    this.activeQueries.set(dedupeKey, active);
     return promise.finally(() => {
-      if (this.activeQueries.get(dedupeKey) === promise) this.activeQueries.delete(dedupeKey);
+      if (this.activeQueries.get(dedupeKey) === active) this.activeQueries.delete(dedupeKey);
     });
   }
 

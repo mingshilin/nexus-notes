@@ -131,6 +131,33 @@ Miniflare initially rejected the future compatibility date and multiline `D1Data
 | `npm run typecheck --workspace=@nexus/contracts` | PASS. |
 | `git diff --check` | PASS. |
 
+## Task 6C A2.2 Re-review Fix
+
+### Scope
+
+Web-only correction of race, cursor, modal, and focus findings from `task-6c-a22-rereview.md`. Active workspace auth/session remains out of scope.
+
+### TDD RED / GREEN
+
+| Finding | RED observed | GREEN evidence |
+| --- | --- | --- |
+| Aborted query dedupe | Real `ApiClient` controlled-fetch reused an aborted diagnostics promise, so the replacement fetch count remained 1. | The replacement query starts fetch 2 and resolves fresh data. |
+| Filter cursor identity | A failed MIME-filter load retained the prior cursor and left its pagination control visible. | Filter changes clear the attachment cursor; same-query pagination failures retain it. |
+| Modal state and focus | `inspectorOpen` without inspector content inerted the page; closing a dialog left focus on `body`. | `modalOpen = inspectorOpen && Boolean(inspector)` controls inert/owners/dialog; the recorded opener regains focus. |
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/web -- tests/api-client.test.ts tests/knowledge-client.test.ts tests/knowledge-recovery-panel.test.tsx tests/knowledge-recovery-live.test.tsx tests/app-auth-bootstrap.test.tsx tests/adaptive-workbench.test.tsx` | PASS, 30 tests in 6 files. |
+| `npm run typecheck --workspace=@nexus/web` | PASS. |
+| `npm run build --workspace=@nexus/web` | PASS. |
+| `git diff --check` | PASS. |
+
+### Task 11 Gate
+
+- Add a repeatable committed browser/e2e harness before accepting 390px/200% overflow as a release gate. This review fix does not treat CSS or jsdom assertions as browser-level proof.
+
 Implementation commit: `edf61cc` (`fix: harden beta attachment consistency`).
 
 ### Still Failing / Not Completed
