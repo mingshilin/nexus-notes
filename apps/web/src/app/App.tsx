@@ -329,7 +329,7 @@ function AuthenticatedWorkspace({
 export function App({
   authClient = defaultAuthClient,
   apiClient = new ApiClient(),
-  workspaceId = import.meta.env.VITE_WORKSPACE_ID,
+  workspaceId,
   turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "",
   resetToken = resetTokenFromLocation(),
   onDiagnosticNavigate,
@@ -343,7 +343,17 @@ export function App({
 } = {}) {
   return (
     <AuthGate client={authClient} turnstileSiteKey={turnstileSiteKey} resetToken={resetToken}>
-      <AuthenticatedWorkspace key={workspaceId ?? "no-active-workspace"} apiClient={apiClient} workspaceId={workspaceId} onDiagnosticNavigate={onDiagnosticNavigate} />
+      {(session) => {
+        const activeWorkspaceId = workspaceId ?? session.active_workspace_id;
+        return (
+          <AuthenticatedWorkspace
+            key={activeWorkspaceId ?? "no-active-workspace"}
+            apiClient={apiClient}
+            workspaceId={activeWorkspaceId ?? undefined}
+            onDiagnosticNavigate={onDiagnosticNavigate}
+          />
+        );
+      }}
     </AuthGate>
   );
 }

@@ -1,11 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
+import type { AuthSession } from "@nexus/contracts";
 import { AuthPanel } from "./AuthPanel";
-import type { AuthClient, AuthUser } from "./auth-client";
+import type { AuthClient } from "./auth-client";
 
 type AuthState =
   | { status: "loading" }
   | { status: "anonymous" }
-  | { status: "authenticated"; user: AuthUser }
+  | { status: "authenticated"; session: AuthSession }
   | { status: "error" };
 
 function isUnauthenticated(error: unknown) {
@@ -23,7 +24,7 @@ export function AuthGate({
   client: AuthClient;
   turnstileSiteKey: string;
   resetToken?: string;
-  children: ReactNode;
+  children: ReactNode | ((session: AuthSession) => ReactNode);
 }) {
   const [state, setState] = useState<AuthState>({ status: "loading" });
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
@@ -33,8 +34,8 @@ export function AuthGate({
     setState({ status: "loading" });
 
     void client.session().then(
-      ({ user }) => {
-        if (active) setState({ status: "authenticated", user });
+      (session) => {
+        if (active) setState({ status: "authenticated", session });
       },
       (error: unknown) => {
         if (!active) return;
@@ -64,12 +65,12 @@ export function AuthGate({
     return (
       <AuthPanel
         client={client}
-        onAuthenticated={(user) => setState({ status: "authenticated", user })}
+        onAuthenticated={() => setBootstrapAttempt((attempt) => attempt + 1)}
         turnstileSiteKey={turnstileSiteKey}
         resetToken={resetToken}
       />
     );
   }
 
-  return <>{children}</>;
+  return <>{typeof children === "function" ? children(state.session) : children}</>;
 }

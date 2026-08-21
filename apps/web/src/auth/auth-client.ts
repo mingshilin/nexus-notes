@@ -1,20 +1,21 @@
 import type { ApiClient } from "../data/api-client";
+import {
+  AuthSessionSchema,
+  type AuthSession,
+  type AuthUserSummary,
+} from "@nexus/contracts";
 
-export interface AuthUser {
-  id: string;
-  email: string;
-  displayName?: string;
-}
+export type AuthUser = AuthUserSummary;
 
 export class AuthClient {
   constructor(private readonly client: Pick<ApiClient, "request">) {}
 
-  session() {
-    return this.client.request<{ user: AuthUser }>({
+  session(): Promise<AuthSession> {
+    return this.client.request<unknown>({
       path: "/api/v2/auth/session",
       requestClass: "query",
       policy: { timeoutMs: 8_000, retry: 1, dedupeKey: "auth:session" },
-    });
+    }).then((session) => AuthSessionSchema.parse(session));
   }
 
   login(input: { email: string; password: string; turnstileToken?: string }) {

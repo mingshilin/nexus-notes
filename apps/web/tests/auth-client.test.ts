@@ -7,6 +7,41 @@ async function loadWeb() {
 }
 
 describe("AuthClient", () => {
+  it("parses and returns the complete shared auth session", async () => {
+    const web = await loadWeb();
+    const request = vi.fn(async () => ({
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+      workspaces: [{ id: "workspace-1", name: "Personal", slug: "personal", role: "owner", revision: 1 }],
+      active_workspace_id: "workspace-1",
+    }));
+    const Client = web.AuthClient as new (client: unknown) => {
+      session(): Promise<{
+        user: { id: string; email: string; displayName: string };
+        workspaces: Array<{ id: string; name: string; slug: string; role: string; revision: number }>;
+        active_workspace_id: string | null;
+      }>;
+    };
+    const client = new Client({ request });
+
+    await expect(client.session()).resolves.toEqual({
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+      workspaces: [{ id: "workspace-1", name: "Personal", slug: "personal", role: "owner", revision: 1 }],
+      active_workspace_id: "workspace-1",
+    });
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/auth/session" }));
+  });
+
+  it("rejects a session payload that violates the shared contract", async () => {
+    const web = await loadWeb();
+    const request = vi.fn(async () => ({
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+      workspaces: [],
+    }));
+    const Client = web.AuthClient as new (client: unknown) => { session(): Promise<unknown> };
+
+    await expect(new Client({ request }).session()).rejects.toThrow();
+  });
+
   it("does not send Turnstile for ordinary login unless a challenge token exists", async () => {
     const web = await loadWeb();
     expect(web.AuthClient).toBeTypeOf("function");

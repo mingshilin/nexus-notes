@@ -427,3 +427,33 @@ Web-only correction of the three Important findings in `task-6c-a22-review.md`. 
 | `npm run typecheck --workspace=@nexus/web` | PASS. |
 | `npm run build --workspace=@nexus/web` | PASS. |
 | `git diff --check` | PASS. |
+
+## Task 5B: Active Workspace Web Binding
+
+### Scope
+
+Web-only active-workspace binding from the Task 5A server session contract. No Worker, schema, invitation/member-management, deployment, or Task 8 changes were made.
+
+### TDD RED / GREEN
+
+| Requirement | RED evidence | GREEN evidence |
+| --- | --- | --- |
+| Full typed session parsing | apps/web/tests/auth-client.test.ts accepted a payload without active_workspace_id; AuthClient.session() returned it unchanged. | The same focused test rejects malformed payloads and returns the full parsed AuthSession. |
+| Gate session render path and post-login refresh | apps/web/tests/auth-gate.test.tsx rendered function children as invalid React children and rendered authenticated content from the login response without a second session request. | ReactNode children remain supported; typed render props receive the parsed session; post-login refresh blocks children, and a network failure exposes retry without invented workspace data. |
+| Server workspace binding and safe transitions | apps/web/tests/app-auth-bootstrap.test.tsx made no requests for a server-only active id, still used VITE_WORKSPACE_ID, and could not transition request headers through a refreshed session. | App derives the active id from session.active_workspace_id, ignores VITE_WORKSPACE_ID, keeps no-workspace requests at zero, and keys the workspace shell so old recovery requests abort before the new tenant loads. |
+
+### Implemented
+
+- AuthClient.session() validates /api/v2/auth/session using shared AuthSessionSchema and exposes AuthSession/AuthUserSummary types.
+- AuthGate stores the complete session, supports typed render-prop children in addition to ReactNode children, and refreshes session state after AuthPanel reports authentication. Refresh failures stay retryable and never synthesize a workspace.
+- App has no production workspace environment fallback. Its optional explicit workspaceId prop remains an embedding/test override; otherwise session.active_workspace_id drives the keyed authenticated workspace shell.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| npm run test --workspace=@nexus/web -- tests/auth-client.test.ts tests/auth-gate.test.tsx tests/auth-panel.test.tsx tests/auth-mobile-overflow.test.ts tests/app-auth-bootstrap.test.tsx tests/knowledge-recovery-panel.test.tsx tests/knowledge-recovery-live.test.tsx | PASS, 35 tests in 7 files. |
+| npm run typecheck --workspace=@nexus/web | PASS. |
+| npm run build --workspace=@nexus/web | PASS. |
+| npm run typecheck --workspace=@nexus/contracts | PASS. |
+| git diff --check | PASS. |

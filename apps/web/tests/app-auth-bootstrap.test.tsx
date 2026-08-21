@@ -1,6 +1,14 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
+
+const authenticatedSession = (activeWorkspaceId: string | null) => ({
+  user: { id: "user-1", email: "user@example.com", displayName: "User" },
+  workspaces: activeWorkspaceId ? [{ id: activeWorkspaceId, name: "Personal", slug: "personal", role: "owner" as const, revision: 1 }] : [],
+  active_workspace_id: activeWorkspaceId,
+});
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe("App authentication bootstrap", () => {
   it("gates the workspace behind the server session result", async () => {
@@ -27,6 +35,16 @@ describe("App authentication bootstrap", () => {
 
     expect(await screen.findByRole("heading", { name: "Public Beta 重写计划", level: 1 })).toBeInTheDocument();
     expect(authClient.session).toHaveBeenCalledOnce();
+  });
+
+  it("uses the server active workspace id when no embedding override is supplied", async () => {
+    const authClient = { session: vi.fn(async () => authenticatedSession("server-workspace")) };
+    const apiClient = { request: vi.fn(async () => ({ items: [], next_cursor: null })) };
+
+    render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledTimes(2));
+    expect(apiClient.request.mock.calls.every(([request]: [{ headers: Record<string, string> }]) => request.headers["x-workspace-id"] === "server-workspace")).toBe(true);
   });
 
   it("mounts live attachment recovery for the active workspace", async () => {
@@ -60,14 +78,26 @@ describe("App authentication bootstrap", () => {
     expect(apiClient.request).not.toHaveBeenCalled();
   });
 
+  it("does not use VITE_WORKSPACE_ID when the server reports no active workspace", async () => {
+    vi.stubEnv("VITE_WORKSPACE_ID", "environment-workspace");
+    const authClient = { session: vi.fn(async () => authenticatedSession(null)) };
+    const apiClient = { request: vi.fn() };
+
+    render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+
+    expect(await screen.findByText("未选择工作区，无法加载恢复数据。")).toBeInTheDocument();
+    expect(apiClient.request).not.toHaveBeenCalled();
+  });
+
   it("aborts stale recovery requests when the active workspace changes", async () => {
-    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" } })) };
+    const authClient = { session: vi.fn(async () => authenticatedSession("ws-1")) };
+    const refreshedAuthClient = { session: vi.fn(async () => authenticatedSession("ws-2")) };
     const apiClient = { request: vi.fn(() => new Promise(() => undefined)) };
-    const { rerender } = render(<App authClient={authClient as any} apiClient={apiClient as any} workspaceId="ws-1" turnstileSiteKey="test" />);
+    const { rerender } = render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
 
     await waitFor(() => expect(apiClient.request).toHaveBeenCalledTimes(2));
     const staleSignal = apiClient.request.mock.calls[0]?.[0].policy.signal as AbortSignal;
-    rerender(<App authClient={authClient as any} apiClient={apiClient as any} workspaceId="ws-2" turnstileSiteKey="test" />);
+    rerender(<App authClient={refreshedAuthClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
 
     await waitFor(() => expect(apiClient.request).toHaveBeenCalledTimes(4));
     expect(staleSignal.aborted).toBe(true);
