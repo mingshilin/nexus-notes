@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { MAX_UPLOAD_BYTES } from "@nexus/contracts";
 
+import { createTestD1, seedTenants } from "./helpers/d1";
+
 type WorkerExports = Record<string, unknown>;
 
 async function loadWorker() {
@@ -124,5 +126,61 @@ describe("v2 attachment routes", () => {
     expect((await response.json()).error.code).toBe("ATTACHMENT_FILE_TOO_LARGE");
     expect(cancel).toHaveBeenCalledOnce();
     expect(uploadContent).not.toHaveBeenCalled();
+  });
+
+  it("denies metadata and file routes after real D1 deletion removes fake R2 content", async () => {
+    const testD1 = await createTestD1();
+    try {
+      await seedTenants(testD1.db);
+      const worker = await loadWorker();
+      const objects = new Map<string, Uint8Array>();
+      const files = {
+        async put(key: string, value: ArrayBuffer | ArrayBufferView) {
+          const bytes = value instanceof ArrayBuffer
+            ? new Uint8Array(value)
+            : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+          objects.set(key, bytes.slice());
+        },
+        async get(key: string) {
+          const bytes = objects.get(key);
+          return bytes ? { body: new Response(bytes).body! } : null;
+        },
+        async delete(key: string) { objects.delete(key); },
+      };
+      const repository = new (worker.D1AttachmentRepository as any)(testD1.db, () => "attachment-real");
+      const service = new (worker.AttachmentService as any)(repository, files, { clock: () => new Date("2026-08-21T00:00:00.000Z") });
+      const attachment = await service.createUpload({ workspaceId: "ws-1", userId: "user-1" }, {
+        filename: "real.pdf",
+        mime_type: "application/pdf",
+        size_bytes: 5,
+        idempotency_key: "real-upload",
+      });
+      await service.uploadContent(
+        { workspaceId: "ws-1", userId: "user-1" },
+        attachment.id,
+        new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]),
+      );
+      const registry = (worker.createRouteRegistry as any)({
+        requestId: () => "req-real-delete",
+        authenticate: vi.fn(async () => ({ userId: "user-1" })),
+        authorizeWorkspace: vi.fn(async () => workspace),
+      });
+      (worker.registerAttachmentRoutes as any)(registry, () => service);
+      const metadataPath = `/api/v2/attachments/${attachment.id}`;
+      const filePath = `${metadataPath}/file`;
+
+      expect((await registry.fetch(request(metadataPath), {})).status).toBe(200);
+      expect((await registry.fetch(request(filePath), {})).status).toBe(200);
+      expect((await registry.fetch(request(metadataPath, { method: "DELETE" }), {})).status).toBe(200);
+
+      const metadata = await registry.fetch(request(metadataPath), {});
+      const file = await registry.fetch(request(filePath), {});
+      expect([metadata.status, file.status]).toEqual([404, 404]);
+      expect((await metadata.json()).error.code).toBe("ATTACHMENT_NOT_FOUND");
+      expect((await file.json()).error.code).toBe("ATTACHMENT_NOT_FOUND");
+      expect(objects).toHaveProperty("size", 0);
+    } finally {
+      await testD1.dispose();
+    }
   });
 });

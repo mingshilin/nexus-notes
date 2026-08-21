@@ -59,6 +59,9 @@ function ocrOutboxId(job: Pick<OcrJobRow, "workspace_id" | "id" | "attempt_count
   return `ocr-outbox:${job.workspace_id}:${job.id}:${job.attempt_count}`;
 }
 
+const MAX_OCR_ATTEMPTS = 3;
+const OCR_ATTEMPT_TIMEOUT_MS = 10 * 60_000;
+
 export class D1AttachmentRepositoryError extends Error {
   constructor(readonly code: "ATTACHMENT_NOTE_NOT_FOUND" | "ATTACHMENT_QUOTA_EXCEEDED") {
     super(code);
@@ -142,7 +145,7 @@ export class D1AttachmentRepository {
     if (!attachment || attachment.mime_type === "text/plain") return null;
     const idempotencyKey = `ocr:${workspaceId}:${attachmentId}:${attachment.revision}`;
     const id = this.createId();
-    const deadline = new Date(Date.parse(now) + 10 * 60_000).toISOString();
+    const deadline = new Date(Date.parse(now) + OCR_ATTEMPT_TIMEOUT_MS).toISOString();
     const candidate: OcrJobRow = {
       id,
       workspace_id: workspaceId,
@@ -214,33 +217,97 @@ export class D1AttachmentRepository {
   }
 
   async completeOcrJob(workspaceId: string, jobId: string, text: string, now: string) {
-    const completed = await this.db.prepare(
-      `UPDATE beta_ocr_jobs SET status = 'completed', last_error_code = NULL, revision = revision + 1, updated_at = ?
-       WHERE workspace_id = ? AND id = ? AND status = 'processing'
-       AND EXISTS (
-         SELECT 1 FROM beta_attachments a
-         WHERE a.workspace_id = beta_ocr_jobs.workspace_id AND a.id = beta_ocr_jobs.attachment_id
-         AND a.status = 'ready' AND a.revision = beta_ocr_jobs.source_revision
-       )`,
-    ).bind(now, workspaceId, jobId).run();
-    if (Number(completed.meta.changes ?? 0) === 0) return false;
-    await this.db.prepare(
-      `INSERT INTO search_documents (id, workspace_id, entity_type, entity_id, title, ocr_text, revision, updated_at)
-       SELECT 'attachment:' || a.id, a.workspace_id, 'attachment', a.id, a.filename, ?, a.revision, ?
-       FROM beta_ocr_jobs j JOIN beta_attachments a ON a.workspace_id = j.workspace_id AND a.id = j.attachment_id
-       WHERE j.workspace_id = ? AND j.id = ? AND j.status = 'completed'
-       AND a.status = 'ready' AND a.revision = j.source_revision
-       ON CONFLICT(workspace_id, entity_type, entity_id) DO UPDATE SET ocr_text = excluded.ocr_text, revision = excluded.revision, updated_at = excluded.updated_at`,
-    ).bind(text, now, workspaceId, jobId).run();
-    return true;
+    const results = await this.db.batch([
+      this.db.prepare(
+        `UPDATE beta_ocr_jobs SET status = 'completed', last_error_code = NULL, revision = revision + 1, updated_at = ?
+         WHERE workspace_id = ? AND id = ? AND status = 'processing'
+         AND EXISTS (
+           SELECT 1 FROM beta_attachments a
+           WHERE a.workspace_id = beta_ocr_jobs.workspace_id AND a.id = beta_ocr_jobs.attachment_id
+           AND a.status = 'ready' AND a.revision = beta_ocr_jobs.source_revision
+         )`,
+      ).bind(now, workspaceId, jobId),
+      this.db.prepare(
+        `INSERT INTO search_documents (id, workspace_id, entity_type, entity_id, title, ocr_text, revision, updated_at)
+         SELECT 'attachment:' || a.id, a.workspace_id, 'attachment', a.id, a.filename, ?, a.revision, ?
+         FROM beta_ocr_jobs j JOIN beta_attachments a ON a.workspace_id = j.workspace_id AND a.id = j.attachment_id
+         WHERE j.workspace_id = ? AND j.id = ? AND j.status = 'completed' AND j.updated_at = ?
+         AND a.status = 'ready' AND a.revision = j.source_revision
+         ON CONFLICT(workspace_id, entity_type, entity_id) DO UPDATE SET
+         ocr_text = excluded.ocr_text, revision = excluded.revision, updated_at = excluded.updated_at`,
+      ).bind(text, now, workspaceId, jobId, now),
+    ]);
+    return Number(results[0]?.meta.changes ?? 0) > 0;
   }
 
   async failOcrJob(workspaceId: string, jobId: string, code: string, now: string) {
     await this.db.prepare(
-      `UPDATE beta_ocr_jobs SET status = CASE WHEN attempt_count >= 3 THEN 'dead_letter' ELSE 'failed' END,
+      `UPDATE beta_ocr_jobs SET status = CASE WHEN attempt_count >= ? THEN 'dead_letter' ELSE 'failed' END,
        last_error_code = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND id = ? AND status = 'processing'`,
-    ).bind(code, now, workspaceId, jobId).run();
+    ).bind(MAX_OCR_ATTEMPTS, code, now, workspaceId, jobId).run();
+  }
+
+  async recoverStaleOcrJobs(now: string, limit: number) {
+    const jobs = (await this.db.prepare(
+      `SELECT j.id, j.workspace_id, j.attachment_id, j.source_revision, j.status, j.idempotency_key,
+       j.attempt_count, j.deadline, j.revision
+       FROM beta_ocr_jobs j
+       JOIN beta_attachments a ON a.workspace_id = j.workspace_id AND a.id = j.attachment_id
+       WHERE j.status IN ('pending', 'processing') AND j.deadline <= ?
+       AND a.status = 'ready' AND a.revision = j.source_revision
+       ORDER BY j.deadline, j.id LIMIT ?`,
+    ).bind(now, limit).all<OcrJobRow>()).results ?? [];
+    let requeued = 0;
+    let deadLettered = 0;
+    for (const job of jobs) {
+      if (job.attempt_count >= MAX_OCR_ATTEMPTS) {
+        const results = await this.db.batch([
+          this.db.prepare(
+            `UPDATE beta_ocr_jobs SET status = 'dead_letter', last_error_code = 'OCR_ATTEMPTS_EXHAUSTED',
+             revision = revision + 1, updated_at = ?
+             WHERE workspace_id = ? AND id = ? AND source_revision = ? AND status = ? AND revision = ? AND deadline = ?`,
+          ).bind(now, job.workspace_id, job.id, job.source_revision, job.status, job.revision, job.deadline),
+          this.db.prepare(
+            `DELETE FROM queue_outbox WHERE job_kind = 'ocr' AND published_at IS NULL
+             AND json_extract(payload_json, '$.job_id') = ? AND json_extract(payload_json, '$.attempt') = ?`,
+          ).bind(job.id, job.attempt_count),
+        ]);
+        if (Number(results[0]?.meta.changes ?? 0) > 0) deadLettered += 1;
+        continue;
+      }
+
+      const candidate: OcrJobRow = {
+        ...job,
+        status: "pending",
+        attempt_count: job.attempt_count + 1,
+        deadline: new Date(Date.parse(now) + OCR_ATTEMPT_TIMEOUT_MS).toISOString(),
+        revision: job.revision + 1,
+      };
+      const outboxId = ocrOutboxId(candidate);
+      const results = await this.db.batch([
+        this.db.prepare(
+          `UPDATE beta_ocr_jobs SET status = 'pending', attempt_count = ?, deadline = ?, last_error_code = NULL,
+           revision = revision + 1, updated_at = ?
+           WHERE workspace_id = ? AND id = ? AND source_revision = ? AND status = ? AND revision = ? AND deadline = ?`,
+        ).bind(candidate.attempt_count, candidate.deadline, now, job.workspace_id, job.id, job.source_revision,
+          job.status, job.revision, job.deadline),
+        this.db.prepare(
+          `DELETE FROM queue_outbox WHERE job_kind = 'ocr' AND published_at IS NULL
+           AND json_extract(payload_json, '$.job_id') = ? AND json_extract(payload_json, '$.attempt') = ?`,
+        ).bind(job.id, job.attempt_count),
+        this.db.prepare(
+          `INSERT INTO queue_outbox (id, workspace_id, job_kind, idempotency_key, payload_json, available_at, published_at, attempt, created_at)
+           SELECT ?, workspace_id, 'ocr', ?, ?, ?, NULL, 0, ? FROM beta_ocr_jobs
+           WHERE workspace_id = ? AND id = ? AND source_revision = ? AND status = 'pending'
+           AND revision = ? AND attempt_count = ? AND deadline = ?
+           ON CONFLICT(idempotency_key) DO NOTHING`,
+        ).bind(outboxId, outboxId, JSON.stringify(ocrMessage(candidate)), now, now, job.workspace_id, job.id,
+          job.source_revision, candidate.revision, candidate.attempt_count, candidate.deadline),
+      ]);
+      if (Number(results[0]?.meta.changes ?? 0) > 0) requeued += 1;
+    }
+    return { requeued, dead_lettered: deadLettered };
   }
 
   async deleteAttachment(workspaceId: string, attachmentId: string, now: string) {
@@ -273,7 +340,7 @@ export class D1AttachmentRepository {
         ...job,
         status: "pending",
         attempt_count: job.attempt_count + 1,
-        deadline: new Date(Date.parse(now) + 10 * 60_000).toISOString(),
+        deadline: new Date(Date.parse(now) + OCR_ATTEMPT_TIMEOUT_MS).toISOString(),
         revision: job.revision + 1,
       };
       const outboxId = ocrOutboxId(candidate);

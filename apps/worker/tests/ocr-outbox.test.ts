@@ -166,4 +166,90 @@ describe("D1 OCR source revision and outbox", () => {
       "SELECT published_at, attempt FROM queue_outbox WHERE id = ?",
     ).bind(created!.outbox_id).first()).toEqual({ published_at: now, attempt: 2 });
   });
+
+  it("recovers delayed expired pending delivery once into a new claimable attempt", async () => {
+    const { db, repository, attachmentId } = await fixture();
+    const created = await repository.ensureOcrJob("ws-1", "user-1", attachmentId, now);
+    const original = await persistedMessage(db, created?.outbox_id);
+    await repository.markOcrOutboxDispatched(original.id, now);
+    const late = "2026-08-21T00:11:00.000Z";
+
+    await expect(repository.claimOcrJob(original.message, late)).resolves.toBeNull();
+    const recoveries = await Promise.all([
+      repository.recoverStaleOcrJobs(late, 50),
+      repository.recoverStaleOcrJobs(late, 50),
+    ]);
+    expect(recoveries.reduce((count, result) => count + result.requeued, 0)).toBe(1);
+    expect(recoveries.reduce((count, result) => count + result.dead_lettered, 0)).toBe(0);
+
+    const row = await db.prepare(
+      "SELECT status, attempt_count, deadline, revision FROM beta_ocr_jobs WHERE id = ?",
+    ).bind(original.message.job_id).first();
+    expect(row).toEqual({ status: "pending", attempt_count: 2, deadline: "2026-08-21T00:21:00.000Z", revision: 2 });
+    const next = (await db.prepare(
+      "SELECT payload_json FROM queue_outbox WHERE job_kind = 'ocr' AND published_at IS NULL",
+    ).all<{ payload_json: string }>()).results.map((item) => JSON.parse(item.payload_json) as QueueJob);
+    expect(next).toHaveLength(1);
+    expect(next[0]).toMatchObject({ job_id: original.message.job_id, attempt: 2, deadline: "2026-08-21T00:21:00.000Z" });
+    await expect(repository.claimOcrJob(next[0]!, late)).resolves.toMatchObject({ attempt_count: 2 });
+  });
+
+  it("recovers an abandoned processing claim and terminates an exhausted stale claim", async () => {
+    const { db, repository, attachmentId } = await fixture();
+    const created = await repository.ensureOcrJob("ws-1", "user-1", attachmentId, now);
+    const original = await persistedMessage(db, created?.outbox_id);
+    await repository.markOcrOutboxDispatched(original.id, now);
+    await expect(repository.claimOcrJob(original.message, now)).resolves.not.toBeNull();
+    const late = "2026-08-21T00:11:00.000Z";
+
+    await expect(repository.recoverStaleOcrJobs(late, 50)).resolves.toMatchObject({ requeued: 1, dead_lettered: 0 });
+    const recovered = await db.prepare(
+      "SELECT status, attempt_count, revision FROM beta_ocr_jobs WHERE id = ?",
+    ).bind(original.message.job_id).first();
+    expect(recovered).toEqual({ status: "pending", attempt_count: 2, revision: 3 });
+
+    await db.prepare(
+      "UPDATE beta_ocr_jobs SET status = 'processing', attempt_count = 3, deadline = ?, revision = revision + 1 WHERE id = ?",
+    ).bind("2026-08-21T00:12:00.000Z", original.message.job_id).run();
+    await expect(repository.recoverStaleOcrJobs("2026-08-21T00:13:00.000Z", 50)).resolves.toMatchObject({
+      requeued: 0,
+      dead_lettered: 1,
+    });
+    expect(await db.prepare(
+      "SELECT status, attempt_count, last_error_code FROM beta_ocr_jobs WHERE id = ?",
+    ).bind(original.message.job_id).first()).toEqual({
+      status: "dead_letter",
+      attempt_count: 3,
+      last_error_code: "OCR_ATTEMPTS_EXHAUSTED",
+    });
+    const attemptFour = await db.prepare(
+      "SELECT 1 found FROM queue_outbox WHERE json_extract(payload_json, '$.attempt') = 4",
+    ).first();
+    expect(attemptFour).toBeNull();
+  });
+
+  it("rolls back completed state when the OCR search upsert fails", async () => {
+    const { db, repository, attachmentId } = await fixture();
+    const created = await repository.ensureOcrJob("ws-1", "user-1", attachmentId, now);
+    const original = await persistedMessage(db, created?.outbox_id);
+    await expect(repository.claimOcrJob(original.message, now)).resolves.not.toBeNull();
+    await db.prepare(
+      `CREATE TRIGGER force_attachment_search_failure
+       BEFORE INSERT ON search_documents
+       WHEN NEW.entity_type = 'attachment'
+       BEGIN
+         SELECT RAISE(ABORT, 'forced attachment search failure');
+       END`,
+    ).run();
+
+    await expect(repository.completeOcrJob("ws-1", original.message.job_id, "alpha OCR", now)).rejects.toThrow(
+      /forced attachment search failure/i,
+    );
+    expect(await db.prepare(
+      "SELECT status, revision FROM beta_ocr_jobs WHERE id = ?",
+    ).bind(original.message.job_id).first()).toEqual({ status: "processing", revision: 2 });
+    expect(await db.prepare(
+      "SELECT 1 found FROM search_documents WHERE workspace_id = 'ws-1' AND entity_type = 'attachment' AND entity_id = ?",
+    ).bind(attachmentId).first()).toBeNull();
+  });
 });

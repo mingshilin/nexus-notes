@@ -3,13 +3,14 @@ import { resolve } from "node:path";
 
 import { Miniflare } from "miniflare";
 
-const migrationPaths = [
+export const migrationPaths = [
   "../../migrations/0001_beta_schema.sql",
   "../../migrations/0002_search_document_sync.sql",
   "../../migrations/0003_private_attachments_ocr.sql",
+  "../../migrations/0004_attachment_consistency.sql",
 ];
 
-function splitMigration(sql: string) {
+export function splitMigration(sql: string) {
   const statements: string[] = [];
   let statement = "";
   let trigger = false;
@@ -29,7 +30,12 @@ function splitMigration(sql: string) {
   return statements;
 }
 
-export async function createTestD1() {
+export async function applyMigration(db: D1Database, migrationPath: string) {
+  const sql = readFileSync(resolve(import.meta.dirname, migrationPath), "utf8");
+  for (const statement of splitMigration(sql)) await db.prepare(statement).run();
+}
+
+export async function createTestD1(options: { through?: number } = {}) {
   const miniflare = new Miniflare({
     compatibilityDate: "2026-05-07",
     d1Databases: { DB: "nexus-test" },
@@ -37,10 +43,8 @@ export async function createTestD1() {
     script: "export default { fetch() { return new Response('ok'); } };",
   });
   const db = await miniflare.getD1Database("DB");
-  for (const migrationPath of migrationPaths) {
-    const sql = readFileSync(resolve(import.meta.dirname, migrationPath), "utf8");
-    for (const statement of splitMigration(sql)) await db.prepare(statement).run();
-  }
+  const through = options.through ?? migrationPaths.length;
+  for (const migrationPath of migrationPaths.slice(0, through)) await applyMigration(db, migrationPath);
   return { db, dispose: () => miniflare.dispose() };
 }
 

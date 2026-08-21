@@ -140,3 +140,53 @@ Implementation commit: `edf61cc` (`fix: harden beta attachment consistency`).
 - Cross-tenant and concurrency paths use real local D1, and MIME/stream/path checks have focused service/route coverage, but a combined real-D1 plus R2 delete-then-download and MIME-signature end-to-end matrix is not present.
 - Outbox delivery is intentionally at-least-once: concurrent dispatchers can send the same unpublished row before either marks it, while the full-message consumer CAS prevents duplicate processing.
 - Web filter/loading/retry-refresh work is deferred to Fix A2. OCR image/PDF extraction quality was not changed in this Worker consistency slice. No deploy, readiness, full Beta/Web, or legacy build gates were run.
+
+## Fix A1 Re-review Corrections
+
+### Status
+
+All findings in `task-6c-fixa-review.md` are addressed in this focused Worker/D1 slice. No Web, AI, Task 7, or deployment work was performed.
+
+### TDD RED Evidence
+
+| Finding | RED command | Observed failure before production change |
+| --- | --- | --- |
+| Published migration compatibility | `npm run test --workspace=@nexus/worker -- tests/schema.test.ts tests/d1-attachment-migration.test.ts` | `0004_attachment_consistency.sql` was absent, and old-shape inserts failed because modified 0003 already required `source_revision`. |
+| Expired/crashed OCR recovery | `npm run test --workspace=@nexus/worker -- tests/ocr-outbox.test.ts -t "recovers"` | Both tests failed with `repository.recoverStaleOcrJobs is not a function`. |
+| Atomic completion/search | `npm run test --workspace=@nexus/worker -- tests/ocr-outbox.test.ts -t "rolls back completed state"` | Forced search insert failure left the job incorrectly committed as `completed`, revision 3 instead of `processing`, revision 2. |
+| Guaranteed preview redrive | `npm run test --workspace=@nexus/worker -- tests/preview-config.test.ts -t "redrives"` | Preview config had no `[triggers]` cron entry. |
+| Exact legacy-key backfill | `npm run test --workspace=@nexus/worker -- tests/d1-attachment-migration.test.ts` | A legacy attachment id containing `_` was treated as a SQL `LIKE` wildcard and incorrectly backfilled source revision 9 instead of attachment revision 6. |
+
+The real D1 + fake R2 delete-then-download route test passed on its first run. This review item was a missing integration-evidence finding; existing production deletion behavior required no change, so no artificial RED was manufactured.
+
+### Implemented Design
+
+- Restored `0003_private_attachments_ocr.sql` byte-for-byte to its published shape. New `0004_attachment_consistency.sql` rebuilds the OCR table with `source_revision` and `(workspace_id, attachment_id, source_revision)` uniqueness, parses exact legacy idempotency prefixes, falls back to attachment revision, and preserves canonical row status/attempt/revision/timestamps.
+- Old user-scoped duplicates are ranked deterministically; the canonical generation remains active and every displaced row is preserved in `beta_ocr_jobs_0003_duplicates` with its original state and timestamps. `queue_outbox` and its ready index are guaranteed with `IF NOT EXISTS`.
+- `recoverStaleOcrJobs` scans expired `pending`/`processing` jobs on the current ready source. It uses status/revision/deadline/source CAS to either create exactly one new attempt and outbox message, or terminally mark exhausted attempt 3 as `dead_letter`; unpublished stale messages are removed in the same D1 batch.
+- Scheduled redrive now runs stale recovery before draining the persistent outbox. Preview config guarantees invocation every minute with `[triggers] crons = ["*/1 * * * *"]`.
+- OCR completion state and attachment search upsert now execute in one D1 batch. A real abort trigger proves a failed search write rolls the job transition back.
+- Route integration uses actual 0001→0004 local D1 migrations, `D1AttachmentRepository`, `AttachmentService`, and Map-backed fake R2; after DELETE, metadata and file routes both return `ATTACHMENT_NOT_FOUND` and stored bytes are gone.
+
+### Files
+
+- Migrations/config: restored `apps/worker/migrations/0003_private_attachments_ocr.sql`, added `apps/worker/migrations/0004_attachment_consistency.sql`, and updated `apps/worker/wrangler.preview.example.toml`.
+- Runtime: `apps/worker/src/attachments/d1-attachment-repository.ts` and `apps/worker/src/bootstrap.ts`.
+- Tests: `apps/worker/tests/d1-attachment-migration.test.ts`, local D1 helper, schema/outbox/preview-config/attachment-route suites.
+
+### GREEN / Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/schema.test.ts tests/d1-attachment-migration.test.ts tests/ocr-outbox.test.ts tests/preview-config.test.ts tests/attachment-routes.test.ts` | PASS, 20 tests in 5 files. |
+| `npm run test --workspace=@nexus/worker` | PASS, 108 tests in 28 files. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+Commit: focused re-review commit containing this report section; SHA is reported in the final handoff.
+
+### Self-review / Residual Risk
+
+- Recovery is deliberately bounded to 50 stale jobs per minute; deterministic deadline/id ordering lets later cron runs drain additional rows.
+- Duplicate old generations cannot all remain active under the new invariant, so non-canonical rows are losslessly retained in the migration archive table rather than discarded or assigned a false source revision.
+- Queue delivery remains at-least-once; full-message consumer CAS remains the duplicate-processing guard.

@@ -4,6 +4,9 @@ compatibility_date = "2026-08-20"
 workers_dev = true
 preview_urls = true
 
+[triggers]
+crons = ["*/1 * * * *"]
+
 [assets]
 directory = "../web/dist"
 binding = "ASSETS"

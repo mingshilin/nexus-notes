@@ -163,6 +163,7 @@ export function createBetaWorker() {
     },
     async scheduled(_controller: ScheduledController, env: BetaWorkerEnv) {
       const repository = new D1AttachmentRepository(env.DB);
+      await repository.recoverStaleOcrJobs(new Date().toISOString(), 50);
       await new OcrOutboxDispatcher(repository, env.JOBS).dispatch();
     },
   };

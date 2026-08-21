@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 const migrationPath = resolve(import.meta.dirname, "../migrations/0001_beta_schema.sql");
 const searchMigrationPath = resolve(import.meta.dirname, "../migrations/0002_search_document_sync.sql");
 const attachmentMigrationPath = resolve(import.meta.dirname, "../migrations/0003_private_attachments_ocr.sql");
+const consistencyMigrationPath = resolve(import.meta.dirname, "../migrations/0004_attachment_consistency.sql");
 
 describe("Beta D1 schema", () => {
   it("creates all public Beta domain tables", () => {
@@ -49,12 +50,15 @@ describe("Beta D1 schema", () => {
     expect(sql).toMatch(/INSERT INTO search_documents_fts[\s\S]*SELECT rowid/i);
   });
 
-  it("keys OCR generations by tenant attachment source revision without user uniqueness", () => {
-    const sql = readFileSync(attachmentMigrationPath, "utf8");
-    const definition = sql.match(/CREATE TABLE beta_ocr_jobs \(([\s\S]*?)\n\);/i)?.[1];
+  it("preserves published 0003 and moves source-revision uniqueness into additive 0004", () => {
+    const oldSql = readFileSync(attachmentMigrationPath, "utf8");
+    const oldDefinition = oldSql.match(/CREATE TABLE beta_ocr_jobs \(([\s\S]*?)\n\);/i)?.[1];
+    const upgradeSql = readFileSync(consistencyMigrationPath, "utf8");
 
-    expect(definition).toMatch(/source_revision INTEGER NOT NULL/i);
-    expect(definition).toMatch(/UNIQUE \(workspace_id, attachment_id, source_revision\)/i);
-    expect(definition).not.toMatch(/UNIQUE \(workspace_id, user_id,/i);
+    expect(oldDefinition).not.toMatch(/source_revision/i);
+    expect(oldDefinition).toMatch(/UNIQUE \(workspace_id, user_id, idempotency_key\)/i);
+    expect(upgradeSql).toMatch(/source_revision INTEGER NOT NULL/i);
+    expect(upgradeSql).toMatch(/UNIQUE \(workspace_id, attachment_id, source_revision\)/i);
+    expect(upgradeSql).toMatch(/CREATE TABLE IF NOT EXISTS queue_outbox/i);
   });
 });

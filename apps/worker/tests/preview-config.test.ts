@@ -11,4 +11,11 @@ describe("preview Worker configuration", () => {
     expect(assets).toContain('not_found_handling = "single-page-application"');
     expect(assets).toContain('run_worker_first = ["/api/*"]');
   });
+
+  it("redrives stale OCR jobs and pending outbox rows every minute", () => {
+    const config = readFileSync(resolve(process.cwd(), "wrangler.preview.example.toml"), "utf8");
+    const triggers = config.match(/\[triggers\]([\s\S]*?)(?=\n\[|$)/)?.[1] ?? "";
+
+    expect(triggers).toContain('crons = ["*/1 * * * *"]');
+  });
 });
