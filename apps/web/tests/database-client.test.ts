@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { serializeDatabaseCsv } from "@nexus/domain";
 
 async function loadData() {
   return await import("../src/data") as Record<string, any>;
@@ -80,12 +81,12 @@ describe("DatabaseClient", () => {
     const data = await loadData();
     const api = { request: vi.fn(async ({ body }: { body: { cursor: string | null; include_header?: boolean } }) => {
       return body.cursor === null
-        ? { csv: "Name\r\nOne\r\nTwo\r\n", next_cursor: "next-1" }
-        : { csv: "Three\r\n", next_cursor: null };
+        ? { csv: serializeDatabaseCsv([["Name"], ["One"], ["Two"]]), next_cursor: "next-1" }
+        : { csv: serializeDatabaseCsv([["Three"]]), next_cursor: null };
     }) };
     const client = new data.DatabaseClient(api, "ws-1", { createId: () => "export" });
 
-    await expect(client.exportAllCsv("db-1", { property_ids: ["name"], page_size: 100 })).resolves.toBe("Name\r\nOne\r\nTwo\r\nThree\r\n");
+    await expect(client.exportAllCsv("db-1", { property_ids: ["name"], page_size: 100 })).resolves.toBe("Name\r\nOne\r\nTwo\r\nThree");
     expect(api.request.mock.calls.map(([request]) => request.body.cursor)).toEqual([null, "next-1"]);
     expect(api.request.mock.calls.map(([request]) => request.body.include_header)).toEqual([true, false]);
   });
@@ -93,13 +94,13 @@ describe("DatabaseClient", () => {
   it("builds a Blob from bounded CSV response chunks without parsing quoted newlines", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async ({ body }: { body: { cursor: string | null } }) => body.cursor === null
-      ? { csv: '"Na\\nme"\r\n"One\\nTwo"\r\n', next_cursor: "next" }
-      : { csv: '"Three\\nFour"\r\n', next_cursor: null }) };
+      ? { csv: serializeDatabaseCsv([["Na\nme"], ["One\nTwo"]]), next_cursor: "next" }
+      : { csv: serializeDatabaseCsv([["Three\nFour"]]), next_cursor: null }) };
     const client = new data.DatabaseClient(api, "ws-1", { createId: () => "export" });
 
     const blob = await client.exportCsvBlob("db-1", { property_ids: ["name"], page_size: 1 });
     expect(blob).toBeInstanceOf(Blob);
-    expect(blob.size).toBe(new Blob(['"Na\\nme"\r\n"One\\nTwo"\r\n"Three\\nFour"\r\n']).size);
+    expect(blob.size).toBe(new Blob([serializeDatabaseCsv([["Na\nme"], ["One\nTwo"], ["Three\nFour"]])]).size);
     expect(api.request.mock.calls.map(([request]) => request.body.include_header)).toEqual([true, false]);
   });
 });

@@ -114,6 +114,22 @@ describe("DatabaseWorkbench", () => {
     await waitFor(() => expect(onCalendarAssign).toHaveBeenCalledTimes(2));
   });
 
+  it("segments every undated calendar record instead of truncating after sixty", async () => {
+    const web = await loadWeb();
+    const Workbench = web.DatabaseWorkbench as ComponentType<any>;
+    const records = Array.from({ length: 125 }, (_, index) => record(index, { name: `Undated ${index}`, due: null }));
+    render(createElement(Workbench, {
+      database, properties: [textProperty, dateProperty], records,
+      views: [view("calendar", "calendar", { ...baseConfig, settings: { date_property_id: "due", show_undated: true, segment_size: 50 } })],
+      activeViewId: "calendar",
+    }));
+
+    expect(document.querySelectorAll(".database-calendar-undated .database-calendar-card")).toHaveLength(50);
+    fireEvent.click(screen.getByRole("button", { name: "加载更多未安排 75" }));
+    fireEvent.click(screen.getByRole("button", { name: "加载更多未安排 25" }));
+    expect(document.querySelectorAll(".database-calendar-undated .database-calendar-card")).toHaveLength(125);
+  });
+
   it("opens a compact mobile database tools drawer", async () => {
     const web = await loadWeb();
     const Workbench = web.DatabaseWorkbench as ComponentType<any>;
@@ -122,7 +138,7 @@ describe("DatabaseWorkbench", () => {
       views: [view("table", "table", { ...baseConfig, visible_columns: ["name"] })], activeViewId: "table",
     }));
     fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
-    expect(screen.getByRole("dialog", { name: "数据库工具" })).toBeInTheDocument();
-    expect(container.querySelectorAll("[data-scroll-owner]")).toHaveLength(0);
+    expect(screen.getByRole("dialog", { name: "数据库工具" })).toHaveAttribute("data-scroll-owner", "drawer");
+    expect(container.querySelector(".database-workbench")).toHaveAttribute("inert");
   });
 });

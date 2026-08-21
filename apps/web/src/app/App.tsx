@@ -292,11 +292,7 @@ function AuthenticatedWorkspace({
 
   const requestDatabasePage = useCallback(({ cursor, limit, viewId, signal }: { cursor: string | null; limit: number; viewId?: string; signal?: AbortSignal }) => {
     if (!workspaceId || !selectedDatabaseId) return Promise.resolve({ items: [], next_cursor: null });
-    return new DatabaseClient(apiClient, workspaceId).listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, viewId, limit, signal })
-      .then((page) => {
-        setDatabaseRecordsNextCursor(page.next_cursor);
-        return page;
-      });
+    return new DatabaseClient(apiClient, workspaceId).listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, viewId, limit, signal });
   }, [apiClient, selectedDatabaseId, workspaceId]);
 
   const createFirstDatabase = () => {
@@ -459,6 +455,7 @@ function AuthenticatedWorkspace({
     <Suspense fallback={<p className="database-empty" role="status">正在准备数据库视图…</p>}>
       <LazyDatabaseWorkbench
         database={databaseBundle.database}
+        databases={databases}
         properties={databaseBundle.properties}
         records={databaseRecords}
         recordsNextCursor={databaseRecordsNextCursor}

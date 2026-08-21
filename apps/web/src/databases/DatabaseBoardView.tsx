@@ -11,6 +11,7 @@ export function DatabaseBoardView({
   view,
   onRecordsChange,
   onBoardMove,
+  onRecordMutation,
   canLoadMore = false,
   loadMorePending = false,
   onLoadMore,
@@ -21,6 +22,7 @@ export function DatabaseBoardView({
   view: DatabaseView;
   onRecordsChange(records: DatabaseRecord[]): void;
   onBoardMove?(input: BoardMoveInput): Promise<DatabaseRecord>;
+  onRecordMutation?(input: { record_id: string; values: Record<string, unknown>; command(baseRevision: number): Promise<DatabaseRecord> }): Promise<void>;
   canLoadMore?: boolean;
   loadMorePending?: boolean;
   onLoadMore?(): void;
@@ -61,6 +63,15 @@ export function DatabaseBoardView({
     setError(null);
     draggedRecord.current = null;
     setDraggedId(null);
+    if (onRecordMutation) {
+      void onRecordMutation({
+        record_id: record.id,
+        values: { [grouping.id]: value },
+        command: (baseRevision) => onBoardMove?.({ record_id: record.id, property_id: grouping.id, option_id: value, base_revision: baseRevision })
+          ?? Promise.resolve({ ...optimistic, revision: baseRevision + 1 }),
+      }).catch(() => setError("移动失败，已恢复原位置。"));
+      return;
+    }
     const operationId = crypto.randomUUID();
     operations.current.set(record.id, operationId);
     if (!confirmedRecords.current.has(record.id)) confirmedRecords.current.set(record.id, record);

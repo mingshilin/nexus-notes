@@ -53,4 +53,36 @@ describe("live database workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "创建数据库" }));
     await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/databases", method: "POST", body: { name: "Roadmap", description: "" } })));
   });
+
+  it("keeps child collection cursors local and propagates drawer modal state through App", async () => {
+    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" }, active_workspace_id: "ws-1" })) };
+    const status = { ...property, id: "status", name: "Status", type: "select", position: 1, config: { options: [{ id: "todo", name: "Todo" }, { id: "done", name: "Done" }] } };
+    const board = { ...view, id: "board", name: "Board", type: "board", config: { ...view.config, visible_columns: ["name", "status"], grouping: { property_id: "status" }, page_size: 1, settings: { segment_size: 10 } } };
+    const first = { ...record, values: { name: "First", status: "todo" } };
+    const later = { ...record, id: "record-2", values: { name: "Later", status: "done" } };
+    const apiClient = { request: vi.fn(async ({ path }: { path: string }) => {
+      if (path === "/api/v2/databases") return { items: [database] };
+      if (path === "/api/v2/databases/db-1") return { database, role: "owner", properties: [property, status], views: [board], templates: [] };
+      if (path === "/api/v2/databases/db-1/records?view_id=board&limit=1") return { items: [first], next_cursor: "board-next" };
+      if (path === "/api/v2/databases/db-1/records?cursor=board-next&view_id=board&limit=100") return { items: [later], next_cursor: null };
+      return { items: [], next_cursor: null };
+    }) };
+    render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+    await screen.findByRole("heading", { name: "Public Beta 重写计划" });
+    fireEvent.click(screen.getByRole("button", { name: "数据库" }));
+    await screen.findByTestId("board-card-record-1");
+
+    fireEvent.click(screen.getByRole("button", { name: "加载更多记录" }));
+    expect(await screen.findByTestId("board-card-record-2")).toBeInTheDocument();
+    expect(screen.getByTestId("board-card-record-1")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
+    const drawer = await screen.findByRole("dialog", { name: "数据库工具" });
+    expect(document.querySelector(".workbench-canvas")).toHaveAttribute("inert");
+    expect(document.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(0);
+    expect(drawer).toHaveAttribute("data-scroll-owner", "drawer");
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(screen.getByTestId("board-card-record-2")).toBeInTheDocument();
+    expect(screen.getByTestId("board-card-record-1")).toBeInTheDocument();
+  });
 });

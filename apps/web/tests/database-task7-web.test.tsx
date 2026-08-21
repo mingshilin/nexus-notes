@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createElement, type ComponentType } from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -7,6 +7,19 @@ const database = { id: "db-1", workspace_id: "ws-1", name: "Projects", descripti
 const name = { id: "name", workspace_id: "ws-1", database_id: "db-1", name: "Name", type: "text", config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now };
 const status = { id: "status", workspace_id: "ws-1", database_id: "db-1", name: "Status", type: "select", config: { options: [{ id: "todo", name: "Todo" }, { id: "done", name: "Done" }] }, position: 1, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now };
 const due = { id: "due", workspace_id: "ws-1", database_id: "db-1", name: "Due", type: "date", config: {}, position: 2, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now };
+
+const typedProperties = [
+  name,
+  { ...name, id: "score", name: "Score", type: "number", position: 1 },
+  { ...name, id: "complete", name: "Complete", type: "checkbox", position: 2 },
+  { ...status, position: 3 },
+  { ...name, id: "tags", name: "Tags", type: "multi_select", position: 4, config: { options: [{ id: "a", name: "A" }, { id: "b", name: "B" }] } },
+  { ...due, position: 5 },
+  { ...name, id: "website", name: "Website", type: "url", position: 6 },
+  { ...name, id: "email", name: "Email", type: "email", position: 7 },
+  { ...name, id: "assignee", name: "Assignee", type: "member", position: 8, config: {} },
+  { ...name, id: "related", name: "Related", type: "relation", position: 9, config: { target_database_id: "db-2", allow_multiple: true } },
+] as const;
 
 function record(id: string, values: Record<string, unknown>, revision = 1) {
   return { id, workspace_id: "ws-1", database_id: "db-1", note_id: null, values, created_by: "user-1", updated_by: "user-1", revision, created_at: now, updated_at: now };
@@ -20,6 +33,11 @@ const config = { filters: [], sorts: [], grouping: null, visible_columns: ["name
 
 async function web() {
   return await import("../src/index") as Record<string, any>;
+}
+
+function selectValues(element: HTMLElement, values: readonly string[]) {
+  for (const option of Array.from((element as HTMLSelectElement).options)) option.selected = values.includes(option.value);
+  fireEvent.change(element);
 }
 
 describe("Task 7 database web behavior", () => {
@@ -241,6 +259,183 @@ describe("Task 7 database web behavior", () => {
     expect(request).toHaveBeenCalledTimes(3);
   });
 
+  it("ignores a deferred collection response after the active view fingerprint changes", async () => {
+    const { DatabaseWorkbench } = await web() as { DatabaseWorkbench: ComponentType<any> };
+    let resolveBoard!: (page: { items: ReturnType<typeof record>[]; next_cursor: null }) => void;
+    const boardPage = new Promise<{ items: ReturnType<typeof record>[]; next_cursor: null }>((resolve) => { resolveBoard = resolve; });
+    const request = vi.fn(({ cursor, viewId }: { cursor: string | null; viewId: string }) => {
+      if (cursor === "board-next") return boardPage;
+      return Promise.resolve({ items: [record("calendar-fresh", { name: "Calendar fresh", due: "2026-08-21" })], next_cursor: null });
+    });
+    const board = view("board", "board", { ...config, grouping: { property_id: "status" }, settings: { segment_size: 10 } });
+    const calendar = view("calendar", "calendar", { ...config, settings: { date_property_id: "due", segment_size: 10 } });
+    const props = {
+      database, properties: [name, status, due], records: [record("first", { name: "First", status: "todo" })], recordsNextCursor: "board-next",
+      views: [board, calendar], onRecordsPageRequest: request,
+    };
+    const { rerender } = render(createElement(DatabaseWorkbench, { ...props, activeViewId: "board" }));
+    fireEvent.click(screen.getByRole("button", { name: "加载更多记录" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({ cursor: "board-next", viewId: "board" })));
+
+    rerender(createElement(DatabaseWorkbench, { ...props, activeViewId: "calendar" }));
+    await screen.findByLabelText("数据库日历");
+    await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({ cursor: null, viewId: "calendar" })));
+    await act(async () => {
+      resolveBoard({ items: [record("board-stale", { name: "Board stale", status: "done" })], next_cursor: null });
+      await boardPage;
+    });
+    await waitFor(() => expect(screen.queryByText("Board stale")).not.toBeInTheDocument());
+    expect(screen.getByText("Calendar fresh")).toBeInTheDocument();
+  });
+
+  it("submits typed record values for all ten property types", async () => {
+    const { DatabaseWorkbench, DatabaseClient } = await web() as Record<string, any>;
+    const api = { request: vi.fn(async () => ({ record: record("typed", {}) })) };
+    render(createElement(DatabaseWorkbench, {
+      database, properties: typedProperties, records: [], views: [view("table", "table", { ...config, visible_columns: typedProperties.map((property) => property.id) })],
+      client: new DatabaseClient(api, "ws-1", { createId: () => "typed" }),
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
+    const drawer = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.change(within(drawer).getByLabelText("Name"), { target: { value: "Launch" } });
+    fireEvent.change(within(drawer).getByLabelText("Score"), { target: { value: "12.5" } });
+    fireEvent.click(within(drawer).getByLabelText("Complete"));
+    fireEvent.change(within(drawer).getByLabelText("Status"), { target: { value: "done" } });
+    selectValues(within(drawer).getByLabelText("Tags"), ["a", "b"]);
+    fireEvent.change(within(drawer).getByLabelText("Due"), { target: { value: "2026-08-22" } });
+    fireEvent.change(within(drawer).getByLabelText("Website"), { target: { value: "https://example.com" } });
+    fireEvent.change(within(drawer).getByLabelText("Email"), { target: { value: "user@example.com" } });
+    fireEvent.change(within(drawer).getByLabelText("Assignee"), { target: { value: "user-2" } });
+    fireEvent.change(within(drawer).getByLabelText("Related"), { target: { value: "record-2, record-3" } });
+    fireEvent.click(within(drawer).getByRole("button", { name: "创建记录" }));
+
+    await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/databases/db-1/records",
+      body: { note_id: null, values: {
+        name: "Launch", score: 12.5, complete: true, status: "done", tags: ["a", "b"], due: "2026-08-22",
+        website: "https://example.com", email: "user@example.com", assignee: "user-2", related: ["record-2", "record-3"],
+      } },
+    })));
+  });
+
+  it("coerces saved filters with property-specific controls for all ten types", async () => {
+    const { DatabaseViewForm } = await import("../src/databases/DatabaseViewTemplateForms");
+    const filters = typedProperties.map((property) => ({
+      property_id: property.id,
+      operator: "equals" as const,
+      value: property.type === "checkbox" ? false : property.type === "multi_select" || (property.type === "relation" && property.config.allow_multiple) ? [] : "",
+    }));
+    const editingView = view("typed-view", "table", { ...config, visible_columns: typedProperties.map((property) => property.id), filters });
+    const onUpdate = vi.fn();
+    render(createElement(DatabaseViewForm, {
+      name: "Typed", type: "table", properties: typedProperties, position: 0, disabled: false, editingView,
+      onNameChange: vi.fn(), onTypeChange: vi.fn(), onSubmit: vi.fn(), onUpdate,
+    }));
+
+    expect(screen.getByLabelText("过滤值 2")).toHaveAttribute("type", "number");
+    expect(screen.getByLabelText("过滤值 3")).toHaveAttribute("type", "checkbox");
+    expect(screen.getByLabelText("过滤值 4").tagName).toBe("SELECT");
+    expect(screen.getByLabelText("过滤值 5")).toHaveAttribute("multiple");
+    expect(screen.getByLabelText("过滤值 6")).toHaveAttribute("type", "date");
+    expect(screen.getByLabelText("过滤值 7")).toHaveAttribute("type", "url");
+    expect(screen.getByLabelText("过滤值 8")).toHaveAttribute("type", "email");
+    fireEvent.change(screen.getByLabelText("过滤值 1"), { target: { value: "Alpha" } });
+    fireEvent.change(screen.getByLabelText("过滤值 2"), { target: { value: "42" } });
+    fireEvent.click(screen.getByLabelText("过滤值 3"));
+    fireEvent.change(screen.getByLabelText("过滤值 4"), { target: { value: "done" } });
+    selectValues(screen.getByLabelText("过滤值 5"), ["a", "b"]);
+    fireEvent.change(screen.getByLabelText("过滤值 6"), { target: { value: "2026-08-22" } });
+    fireEvent.change(screen.getByLabelText("过滤值 7"), { target: { value: "https://example.com" } });
+    fireEvent.change(screen.getByLabelText("过滤值 8"), { target: { value: "user@example.com" } });
+    fireEvent.change(screen.getByLabelText("过滤值 9"), { target: { value: "user-2" } });
+    fireEvent.change(screen.getByLabelText("过滤值 10"), { target: { value: "record-2, record-3" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存视图" }));
+
+    expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ config: expect.objectContaining({ filters: [
+      expect.objectContaining({ value: "Alpha" }), expect.objectContaining({ value: 42 }), expect.objectContaining({ value: true }),
+      expect.objectContaining({ value: "done" }), expect.objectContaining({ value: ["a", "b"] }), expect.objectContaining({ value: "2026-08-22" }),
+      expect.objectContaining({ value: "https://example.com" }), expect.objectContaining({ value: "user@example.com" }),
+      expect.objectContaining({ value: "user-2" }), expect.objectContaining({ value: ["record-2", "record-3"] }),
+    ] }) }));
+  });
+
+  it("edits synchronized template defaults for all ten types and offers cross-database relation targets", async () => {
+    const { DatabaseWorkbench, DatabaseClient } = await web() as Record<string, any>;
+    const defaults = {
+      name: "Template", score: 7, complete: true, status: "todo", tags: ["a"], due: "2026-08-22",
+      website: "https://example.com", email: "user@example.com", assignee: "user-2", related: ["record-2"],
+    };
+    const template = { id: "template-typed", workspace_id: "ws-1", database_id: "db-1", name: "Typed defaults", default_values: defaults, revision: 3, created_at: now, updated_at: now };
+    const otherDatabase = { ...database, id: "db-2", name: "People" };
+    const api = { request: vi.fn(async () => ({ template })) };
+    render(createElement(DatabaseWorkbench, {
+      database, databases: [database, otherDatabase], properties: typedProperties, records: [], templates: [template],
+      views: [view("table", "table", { ...config, visible_columns: typedProperties.map((property) => property.id) })],
+      client: new DatabaseClient(api, "ws-1", { createId: () => "template" }),
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
+    const drawer = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(drawer).getByRole("button", { name: "模板" }));
+    expect(within(drawer).getByLabelText("Name")).toHaveValue("Template");
+    expect(within(drawer).getByLabelText("Score")).toHaveValue(7);
+    expect(within(drawer).getByLabelText("Complete")).toBeChecked();
+    expect(within(drawer).getByLabelText("Status")).toHaveValue("todo");
+    expect(within(drawer).getByLabelText("Tags")).toHaveValue(["a"]);
+    expect(within(drawer).getByLabelText("Due")).toHaveValue("2026-08-22");
+    expect(within(drawer).getByLabelText("Website")).toHaveValue("https://example.com");
+    expect(within(drawer).getByLabelText("Email")).toHaveValue("user@example.com");
+    expect(within(drawer).getByLabelText("Assignee")).toHaveValue("user-2");
+    expect(within(drawer).getByLabelText("Related")).toHaveValue("record-2");
+    fireEvent.change(within(drawer).getByLabelText("Score"), { target: { value: "8" } });
+    fireEvent.click(within(drawer).getByRole("button", { name: "保存模板" }));
+    await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/databases/db-1/templates/template-typed", body: expect.objectContaining({ base_revision: 3, default_values: { ...defaults, score: 8 } }),
+    })));
+
+    fireEvent.click(within(drawer).getByRole("button", { name: "属性" }));
+    expect(within(drawer).getByLabelText("字段类型").querySelectorAll("option")).toHaveLength(10);
+    fireEvent.change(within(drawer).getByLabelText("字段类型"), { target: { value: "relation" } });
+    expect(within(drawer).getByRole("option", { name: "People" })).toHaveValue("db-2");
+  });
+
+  it("uses property-specific bulk controls and preserves a confirmed drag when the later bulk command fails", async () => {
+    const { DatabaseWorkbench, DatabaseClient } = await web() as Record<string, any>;
+    let rejectBulk!: (reason: Error) => void;
+    const bulk = new Promise<never>((_, reject) => { rejectBulk = reject; });
+    const api = { request: vi.fn(({ path }: { path: string }) => path.endsWith("/records/bulk") ? bulk : Promise.resolve({ items: [] })) };
+    const move = vi.fn(async (input: any) => record(input.record_id, { name: "Race", status: input.option_id }, input.base_revision + 1));
+    render(createElement(DatabaseWorkbench, {
+      database, properties: typedProperties, records: [record("race", { name: "Race", status: "todo" })],
+      views: [view("board", "board", { ...config, visible_columns: typedProperties.map((property) => property.id), grouping: { property_id: "status" }, settings: { segment_size: 10 } })],
+      client: new DatabaseClient(api, "ws-1", { createId: () => "bulk" }), onBoardMove: move,
+    }));
+    fireEvent.dragStart(screen.getByTestId("board-card-race"));
+    fireEvent.drop(screen.getByTestId("board-column-done"));
+    await waitFor(() => expect(move).toHaveBeenCalledOnce());
+    await waitFor(() => expect(within(screen.getByTestId("board-column-done")).getByTestId("board-card-race")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
+    const drawer = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(drawer).getByRole("button", { name: "批量" }));
+    fireEvent.click(within(drawer).getByRole("checkbox"));
+    const propertySelect = within(drawer).getByLabelText("字段");
+    const expectedControls: Record<string, [string, string | null]> = {
+      name: ["INPUT", "text"], score: ["INPUT", "number"], complete: ["INPUT", "checkbox"], status: ["SELECT", null], tags: ["SELECT", null],
+      due: ["INPUT", "date"], website: ["INPUT", "url"], email: ["INPUT", "email"], assignee: ["INPUT", "text"], related: ["INPUT", "text"],
+    };
+    for (const [propertyId, [tag, type]] of Object.entries(expectedControls)) {
+      fireEvent.change(propertySelect, { target: { value: propertyId } });
+      const control = within(drawer).getByLabelText("新值");
+      expect(control.tagName).toBe(tag);
+      if (type) expect(control).toHaveAttribute("type", type);
+    }
+    fireEvent.change(propertySelect, { target: { value: "status" } });
+    fireEvent.change(within(drawer).getByLabelText("新值"), { target: { value: "todo" } });
+    fireEvent.click(within(drawer).getByRole("button", { name: "预览并应用" }));
+    rejectBulk(new Error("denied"));
+    await waitFor(() => expect(within(screen.getByTestId("board-column-done")).getByTestId("board-card-race")).toBeInTheDocument());
+  });
+
   it("keeps the mobile tools action usable at 390px and 200% zoom with the page as the only scroll owner", async () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
@@ -262,7 +457,10 @@ describe("Task 7 database web behavior", () => {
     fireEvent.click(within(drawer).getByRole("button", { name: "创建记录" }));
     await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/databases/db-1/records", method: "POST" })));
     expect(document.querySelector('[data-mode="mobile"]')).toBeInTheDocument();
-    expect(document.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);
+    expect(document.querySelector(".workbench-canvas")).toHaveAttribute("inert");
+    expect(document.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(0);
+    expect(document.querySelectorAll("[data-scroll-owner]")).toHaveLength(1);
+    expect(drawer).toHaveAttribute("data-scroll-owner", "drawer");
     fireEvent.keyDown(drawer, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "数据库工具" })).not.toBeInTheDocument());
     expect(screen.getByRole("button", { name: "数据库工具" })).toHaveFocus();

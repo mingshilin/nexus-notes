@@ -6,12 +6,38 @@ export function DatabaseRecordForm({ properties, values, disabled, onChange, onS
 
 export function PropertyValueFields({ properties, values, onChange }: { properties: readonly DatabaseProperty[]; values: Record<string, unknown>; onChange(id: string, value: unknown): void }) {
   return <>{properties.filter((property) => !property.hidden && !property.read_only).map((property) => {
-    const value = values[property.id] ?? (property.type === "checkbox" ? false : "");
-    const options = (property.config as { options?: { id: string; name: string }[] }).options ?? [];
-    if (property.type === "checkbox") return <label key={property.id}>{property.name}<input aria-label={property.name} type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(property.id, event.target.checked)} /></label>;
-    if (property.type === "select") return <label key={property.id}>{property.name}<select aria-label={property.name} value={String(value)} onChange={(event) => onChange(property.id, event.target.value)}><option value="">请选择</option>{options.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select></label>;
-    if (property.type === "multi_select") return <label key={property.id}>{property.name}<select aria-label={property.name} multiple value={Array.isArray(value) ? value.map(String) : []} onChange={(event) => onChange(property.id, Array.from(event.currentTarget.selectedOptions, (option) => option.value))}>{options.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select></label>;
-    const inputType = property.type === "number" ? "number" : property.type === "date" ? "date" : property.type === "email" ? "email" : property.type === "url" ? "url" : "text";
-    return <label key={property.id}>{property.name}<input aria-label={property.name} type={inputType} value={String(value)} onChange={(event) => onChange(property.id, event.target.value)} /></label>;
+    return <label key={property.id}>{property.name}<PropertyValueInput property={property} value={values[property.id]} ariaLabel={property.name} onChange={(value) => onChange(property.id, value)} /></label>;
   })}</>;
+}
+
+export function emptyPropertyValue(property: DatabaseProperty) {
+  if (property.type === "checkbox") return false;
+  if (property.type === "multi_select" || ((property.type === "member" || property.type === "relation") && (property.config as { allow_multiple?: boolean }).allow_multiple === true)) return [];
+  return "";
+}
+
+export function PropertyValueInput({ property, value = emptyPropertyValue(property), ariaLabel, onChange }: {
+  property: DatabaseProperty;
+  value?: unknown;
+  ariaLabel: string;
+  onChange(value: unknown): void;
+}) {
+  const options = (property.config as { options?: { id: string; name: string }[] }).options ?? [];
+  if (property.type === "checkbox") {
+    return <input aria-label={ariaLabel} type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} />;
+  }
+  if (property.type === "select") {
+    return <select aria-label={ariaLabel} value={String(value ?? "")} onChange={(event) => onChange(event.target.value)}><option value="">请选择</option>{options.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select>;
+  }
+  if (property.type === "multi_select") {
+    return <select aria-label={ariaLabel} multiple value={Array.isArray(value) ? value.map(String) : []} onChange={(event) => onChange(Array.from(event.currentTarget.selectedOptions, (option) => option.value))}>{options.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select>;
+  }
+  const multipleReference = (property.type === "member" || property.type === "relation") && (property.config as { allow_multiple?: boolean }).allow_multiple === true;
+  const display = multipleReference && Array.isArray(value) ? value.join(", ") : String(value ?? "");
+  const inputType = property.type === "number" ? "number" : property.type === "date" ? "date" : property.type === "email" ? "email" : property.type === "url" ? "url" : "text";
+  return <input aria-label={ariaLabel} type={inputType} value={display} onChange={(event) => {
+    if (property.type === "number") onChange(event.target.value === "" ? "" : Number(event.target.value));
+    else if (multipleReference) onChange(event.target.value.split(",").map((item) => item.trim()).filter(Boolean));
+    else onChange(event.target.value);
+  }} />;
 }

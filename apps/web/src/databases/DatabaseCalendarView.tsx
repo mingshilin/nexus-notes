@@ -17,6 +17,7 @@ export function DatabaseCalendarView({
   view,
   onRecordsChange,
   onCalendarAssign,
+  onRecordMutation,
   canLoadMore = false,
   loadMorePending = false,
   onLoadMore,
@@ -27,6 +28,7 @@ export function DatabaseCalendarView({
   view: DatabaseView;
   onRecordsChange(records: DatabaseRecord[]): void;
   onCalendarAssign?(input: CalendarAssignmentInput): Promise<DatabaseRecord>;
+  onRecordMutation?(input: { record_id: string; values: Record<string, unknown>; command(baseRevision: number): Promise<DatabaseRecord> }): Promise<void>;
   canLoadMore?: boolean;
   loadMorePending?: boolean;
   onLoadMore?(): void;
@@ -35,6 +37,8 @@ export function DatabaseCalendarView({
   const dateProperty = properties.find((property) => property.id === propertyId && property.type === "date");
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [moreDate, setMoreDate] = useState<string | null>(null);
+  const segmentSize = view.config.settings.segment_size ?? 60;
+  const [undatedLimit, setUndatedLimit] = useState(segmentSize);
   const [error, setError] = useState<string | null>(null);
   const latestRecords = useRef(records);
   const operations = useRef(new Map<string, string>());
@@ -45,6 +49,7 @@ export function DatabaseCalendarView({
   latestRecords.current = records;
 
   useEffect(() => { draggedRecord.current = null; setDraggedId(null); }, [recordSetKey, view.id]);
+  useEffect(() => setUndatedLimit(segmentSize), [segmentSize, view.id]);
   useEffect(() => {
     if (queues.current.size) return;
     confirmedRecords.current.clear();
@@ -62,6 +67,15 @@ export function DatabaseCalendarView({
     draggedRecord.current = null;
     setDraggedId(null);
     setError(null);
+    if (onRecordMutation) {
+      void onRecordMutation({
+        record_id: record.id,
+        values: { [dateProperty.id]: date },
+        command: (baseRevision) => onCalendarAssign?.({ record_id: record.id, property_id: dateProperty.id, date, base_revision: baseRevision })
+          ?? Promise.resolve({ ...optimistic, revision: baseRevision + 1 }),
+      }).catch(() => setError("日期分配失败，已恢复原日期。"));
+      return;
+    }
     const operationId = crypto.randomUUID();
     operations.current.set(record.id, operationId);
     if (!confirmedRecords.current.has(record.id)) confirmedRecords.current.set(record.id, record);
@@ -110,7 +124,7 @@ export function DatabaseCalendarView({
         <aside className="database-calendar-undated" data-testid="calendar-undated">
           <header><strong>未安排</strong><span>{undated.length}</span></header>
           <div>
-            {undated.slice(0, 60).map((record) => (
+            {undated.slice(0, undatedLimit).map((record) => (
               <article
                 className="database-calendar-card"
                 data-testid={`calendar-undated-${record.id}`}
@@ -120,6 +134,7 @@ export function DatabaseCalendarView({
                 onDragEnd={() => { draggedRecord.current = null; setDraggedId(null); }}
               >{recordTitle(record, properties)}</article>
             ))}
+            {undated.length > undatedLimit ? <button type="button" onClick={() => setUndatedLimit((current) => current + segmentSize)}>加载更多未安排 {undated.length - undatedLimit}</button> : null}
           </div>
         </aside>
       ) : null}

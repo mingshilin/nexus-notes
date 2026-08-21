@@ -272,3 +272,57 @@ The requested Web scope explicitly requires browseable/selectable database- and 
 - Added `GET` list and `DELETE` routes for database and field permissions while preserving existing PUT upserts and v2 envelopes.
 - Permission collections deliberately remain outside the normal database bundle: only owner/database-manage callers can list them, so viewers cannot receive permission assignments through a readable database bundle.
 - Added `DatabaseClient` typed list/delete methods with workspace-scoped query dedupe keys and standard command idempotency policies.
+
+## Task 7 Review Fix Wave 4
+
+### RED evidence
+
+- Baseline before new tests: focused Web `35/35`, domain `3/3`, and Worker repository `26/26` passed.
+- `rtk npm run test --workspace @nexus/web -- tests/database-task7-web.test.tsx tests/database-workbench.test.tsx tests/database-client.test.ts tests/database-workspace-live.test.tsx --reporter=dot` failed as expected with `11 failed / 21 passed`. The failures reproduced serializer-compatible CSV chunks merging rows, a deferred board page leaking into calendar, scalar member values becoming arrays, untyped saved filters, missing synchronized template defaults/cross-database relation choices, generic bulk inputs, missing drawer inert/scroll transfer, the hard 60-item undated cap, and the App-level child cursor update restoring the initial page.
+- `rtk npm run test --workspace @nexus/domain -- tests/database-values.test.ts` failed as expected with `1 failed / 3 passed`: 129-character reference IDs and 101-item reference arrays were accepted.
+- `rtk npm run test --workspace @nexus/worker -- tests/d1-database-repository.test.ts -t 'classifies a transaction-time stale revision with valid relations as a revision conflict' --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=dot` failed as expected: the transaction-time stale revision was misclassified as `INVALID_RELATION_REFERENCE` instead of `REVISION_CONFLICT`.
+- All RED failures were observed before any production-code edit. Two test-fixture issues were corrected and replayed before accepting RED: the stale-revision trigger was changed to `AFTER UPDATE`, and the deferred collection resolver was flushed through React `act`.
+
+## Task 7 Review Fix Wave 4A - Web
+
+### Scope and TDD sequence
+
+- Base/head at start: `71379af` on `codex/public-beta-rewrite`. Existing Worker/domain changes for the sequential backend wave were preserved and excluded from this Web commit.
+- The accepted test-first RED run is recorded immediately above: `rtk npm run test --workspace @nexus/web -- tests/database-task7-web.test.tsx tests/database-workbench.test.tsx tests/database-client.test.ts tests/database-workspace-live.test.tsx --reporter=dot` failed as expected with `11 failed / 21 passed` before production edits. It covered App parent/child cursor isolation, deferred cross-view collection responses, serializer-compatible CSV boundaries, all ten typed property/filter/bulk/template workflows, cross-database relation targets, drag-success-then-bulk-failure, undated expansion, and drawer inert/scroll transfer.
+- On continuation from the preserved partial worktree, the same focused command failed `8/32` (`3` files failed, `1` passed). The remaining failures isolated missing template/property data flow, stale collection acceptance, pre-drag bulk rollback snapshots, the fixed 60-record undated cap, missing drawer scroll ownership, and App child-page cursor writeback.
+- After the first minimal implementation, the same command failed `3/32`: two existing call-shape assertions detected an unnecessary collection `AbortSignal`, and child modal state incorrectly rendered/focused the inspector. The collection path was kept identity-ignored (the brief allows abort or ignore), and inspector rendering was separated from child modal background state without weakening tests.
+
+### GREEN and gate evidence
+
+- Focused Web behavior suite: `4/4` files and `32/32` tests passed.
+- Full `@nexus/web`: `21/21` files and `101/101` tests passed.
+- `rtk npm run typecheck --workspace @nexus/web`: passed (`tsc --noEmit`, exit 0).
+- `rtk npm run build --workspace @nexus/web`: passed. Vite transformed `1,752` modules; main JS is `333.11 kB` (`98.97 kB` gzip), lazy `DatabaseWorkbench` is `46.04 kB` (`12.81 kB` gzip), and there was no `>500 kB` warning.
+- `rtk npm run beta:build`: passed for Web, Worker, contracts, domain, testkit, and UI.
+- `rtk npm run verify:deploy`: passed local deploy readiness checks.
+- `git diff --check`: passed with no whitespace errors.
+- Generated Web audit: `modulepreload_count=0`, `database_workbench_preload_count=0`, initial script `/assets/index-RLnBzEtJ.js`, lazy chunk `DatabaseWorkbench-LLyY9kZF.js`, and `markdown_ocr_named_assets=0`.
+
+### Requirement mapping
+
+1. `App` no longer writes child page cursors into the initial bundle cursor state. `DatabaseWorkbench` owns page/collection cursors and caches, keyed by workspace/database plus selected view revision/config fingerprint; view changes synchronously invalidate collection requests, and deferred responses must still match request ID and fingerprint before publishing.
+2. Shared typed controls now cover text, number, checkbox, select, multi-select, date, URL, email, member, and relation across record creation/update, saved filters, bulk editing, and synchronized template defaults. Scalar member/relation values stay scalar unless `allow_multiple` is true, and relation property settings receive the full database list for cross-database targets.
+3. CSV paging retains `include_header: true` only for page one and `false` thereafter. Non-empty chunks receive exactly one CRLF boundary when neither adjacent chunk supplies one; `exportCsvBlob` retains bounded response strings as Blob parts rather than parsing or slicing CSV rows.
+4. Board/calendar collection loads capture database/view/config identity and request ID. Database/view/fingerprint changes abort the local acceptance token and stale deferred responses are ignored.
+5. Board and calendar mutations delegate to the parent confirmed-state coordinator used by bulk preview. Per-record queues update the confirmed revision before later commands; a failed bulk edit restores the latest confirmed drag result rather than the original source record.
+6. Calendar undated records use the saved view `segment_size`, reset on view/segment changes, and expose every bounded-page record through deterministic `加载更多未安排 N` expansion with no 60-item truncation.
+7. Drawer state propagates through `AdaptiveWorkbench` context. The drawer is portaled outside its inert database background, owns the sole `data-scroll-owner`, removes the page owner, freezes/restores body scrolling, preserves focus containment/return, and keeps inspector rendering independent.
+
+### Files changed
+
+- Web sources: `apps/web/src/app/App.tsx`, `apps/web/src/data/database-client.ts`, `apps/web/src/databases/DatabaseBoardView.tsx`, `DatabaseBulkCsvForms.tsx`, `DatabaseCalendarView.tsx`, `DatabasePropertyEditor.tsx`, `DatabaseRecordForm.tsx`, `DatabaseToolsDrawer.tsx`, `DatabaseViewTemplateForms.tsx`, `DatabaseWorkbench.tsx`, `database-form-utils.ts`, and `apps/web/src/layout/AdaptiveWorkbench.tsx`.
+- Web tests: `apps/web/tests/database-client.test.ts`, `database-task7-web.test.tsx`, `database-workbench.test.tsx`, and `database-workspace-live.test.tsx`.
+- Evidence: `.superpowers/sdd/task-7-report.md`.
+
+### Self-review and residual concern
+
+- Correctness/robustness: checked empty values, scalar/array reference semantics, stale async completion, view/database changes, operation ordering, rollback revision selection, source refresh, and modal unmount cleanup. Tests assert behavior rather than implementation mocks where real components are available.
+- Security/resources: no SQL, command construction, secrets, or new external inputs were introduced. Existing client validation/contracts remain authoritative; request tokens/controllers, mutation maps, portal focus, body overflow, and modal context are cleaned up on completion or unmount.
+- Performance/readability: collection fetches remain bounded at 100, calendar expansion is segmented, CSV strings remain page-bounded Blob parts, and the workbench remains lazy. No new quadratic path is introduced beyond existing bounded record/property scans.
+- Scope: only the 16 Web source/test files above plus this report are staged for Wave 4A. Existing `apps/worker` and `packages/domain` modifications remain unstaged for the sequential backend wave.
+- Residual concern: the repository still has no real-browser 390px/200%/mobile-keyboard gate. This wave retains jsdom coverage for viewport, `visualViewport`, inert state, focus, and scroll-owner transfer; real-browser evidence remains the Task 11 gate.

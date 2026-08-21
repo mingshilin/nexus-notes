@@ -1,6 +1,6 @@
 import { Surface } from "@nexus/ui";
 import { X } from "lucide-react";
-import { useEffect, useRef, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { PageScrollArea } from "./PageScrollArea";
 import { type WorkbenchMode } from "./layout-state";
 import { useMobileChrome, useWorkbenchMode } from "./use-mobile-layout";
@@ -16,6 +16,12 @@ export interface AdaptiveWorkbenchProps {
   onInspectorOpen?: (opener: HTMLElement) => void;
   onInspectorClose: () => void;
   children: ReactNode;
+}
+
+const WorkbenchModalContext = createContext<(open: boolean) => void>(() => undefined);
+
+export function useWorkbenchModalState() {
+  return useContext(WorkbenchModalContext);
 }
 
 function Canvas({ children, mobile = false, modalOpen = false }: { children: ReactNode; mobile?: boolean; modalOpen?: boolean }) {
@@ -43,14 +49,24 @@ export function AdaptiveWorkbench({
   const mobileChrome = useMobileChrome();
   const mobile = currentMode === "mobile";
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const modalOpen = inspectorOpen && Boolean(inspector);
+  const [childModalOpen, setChildModalOpen] = useState(false);
+  const inspectorModalOpen = inspectorOpen && Boolean(inspector);
+  const modalOpen = childModalOpen || inspectorModalOpen;
 
   useEffect(() => {
-    if (modalOpen) closeButtonRef.current?.focus();
+    if (inspectorModalOpen) closeButtonRef.current?.focus();
+  }, [inspectorModalOpen]);
+
+  useEffect(() => {
+    if (!modalOpen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previousOverflow; };
   }, [modalOpen]);
 
   return (
-    <Surface variant="window" className="adaptive-workbench" data-mode={currentMode}>
+    <WorkbenchModalContext.Provider value={setChildModalOpen}>
+      <Surface variant="window" className="adaptive-workbench" data-mode={currentMode}>
       {!mobile ? (
         <nav className="workbench-rail" aria-label="主导航" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
           {navigation}
@@ -88,7 +104,7 @@ export function AdaptiveWorkbench({
         <Canvas modalOpen={modalOpen}>{children}</Canvas>
       )}
 
-      {modalOpen ? (
+      {inspectorModalOpen ? (
         <div className="inspector-backdrop" onMouseDown={onInspectorClose} onKeyDown={(event) => { if (event.key === "Escape") onInspectorClose(); }}>
           <Surface
             as="aside"
@@ -118,6 +134,7 @@ export function AdaptiveWorkbench({
           <button type="button">账户</button>
         </nav>
       ) : null}
-    </Surface>
+      </Surface>
+    </WorkbenchModalContext.Provider>
   );
 }

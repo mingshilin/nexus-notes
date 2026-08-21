@@ -243,24 +243,31 @@ export class DatabaseClient {
     return this.command<{ csv: string; next_cursor: string | null }>(`${this.databasePath(databaseId)}/export/csv`, "POST", input);
   }
 
+  private appendCsvChunk(chunks: string[], chunk: string) {
+    if (!chunk) return;
+    const previous = chunks[chunks.length - 1];
+    if (previous && !/[\r\n]$/u.test(previous) && !/^[\r\n]/u.test(chunk)) chunks.push("\r\n");
+    chunks.push(chunk);
+  }
+
   async exportAllCsv(databaseId: string, input: Omit<CsvExportInput, "cursor" | "include_header">) {
     let cursor: string | null = null;
-    let csv = "";
+    const chunks: string[] = [];
     do {
       const page = await this.exportCsv(databaseId, { ...input, cursor, include_header: cursor === null });
-      csv += page.csv;
+      this.appendCsvChunk(chunks, page.csv);
       cursor = page.next_cursor;
     } while (cursor);
-    return csv;
+    return chunks.join("");
   }
 
   /** Keeps each response page bounded and lets Blob own the final byte sequence. */
   async exportCsvBlob(databaseId: string, input: Omit<CsvExportInput, "cursor" | "include_header">) {
     let cursor: string | null = null;
-    const chunks: BlobPart[] = [];
+    const chunks: string[] = [];
     do {
       const page = await this.exportCsv(databaseId, { ...input, cursor, include_header: cursor === null });
-      chunks.push(page.csv);
+      this.appendCsvChunk(chunks, page.csv);
       cursor = page.next_cursor;
     } while (cursor);
     return new Blob(chunks, { type: "text/csv;charset=utf-8" });

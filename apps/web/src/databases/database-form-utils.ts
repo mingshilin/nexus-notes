@@ -14,8 +14,16 @@ export function propertyConfig(type: PropertyType, rawOptions: string, relationD
 
 export function normalizeFieldValue(property: DatabaseProperty, value: unknown) {
   if (value === "") return undefined;
-  if (property.type === "number") return Number(value);
-  if (property.type === "member" || property.type === "relation") return String(value).split(",").map((item) => item.trim()).filter(Boolean);
+  if (property.type === "number") return typeof value === "number" ? value : Number(value);
+  if (property.type === "member" || property.type === "relation") {
+    const multiple = (property.config as { allow_multiple?: boolean }).allow_multiple === true;
+    if (multiple) {
+      const values = Array.isArray(value) ? value : String(value).split(",");
+      return values.map((item) => String(item).trim()).filter(Boolean);
+    }
+    const scalar = Array.isArray(value) ? value[0] : value;
+    return scalar === undefined ? undefined : String(scalar).trim() || undefined;
+  }
   return value;
 }
 
