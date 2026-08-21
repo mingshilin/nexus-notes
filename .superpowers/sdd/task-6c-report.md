@@ -722,3 +722,35 @@ No hard-cancel behavior is claimed: the B1 extractor's existing bounded/late-res
 | `git diff --check` | PASS. |
 
 Commit: independent B2.2 commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C Fix B2.2a: Attempt Ceiling and FILES Capability
+
+### Scope
+
+This follow-up addresses only the two B2.2 Critical findings: D1-persisted native Queue attempts and safe private-file capability handling. Native ack/retry receiver behavior, health capability validation, typed native mocks, and TOML-section parsing remain explicitly deferred to B2.2b. No Web, legacy, Task 7, deployment, or secret changes were made.
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm run test -- tests/native-queue.test.ts tests/attachment-storage-capability.test.ts` | RED: native attempt 2 and deadline delivery left `attempt_count = 1`; native attempt 4 dead-lettered with count 1; missing FILES created an upload row; R2 delete failure left D1 deleted. |
+| Focused attachment/OCR Worker suite | GREEN: PASS, 55 tests in 6 files. |
+
+### Implemented
+
+- `claimOcrJob()` accepts normalized native delivery attempts, atomically advances D1 `attempt_count` monotonically before claim/retry decisions, caps it at 3, and safely dead-letters a delivery beyond the ceiling. The existing recovery flow therefore advances an expired native attempt 2 only to queued attempt 3 and cannot create attempt 4.
+- `OcrConsumer` forwards native message attempts to the repository rather than using them only for an in-memory delay calculation.
+- `AttachmentService` requires callable `get`, `put`, and `delete` before upload, content upload, download, or delete. Missing/incomplete FILES returns `ATTACHMENT_CAPABILITY_UNAVAILABLE` (503) before D1 mutation. Bootstrap no longer injects a no-op object store.
+- Delete now removes the private object before deleting D1 metadata, so a storage delete failure leaves metadata intact rather than creating an orphaned object.
+- Real-D1 tests cover native attempt greater than persisted, expiry plus recovery to the third and final attempt, capped over-limit delivery, missing/incomplete FILES without D1 changes, and failed R2 delete without D1 deletion.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| Focused attachment/OCR Worker suite | PASS, 55 tests in 6 files. |
+| `npm run test --workspace=@nexus/worker` | PASS, 168 tests in 34 files. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+Commit: independent B2.2a commit containing this report section; SHA is recorded in the final handoff.

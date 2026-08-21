@@ -132,16 +132,45 @@ describe("native Cloudflare OCR queue wiring", () => {
 
   it("uses the stricter persisted attempt when a native delivery is redelivered", async () => {
     const { createBetaWorker, db, job } = await fixture();
-    await db.prepare("UPDATE beta_ocr_jobs SET attempt_count = 2 WHERE id = ?").bind(job.job_id).run();
     const ai = { toMarkdown: vi.fn(async () => { throw Object.assign(new Error("OCR_TIMEOUT"), { retryable: true }); }) };
-    const redelivery = new FakeNativeMessage({ ...job, attempt: 2 }, 1);
+    const redelivery = new FakeNativeMessage(job, 2);
 
     await (createBetaWorker() as any).queue(fakeBatch([redelivery]), queueEnv(db, { ai }), {});
 
     expect(redelivery.ack).not.toHaveBeenCalled();
     expect(redelivery.retry).toHaveBeenCalledWith({ delaySeconds: 2 });
-    expect(await db.prepare("SELECT status FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first())
-      .toEqual({ status: "pending" });
+    expect(await db.prepare("SELECT status, attempt_count FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first())
+      .toEqual({ status: "pending", attempt_count: 2 });
+  });
+
+  it("persists native delivery attempts before deadline recovery and advances only to attempt three", async () => {
+    const { D1AttachmentRepository, createBetaWorker, db, job } = await fixture();
+    const expired = "2000-01-01T00:00:00.000Z";
+    await db.prepare("UPDATE beta_ocr_jobs SET deadline = ? WHERE id = ?").bind(expired, job.job_id).run();
+    const delivery = new FakeNativeMessage({ ...job, deadline: expired }, 2);
+
+    await (createBetaWorker() as any).queue(fakeBatch([delivery]), queueEnv(db), {});
+
+    expect(delivery.ack).toHaveBeenCalledOnce();
+    expect(await db.prepare("SELECT status, attempt_count FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first())
+      .toEqual({ status: "pending", attempt_count: 2 });
+    const repository = new (D1AttachmentRepository as any)(db);
+    await expect(repository.recoverStaleOcrJobs(new Date().toISOString(), 50)).resolves.toEqual({ requeued: 1, dead_lettered: 0 });
+    expect(await db.prepare("SELECT status, attempt_count FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first())
+      .toEqual({ status: "pending", attempt_count: 3 });
+  });
+
+  it("caps an over-limit native delivery at the persisted attempt ceiling before dead-lettering", async () => {
+    const { createBetaWorker, db, job } = await fixture();
+    const ai = { toMarkdown: vi.fn(async () => { throw Object.assign(new Error("OCR_TIMEOUT"), { retryable: true }); }) };
+    const delivery = new FakeNativeMessage(job, 4);
+
+    await (createBetaWorker() as any).queue(fakeBatch([delivery]), queueEnv(db, { ai }), {});
+
+    expect(delivery.ack).toHaveBeenCalledOnce();
+    expect(delivery.retry).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT status, attempt_count, last_error_code FROM beta_ocr_jobs WHERE id = ?").bind(job.job_id).first())
+      .toEqual({ status: "dead_letter", attempt_count: 3, last_error_code: "OCR_ATTEMPTS_EXHAUSTED" });
   });
 
   it.each(["AI", "FILES"] as const)("treats a missing %s binding as an OCR-only terminal degradation", async (binding) => {

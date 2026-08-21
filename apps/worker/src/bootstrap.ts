@@ -106,7 +106,7 @@ function createKnowledgeService(env: BetaWorkerEnv) {
 
 function createAttachmentService(env: BetaWorkerEnv) {
   const repository = new D1AttachmentRepository(env.DB);
-  return new AttachmentService(repository, env.FILES ?? {}, {
+  return new AttachmentService(repository, env.FILES, {
     outbox: env.JOBS ? new OcrOutboxDispatcher(repository, env.JOBS) : undefined,
   });
 }

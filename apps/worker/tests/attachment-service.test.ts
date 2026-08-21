@@ -9,12 +9,16 @@ async function loadWorker() {
 const context = { workspaceId: "ws-1", userId: "user-1" };
 const now = "2026-08-21T00:00:00.000Z";
 
+function configuredFiles(put = vi.fn(async () => undefined)) {
+  return { get: vi.fn(async () => null), put, delete: vi.fn(async () => undefined) };
+}
+
 describe("AttachmentService", () => {
   it("rejects unsupported MIME types and files exceeding the 25 MB limit before reserving storage", async () => {
     const worker = await loadWorker();
     expect(worker.AttachmentService).toBeTypeOf("function");
     const repository = { reserveUpload: vi.fn() };
-    const service = new (worker.AttachmentService as new (...args: any[]) => any)(repository, {}, { clock: () => new Date(now) });
+    const service = new (worker.AttachmentService as new (...args: any[]) => any)(repository, configuredFiles(), { clock: () => new Date(now) });
 
     await expect(service.createUpload(context, {
       filename: "unsafe.svg", mime_type: "image/svg+xml", size_bytes: 16, idempotency_key: "upload-1",
@@ -32,7 +36,7 @@ describe("AttachmentService", () => {
         throw Object.assign(new Error("Workspace attachment quota exceeded"), { code: "ATTACHMENT_QUOTA_EXCEEDED" });
       }),
     };
-    const service = new (worker.AttachmentService as new (...args: any[]) => any)(repository, {}, { clock: () => new Date(now) });
+    const service = new (worker.AttachmentService as new (...args: any[]) => any)(repository, configuredFiles(), { clock: () => new Date(now) });
 
     await expect(service.createUpload(context, {
       filename: "scan.pdf", mime_type: "application/pdf", size_bytes: 5, idempotency_key: "upload-over-quota",
@@ -48,7 +52,7 @@ describe("AttachmentService", () => {
       size_bytes: 4, status: "uploading", revision: 1, created_at: now, updated_at: now,
     };
     const repository = { getAttachment: vi.fn(async () => attachment), markUploaded: vi.fn() };
-    const files = { put: vi.fn() };
+    const files = configuredFiles(vi.fn());
     const service = new (worker.AttachmentService as new (...args: any[]) => any)(repository, files, { clock: () => new Date(now) });
 
     await expect(service.uploadContent(context, "attachment-1", new Uint8Array([0x89, 0x50, 0x4e, 0x47]))).rejects.toMatchObject({
@@ -76,7 +80,7 @@ describe("AttachmentService", () => {
       getAttachment: vi.fn().mockResolvedValueOnce(uploading).mockResolvedValueOnce(ready),
       markUploaded: vi.fn(async () => undefined),
     };
-    const files = { put: vi.fn(async () => undefined) };
+    const files = configuredFiles(vi.fn(async () => undefined));
     const service = new (worker.AttachmentService as new (...args: any[]) => any)(repository, files, { clock: () => new Date(now) });
 
     await expect(service.uploadContent(context, "attachment-1", new Uint8Array(signature))).resolves.toEqual(ready);
@@ -96,7 +100,7 @@ describe("AttachmentService", () => {
       size_bytes: signature.length, status: "uploading", revision: 1, created_at: now, updated_at: now,
     };
     const repository = { getAttachment: vi.fn(async () => attachment), markUploaded: vi.fn() };
-    const files = { put: vi.fn() };
+    const files = configuredFiles(vi.fn());
     const service = new (worker.AttachmentService as new (...args: any[]) => any)(repository, files, { clock: () => new Date(now) });
 
     await expect(service.uploadContent(context, "attachment-1", new Uint8Array(signature))).rejects.toMatchObject({

@@ -1,7 +1,7 @@
 import type { QueueJob } from "@nexus/contracts";
 
 interface OcrRepository {
-  claimOcrJob(job: QueueJob, now: string): Promise<{
+  claimOcrJob(job: QueueJob, now: string, nativeAttempts: number): Promise<{
     id: string;
     workspace_id: string;
     attachment_id: string;
@@ -195,7 +195,7 @@ export class OcrConsumer {
       return { outcome: "ack" };
     }
     const now = this.clock().toISOString();
-    const claimed = await this.repository.claimOcrJob(job, now);
+    const claimed = await this.repository.claimOcrJob(job, now, message.attempts);
     if (!claimed) {
       safeAck(message);
       return { outcome: "ack" };

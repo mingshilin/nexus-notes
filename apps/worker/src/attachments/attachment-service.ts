@@ -96,11 +96,18 @@ export class AttachmentService {
 
   constructor(
     private readonly repository: AttachmentRepository,
-    private readonly files: PrivateFiles,
+    private readonly files?: PrivateFiles,
     options: { clock?: () => Date; outbox?: OutboxDispatcher } = {},
   ) {
     this.clock = options.clock ?? (() => new Date());
     this.outbox = options.outbox;
+  }
+
+  private requireFiles() {
+    if (typeof this.files?.get !== "function" || typeof this.files.put !== "function" || typeof this.files.delete !== "function") {
+      throw new AttachmentServiceError("ATTACHMENT_CAPABILITY_UNAVAILABLE", "Attachment storage is not configured", 503);
+    }
+    return this.files as Required<PrivateFiles>;
   }
 
   async createUpload(context: AttachmentActorContext, input: CreateAttachmentUploadInput) {
@@ -110,6 +117,7 @@ export class AttachmentService {
     if (input.size_bytes > MAX_UPLOAD_BYTES) {
       throw new AttachmentServiceError("ATTACHMENT_FILE_TOO_LARGE", "Attachment exceeds the 25 MB limit", 413);
     }
+    this.requireFiles();
     if (!this.repository.reserveUpload) {
       throw new AttachmentServiceError("ATTACHMENT_UPLOAD_UNAVAILABLE", "Attachment upload is not configured", 503);
     }
@@ -133,6 +141,7 @@ export class AttachmentService {
   }
 
   async uploadContent(context: AttachmentActorContext, attachmentId: string, body: Uint8Array) {
+    const files = this.requireFiles();
     const attachment = await this.repository.getAttachment(context.workspaceId, attachmentId, false);
     if (!attachment) throw new AttachmentServiceError("ATTACHMENT_NOT_FOUND", "Attachment not found", 404);
     if (attachment.status !== "uploading") {
@@ -144,10 +153,7 @@ export class AttachmentService {
     if (!signatureMatches(attachment.mime_type, body)) {
       throw new AttachmentServiceError("ATTACHMENT_SIGNATURE_MISMATCH", "Attachment bytes do not match its declared type", 400);
     }
-    if (!this.files.put) {
-      throw new AttachmentServiceError("ATTACHMENT_STORAGE_UNAVAILABLE", "Attachment storage is not configured", 503);
-    }
-    await this.files.put(objectKey(context.workspaceId, attachmentId), body, { httpMetadata: { contentType: attachment.mime_type } });
+    await files.put(objectKey(context.workspaceId, attachmentId), body, { httpMetadata: { contentType: attachment.mime_type } });
     await this.repository.markUploaded?.(context.workspaceId, attachmentId, this.clock().toISOString());
     return this.getAttachment(context, attachmentId);
   }
@@ -181,19 +187,21 @@ export class AttachmentService {
   }
 
   async download(context: AttachmentActorContext, attachmentId: string) {
+    const files = this.requireFiles();
     const attachment = await this.getAttachment(context, attachmentId);
-    const object = await this.files.get?.(objectKey(context.workspaceId, attachmentId));
+    const object = await files.get(objectKey(context.workspaceId, attachmentId));
     if (!object) throw new AttachmentServiceError("ATTACHMENT_CONTENT_NOT_FOUND", "Attachment content not found", 404);
     return { body: object.body, mime_type: attachment.mime_type, filename: attachment.filename };
   }
 
   async deleteAttachment(context: AttachmentActorContext, attachmentId: string) {
+    const files = this.requireFiles();
     await this.getAttachment(context, attachmentId);
     if (!this.repository.deleteAttachment) {
       throw new AttachmentServiceError("ATTACHMENT_DELETE_UNAVAILABLE", "Attachment deletion is not configured", 503);
     }
+    await files.delete(objectKey(context.workspaceId, attachmentId));
     await this.repository.deleteAttachment(context.workspaceId, attachmentId, this.clock().toISOString());
-    await this.files.delete?.(objectKey(context.workspaceId, attachmentId));
   }
 
   async retryOcr(context: AttachmentActorContext, input: OcrRetryInput) {

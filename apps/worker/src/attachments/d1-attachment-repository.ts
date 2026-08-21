@@ -218,7 +218,7 @@ export class D1AttachmentRepository {
     };
   }
 
-  async claimOcrJob(message: QueueJob, now: string) {
+  async claimOcrJob(message: QueueJob, now: string, nativeAttempts = 1) {
     const parsed = QueueJobSchema.safeParse(message);
     if (!parsed.success) return null;
     const job = parsed.data;
@@ -227,10 +227,29 @@ export class D1AttachmentRepository {
     const sourceRevision = job.payload.source_revision;
     if (job.kind !== "ocr" || typeof workspaceId !== "string" || typeof attachmentId !== "string"
       || !Number.isInteger(sourceRevision) || Number(sourceRevision) <= 0) return null;
+    const deliveryAttempts = Math.max(1, Math.floor(nativeAttempts));
+    const boundedAttempts = Math.min(deliveryAttempts, MAX_OCR_ATTEMPTS);
+    const exhausted = deliveryAttempts > MAX_OCR_ATTEMPTS;
+    await this.db.prepare(
+      `UPDATE beta_ocr_jobs SET attempt_count = CASE WHEN attempt_count < ? THEN ? ELSE attempt_count END,
+       status = CASE WHEN ? THEN 'dead_letter' ELSE status END,
+       last_error_code = CASE WHEN ? THEN 'OCR_ATTEMPTS_EXHAUSTED' ELSE last_error_code END,
+       revision = revision + 1, updated_at = ?
+       WHERE workspace_id = ? AND id = ? AND attachment_id = ? AND source_revision = ?
+       AND status = 'pending' AND idempotency_key = ? AND attempt_count >= ? AND deadline = ?
+       AND (attempt_count < ? OR ?)
+       AND EXISTS (
+         SELECT 1 FROM beta_attachments a
+         WHERE a.workspace_id = beta_ocr_jobs.workspace_id AND a.id = beta_ocr_jobs.attachment_id
+         AND a.status = 'ready' AND a.revision = beta_ocr_jobs.source_revision
+       )`,
+    ).bind(boundedAttempts, boundedAttempts, exhausted ? 1 : 0, exhausted ? 1 : 0, now,
+      workspaceId, job.job_id, attachmentId, sourceRevision, job.idempotency_key, job.attempt, job.deadline,
+      boundedAttempts, exhausted ? 1 : 0).run();
     return this.db.prepare(
       `UPDATE beta_ocr_jobs SET status = 'processing', revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND id = ? AND attachment_id = ? AND source_revision = ?
-       AND status = 'pending' AND idempotency_key = ? AND attempt_count = ? AND deadline = ? AND deadline > ?
+       AND status = 'pending' AND idempotency_key = ? AND attempt_count >= ? AND deadline = ? AND deadline > ?
        AND EXISTS (
          SELECT 1 FROM beta_attachments a
          WHERE a.workspace_id = beta_ocr_jobs.workspace_id AND a.id = beta_ocr_jobs.attachment_id
