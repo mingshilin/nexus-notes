@@ -73,6 +73,7 @@ function AuthenticatedWorkspace({
   const [databaseRecordsNextCursor, setDatabaseRecordsNextCursor] = useState<string | null>(null);
   const [databaseLoading, setDatabaseLoading] = useState(false);
   const [databaseError, setDatabaseError] = useState<string | null>(null);
+  const [databaseRefreshVersion, setDatabaseRefreshVersion] = useState(0);
   const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState<ServiceWorkerUpdate | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [diagnostics, setDiagnostics] = useState<KnowledgeDiagnostic[]>([]);
@@ -240,7 +241,7 @@ function AuthenticatedWorkspace({
       if (!controller.signal.aborted) setDatabaseLoading(false);
     });
     return () => controller.abort();
-  }, [activeDomain, apiClient, workspaceId]);
+  }, [activeDomain, apiClient, databaseRefreshVersion, workspaceId]);
 
   useEffect(() => {
     if (activeDomain !== "databases" || !workspaceId || !selectedDatabaseId) {
@@ -258,10 +259,14 @@ function AuthenticatedWorkspace({
     setDatabaseBundle(null);
     setDatabaseRecords([]);
     setDatabaseRecordsNextCursor(null);
-    void Promise.all([
-      client.getDatabase(selectedDatabaseId, controller.signal),
-      client.listRecords(selectedDatabaseId, { limit: 100, signal: controller.signal }),
-    ]).then(([bundle, page]) => {
+    void client.getDatabase(selectedDatabaseId, controller.signal).then(async (bundle) => {
+      const page = await client.listRecords(selectedDatabaseId, {
+        // The first bounded page must align with the active saved view's cursor chain.
+        limit: bundle.views[0]?.config.page_size ?? 50,
+        signal: controller.signal,
+      });
+      return [bundle, page] as const;
+    }).then(([bundle, page]) => {
       if (controller.signal.aborted) return;
       setDatabaseBundle(bundle);
       setDatabaseRecords(page.items);
@@ -280,11 +285,11 @@ function AuthenticatedWorkspace({
       if (!controller.signal.aborted) setDatabaseLoading(false);
     });
     return () => controller.abort();
-  }, [activeDomain, apiClient, selectedDatabaseId, workspaceId]);
+  }, [activeDomain, apiClient, databaseRefreshVersion, selectedDatabaseId, workspaceId]);
 
-  const requestDatabasePage = useCallback((cursor: string | null) => {
+  const requestDatabasePage = useCallback(({ cursor, limit }: { cursor: string | null; limit: number }) => {
     if (!workspaceId || !selectedDatabaseId) return Promise.resolve({ items: [], next_cursor: null });
-    return new DatabaseClient(apiClient, workspaceId).listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, limit: 100 })
+    return new DatabaseClient(apiClient, workspaceId).listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, limit })
       .then((page) => {
         setDatabaseRecordsNextCursor(page.next_cursor);
         return page;
@@ -443,7 +448,9 @@ function AuthenticatedWorkspace({
         records={databaseRecords}
         recordsNextCursor={databaseRecordsNextCursor}
         views={databaseBundle.views}
-        onTablePageRequest={requestDatabasePage}
+        client={new DatabaseClient(apiClient, workspaceId)}
+        onMutation={() => setDatabaseRefreshVersion((version) => version + 1)}
+        onRecordsPageRequest={requestDatabasePage}
         onBoardMove={(input) => new DatabaseClient(apiClient, workspaceId).boardMove(databaseBundle.database.id, input)}
         onCalendarAssign={(input) => new DatabaseClient(apiClient, workspaceId).calendarAssign(databaseBundle.database.id, input)}
       />

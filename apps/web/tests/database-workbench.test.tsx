@@ -47,7 +47,7 @@ describe("DatabaseWorkbench", () => {
       getItem: (key: string) => pageStorage.get(key) ?? null,
       setItem: (key: string, value: string) => pageStorage.set(key, value),
     });
-    const onTablePageRequest = vi.fn(async ({ cursor }: { cursor: string | null }) => ({
+    const onRecordsPageRequest = vi.fn(async ({ cursor }: { cursor: string | null }) => ({
       items: [record(2, { name: "Project 2" }), record(3, { name: "Project 3" })],
       next_cursor: cursor === "cursor-1" ? "cursor-2" : null,
     }));
@@ -56,13 +56,13 @@ describe("DatabaseWorkbench", () => {
       database, properties: [textProperty], records: [record(0, { name: "Project 0" }), record(1, { name: "Project 1" })],
       recordsNextCursor: "cursor-1", paginationStore: pageStore,
       views: [view("table", "table", { ...baseConfig, page_size: 2 })], activeViewId: "table",
-      onTablePageRequest,
+      onRecordsPageRequest,
     }));
 
     fireEvent.click(screen.getByRole("button", { name: "下一页" }));
-    await waitFor(() => expect(onTablePageRequest).toHaveBeenCalledWith("cursor-1"));
-    expect(await screen.findByText("3–4 / 4")).toBeInTheDocument();
-    expect(pageStore.read("ws-1", "db-1", "table")).toEqual({ page: 2, pageSize: 2, cursor: "cursor-1" });
+    await waitFor(() => expect(onRecordsPageRequest).toHaveBeenCalledWith({ cursor: "cursor-1", limit: 2 }));
+    expect(await screen.findByText("3–4 / 4+")).toBeInTheDocument();
+    expect(pageStore.read("ws-1", "db-1", "table")).toEqual({ page: 2, pageSize: 2, cursors: { 1: null, 2: "cursor-1", 3: "cursor-2" } });
   });
 
   it("segments board columns and restores the dragged record when the command fails", async () => {

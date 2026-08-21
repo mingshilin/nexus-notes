@@ -9,6 +9,7 @@ export function DatabaseTableView({
   pageSize,
   onPageChange,
   hasNextPage = false,
+  exactPage = false,
 }: {
   properties: readonly DatabaseProperty[];
   records: readonly DatabaseRecord[];
@@ -16,12 +17,14 @@ export function DatabaseTableView({
   pageSize: number;
   onPageChange(page: number): void;
   hasNextPage?: boolean;
+  /** A restored remote page contains only its own records, not prior page data. */
+  exactPage?: boolean;
 }) {
-  const pageCount = Math.max(1, Math.ceil(records.length / pageSize));
+  const pageCount = exactPage ? page : Math.max(1, Math.ceil(records.length / pageSize));
   const safePage = Math.min(page, pageCount);
-  const start = (safePage - 1) * pageSize;
-  const rows = records.slice(start, start + pageSize);
-  const end = Math.min(start + rows.length, records.length);
+  const start = exactPage ? (safePage - 1) * pageSize : (safePage - 1) * pageSize;
+  const rows = exactPage ? records : records.slice(start, start + pageSize);
+  const end = start + rows.length;
 
   return (
     <section className="database-table-view" aria-label="数据库表格">
@@ -38,7 +41,7 @@ export function DatabaseTableView({
         </table>
       </div>
       <footer className="database-pagination">
-        <span>{records.length === 0 ? "0 / 0" : `${start + 1}–${end} / ${records.length}`}</span>
+        <span>{records.length === 0 ? "0 / 0" : `${start + 1}–${end} / ${exactPage && hasNextPage ? `${end}+` : exactPage ? end : records.length}`}</span>
         <div>
           <button type="button" disabled={safePage <= 1} onClick={() => onPageChange(safePage - 1)}>上一页</button>
           <button type="button" disabled={safePage >= pageCount && !hasNextPage} onClick={() => onPageChange(safePage + 1)}>下一页</button>

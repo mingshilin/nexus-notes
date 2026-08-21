@@ -15,7 +15,7 @@ describe("live database workspace", () => {
     const apiClient = { request: vi.fn(async ({ path }: { path: string }) => {
       if (path === "/api/v2/databases") return { items: [database] };
       if (path === "/api/v2/databases/db-1") return { database, role: "owner", properties: [property], views: [view], templates: [] };
-      if (path === "/api/v2/databases/db-1/records?limit=100") return { items: [record], next_cursor: null };
+      if (path === "/api/v2/databases/db-1/records?limit=50") return { items: [record], next_cursor: null };
       return { items: [], next_cursor: null };
     }) };
     render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
@@ -29,7 +29,7 @@ describe("live database workspace", () => {
     await waitFor(() => expect(apiClient.request.mock.calls.map(([options]) => options.path)).toEqual(expect.arrayContaining([
       "/api/v2/databases",
       "/api/v2/databases/db-1",
-      "/api/v2/databases/db-1/records?limit=100",
+      "/api/v2/databases/db-1/records?limit=50",
     ])));
     expect(apiClient.request.mock.calls.filter(([options]) => options.path.startsWith("/api/v2/databases")).every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
     expect(document.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);

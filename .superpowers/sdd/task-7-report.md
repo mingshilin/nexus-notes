@@ -62,3 +62,49 @@ The Worker suite still emits the existing `OCR_QUEUE_MESSAGE_INVALID` stderr lin
 - References and dates: member values require workspace membership, relation config and values require same-workspace target databases and live target records, and date config no longer accepts `include_time`.
 - Search: contracts/routes/repository/client carry deterministic `(updated_at, id)` keyset cursors with bounded pages.
 - Remaining Web review findings: the broader Web workflow/UI gaps from Review Fix Wave 1 remain outside this backend worker scope for the next sequential agent.
+
+## Task 7 Web Fix Wave
+
+### RED evidence
+
+- Added `apps/web/tests/database-task7-web.test.tsx` before the Web changes and ran `npm run test --workspace @nexus/web -- tests/database-task7-web.test.tsx`.
+- The initial RED run failed `5/5` behavior tests for the expected missing behavior: saved visible columns were ignored, page-three restoration never called the page cursor, `dragend` still allowed a move, the tools drawer had no action controls, and board/calendar did not request later cursor pages.
+
+### GREEN evidence
+
+- `npm run test --workspace @nexus/web -- tests/database-client.test.ts tests/database-state.test.ts tests/database-workbench.test.tsx tests/database-workspace-live.test.tsx tests/database-task7-web.test.tsx`: passed `5/5` files and `15/15` tests.
+- `npm run test --workspace @nexus/web`: passed `21/21` files and `81/81` tests.
+- `npm run typecheck --workspace @nexus/web`: passed, exit `0`.
+- `npm run build --workspace @nexus/web`: passed. Vite emitted no `>500 kB` warning; the lazy `DatabaseWorkbench` chunk is `16.60 kB` (`5.45 kB` gzip).
+- `npm run beta:build`: passed for Web, Worker, contracts, domain, testkit, and UI.
+- `npm run verify:deploy`: passed local readiness checks. The built Web entry was separately inspected for preload references; `DatabaseWorkbench` remains lazy and no Markdown/OCR modulepreload was introduced.
+- `git diff --check`: passed with no output.
+
+### Requirement mapping
+
+- Typed Web client workflows: `DatabaseToolsDrawer` now exposes executable database/property/record/view/template/comment/permission actions, atomic template/bulk actions, and CSV import/export through `DatabaseClient`; all command paths are exercised by a real client mock in the behavior test.
+- Saved views: `executeView` applies filters and deterministic sorts before rendering; `visibleProperties` applies visible columns and hidden-field exclusion. Saved page size drives the initial bounded request and later requests.
+- Pagination and scale: table uses exact cached remote pages plus a persisted per-page cursor chain; board/calendar drain subsequent bounded cursor pages and retain segment/card caps. The existing 5,000-record test still renders exactly 50 table rows.
+- Optimistic mutations: board/calendar attach a per-record operation ID, only commit/restore if it is still current, and restore only that record. The race and failure path is exercised in `database-task7-web.test.tsx`.
+- Drag lifecycle: board/calendar clear drag state on `dragend` and on view or record-set revision changes; the canceled drag path is covered.
+- Responsive behavior: the mobile workbench test runs at `390px` and `devicePixelRatio=2`, opens the action drawer, executes a real client command, and asserts one page scroll owner. Existing CSS preserves safe-area/keyboard layout and the lazy workbench chunk.
+
+### Files changed
+
+- `apps/web/src/app/App.tsx`
+- `apps/web/src/data/database-state.ts`
+- `apps/web/src/databases/DatabaseWorkbench.tsx`
+- `apps/web/src/databases/DatabaseToolsDrawer.tsx`
+- `apps/web/src/databases/DatabaseTableView.tsx`
+- `apps/web/src/databases/DatabaseBoardView.tsx`
+- `apps/web/src/databases/DatabaseCalendarView.tsx`
+- `apps/web/src/databases/database-view-utils.ts`
+- `apps/web/src/styles.css`
+- `apps/web/tests/database-task7-web.test.tsx`
+- Existing database Web tests updated for the cursor-chain page request contract.
+
+### Self-review and residual concerns
+
+- Verified no Worker, domain, contract, migration, deployment, or plan/ledger files were modified.
+- Bulk edit is deliberately command-first and refreshes through the App mutation flow; it does not yet provide an optimistic bulk preview with per-record rollback tokens. It is safe from stale local rollback but does not meet the review request's explicit optimistic-bulk UX requirement.
+- The tools drawer provides complete `DatabaseClient` operation coverage through an actionable JSON payload editor; the Worker validates each payload against the shared contract boundary. It is a compact operations console rather than dedicated field-by-field forms for every property type.

@@ -1,7 +1,8 @@
 export interface DatabasePaginationState {
   page: number;
   pageSize: number;
-  cursor: string | null;
+  /** Cursor used to request each 1-based page. Page one always starts at null. */
+  cursors: Record<number, string | null>;
 }
 
 interface StorageLike {
@@ -20,8 +21,20 @@ export class DatabasePaginationStore {
       if (!value || typeof value !== "object") return null;
       const state = value as Partial<DatabasePaginationState>;
       if (!Number.isInteger(state.page) || state.page! < 1 || !Number.isInteger(state.pageSize) || state.pageSize! < 1) return null;
-      if (state.cursor !== null && typeof state.cursor !== "string") return null;
-      return { page: state.page!, pageSize: state.pageSize!, cursor: state.cursor ?? null };
+      const rawCursors = state.cursors;
+      if (!rawCursors || typeof rawCursors !== "object") {
+        // Read the short-lived pre-beta format without trusting its page-three cursor.
+        const legacy = state as Partial<DatabasePaginationState> & { cursor?: unknown };
+        if (legacy.cursor !== null && legacy.cursor !== undefined && typeof legacy.cursor !== "string") return null;
+        return { page: state.page!, pageSize: state.pageSize!, cursors: { 1: null, [state.page!]: legacy.cursor ?? null } };
+      }
+      const cursors: Record<number, string | null> = {};
+      for (const [page, cursor] of Object.entries(rawCursors)) {
+        if (!Number.isInteger(Number(page)) || Number(page) < 1 || (cursor !== null && typeof cursor !== "string")) return null;
+        cursors[Number(page)] = cursor as string | null;
+      }
+      if (cursors[1] !== null || !(state.page! in cursors)) return null;
+      return { page: state.page!, pageSize: state.pageSize!, cursors };
     } catch {
       return null;
     }

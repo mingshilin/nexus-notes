@@ -1,7 +1,5 @@
 import type { CalendarAssignmentInput, DatabaseProperty, DatabaseRecord, DatabaseView } from "@nexus/contracts";
-import { useState } from "react";
-
-import { runOptimisticMutation } from "../data/database-state";
+import { useEffect, useRef, useState } from "react";
 import { recordTitle, replaceRecord } from "./database-view-utils";
 
 function monthDates(records: readonly DatabaseRecord[], propertyId: string) {
@@ -30,12 +28,20 @@ export function DatabaseCalendarView({
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [moreDate, setMoreDate] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const latestRecords = useRef(records);
+  const operations = useRef(new Map<string, string>());
+  const draggedRecord = useRef<string | null>(null);
+  const recordSetKey = records.map((record) => `${record.id}:${record.revision}`).join("|");
+  latestRecords.current = records;
+
+  useEffect(() => { draggedRecord.current = null; setDraggedId(null); }, [recordSetKey, view.id]);
 
   if (!dateProperty) return <p className="database-empty">Calendar view 需要 date 字段。</p>;
 
   const assign = (date: string | null) => {
-    if (!draggedId) return;
-    const record = records.find((candidate) => candidate.id === draggedId);
+    const id = draggedRecord.current ?? draggedId;
+    if (!id) return;
+    const record = latestRecords.current.find((candidate) => candidate.id === id);
     if (!record) return;
     const optimistic = { ...record, values: { ...record.values, [dateProperty.id]: date }, revision: record.revision + 1 };
     const input: CalendarAssignmentInput = {
@@ -44,15 +50,26 @@ export function DatabaseCalendarView({
       date,
       base_revision: record.revision,
     };
+    draggedRecord.current = null;
     setDraggedId(null);
     setError(null);
-    void runOptimisticMutation({
-      snapshot: () => [...records],
-      apply: () => onRecordsChange(replaceRecord(records, optimistic)),
-      command: () => onCalendarAssign?.(input) ?? Promise.resolve(optimistic),
-      restore: (snapshot) => onRecordsChange(snapshot),
-      commit: (saved) => onRecordsChange(replaceRecord(records, saved)),
-    }).catch(() => setError("日期分配失败，已恢复原日期。"));
+    const operationId = crypto.randomUUID();
+    operations.current.set(record.id, operationId);
+    const next = replaceRecord(latestRecords.current, optimistic);
+    latestRecords.current = next;
+    onRecordsChange(next);
+    void (onCalendarAssign?.(input) ?? Promise.resolve(optimistic)).then((saved) => {
+      if (operations.current.get(record.id) !== operationId) return;
+      const committed = replaceRecord(latestRecords.current, saved);
+      latestRecords.current = committed;
+      onRecordsChange(committed);
+    }).catch(() => {
+      if (operations.current.get(record.id) !== operationId) return;
+      const restored = replaceRecord(latestRecords.current, record);
+      latestRecords.current = restored;
+      onRecordsChange(restored);
+      setError("日期分配失败，已恢复原日期。");
+    });
   };
 
   const dates = monthDates(records, dateProperty.id);
@@ -72,7 +89,8 @@ export function DatabaseCalendarView({
                 data-testid={`calendar-undated-${record.id}`}
                 draggable
                 key={record.id}
-                onDragStart={() => setDraggedId(record.id)}
+                onDragStart={() => { draggedRecord.current = record.id; setDraggedId(record.id); }}
+                onDragEnd={() => { draggedRecord.current = null; setDraggedId(null); }}
               >{recordTitle(record, properties)}</article>
             ))}
           </div>
@@ -97,7 +115,8 @@ export function DatabaseCalendarView({
                   data-testid={`calendar-card-${record.id}`}
                   draggable
                   key={record.id}
-                  onDragStart={() => setDraggedId(record.id)}
+                  onDragStart={() => { draggedRecord.current = record.id; setDraggedId(record.id); }}
+                  onDragEnd={() => { draggedRecord.current = null; setDraggedId(null); }}
                 >{recordTitle(record, properties)}</article>
               ))}
               {dated.length > 3 ? (
@@ -118,7 +137,8 @@ export function DatabaseCalendarView({
               data-testid={`calendar-card-${record.id}`}
               draggable
               key={record.id}
-              onDragStart={() => setDraggedId(record.id)}
+              onDragStart={() => { draggedRecord.current = record.id; setDraggedId(record.id); }}
+              onDragEnd={() => { draggedRecord.current = null; setDraggedId(null); }}
             >{recordTitle(record, properties)}</article>
           ))}
         </div>
