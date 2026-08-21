@@ -1,6 +1,13 @@
 import type { RouteDefinition } from "../http/route-registry";
 
 export interface BetaWorkerEnv {
+  DB: D1Database;
+  APP_BASE_URL: string;
+  CORS_ALLOWED_ORIGINS?: string;
+  RATE_LIMIT_SECRET: string;
+  TURNSTILE_SECRET_KEY: string;
+  RESEND_API_KEY: string;
+  EMAIL_FROM: string;
   DEPLOYMENT_VERSION?: string;
 }
 

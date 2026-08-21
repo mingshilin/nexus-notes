@@ -1,0 +1,14 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { describe, expect, it } from "vitest";
+
+describe("preview Worker configuration", () => {
+  it("dispatches API requests to the Worker before the SPA asset fallback", () => {
+    const config = readFileSync(resolve(process.cwd(), "wrangler.preview.example.toml"), "utf8");
+    const assets = config.match(/\[assets\]([\s\S]*?)(?=\n\[|$)/)?.[1] ?? "";
+
+    expect(assets).toContain('binding = "ASSETS"');
+    expect(assets).toContain('not_found_handling = "single-page-application"');
+    expect(assets).toContain('run_worker_first = ["/api/*"]');
+  });
+});

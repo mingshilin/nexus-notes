@@ -85,7 +85,7 @@ export class ApiClient {
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = options.baseUrl?.replace(/\/$/, "") ?? "";
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.sleep = options.sleep ?? defaultSleep;
     this.random = options.random ?? Math.random;
   }

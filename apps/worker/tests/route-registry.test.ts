@@ -45,7 +45,7 @@ describe("typed v2 route registry", () => {
     registry.register({
       method: "GET",
       path: "/api/v2/notes/:noteId",
-      auth: "workspace",
+      auth: "public",
       handler: ({ params }: { params: Record<string, string> }) => ({ data: { id: params.noteId } }),
     });
 

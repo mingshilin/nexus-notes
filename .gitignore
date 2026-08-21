@@ -10,6 +10,7 @@ dist/
 migrations/_tmp*.sql
 coverage/
 playwright-report/
+.playwright-cli/
 test-results/
 .DS_Store
 Thumbs.db

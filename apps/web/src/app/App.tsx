@@ -9,6 +9,8 @@ import {
   Users,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { AuthClient, AuthGate } from "../auth";
+import { ApiClient } from "../data/api-client";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
 
@@ -20,7 +22,14 @@ const domains = [
   { label: "运营", icon: Settings },
 ];
 
-export function App() {
+const defaultAuthClient = new AuthClient(new ApiClient());
+
+function resetTokenFromLocation() {
+  if (typeof window === "undefined") return undefined;
+  return new URLSearchParams(window.location.search).get("reset_token") ?? undefined;
+}
+
+function AuthenticatedWorkspace() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
   const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState<ServiceWorkerUpdate | null>(null);
@@ -107,5 +116,21 @@ export function App() {
       </article>
       </AdaptiveWorkbench>
     </>
+  );
+}
+
+export function App({
+  authClient = defaultAuthClient,
+  turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "",
+  resetToken = resetTokenFromLocation(),
+}: {
+  authClient?: AuthClient;
+  turnstileSiteKey?: string;
+  resetToken?: string;
+} = {}) {
+  return (
+    <AuthGate client={authClient} turnstileSiteKey={turnstileSiteKey} resetToken={resetToken}>
+      <AuthenticatedWorkspace />
+    </AuthGate>
   );
 }

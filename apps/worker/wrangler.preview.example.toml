@@ -8,11 +8,14 @@ preview_urls = true
 directory = "../web/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
 
 [vars]
 APP_NAME = "Nexus Notes Beta Preview"
 APP_BASE_URL = "https://nexus-notes-public-beta-preview.example.workers.dev"
 AI_ENABLED = "false"
+CORS_ALLOWED_ORIGINS = "https://nexus-notes-public-beta-preview.example.workers.dev"
+DEPLOYMENT_VERSION = "development"
 
 [[d1_databases]]
 binding = "DB"

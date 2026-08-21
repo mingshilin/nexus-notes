@@ -104,4 +104,28 @@ describe("ApiClient", () => {
       "idempotency-key": "create-note-1",
     });
   });
+
+  it("keeps the native global receiver when using the default fetch", async () => {
+    const web = await loadWeb();
+    const nativeLikeFetch = vi.fn(function (this: unknown) {
+      if (this !== globalThis) throw new TypeError("Illegal invocation");
+      return Promise.resolve(success({ ok: true }));
+    });
+    vi.stubGlobal("fetch", nativeLikeFetch);
+    try {
+      const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+        request<T>(options: Record<string, unknown>): Promise<T>;
+      };
+      const client = new ApiClient({ baseUrl: "https://beta.test" });
+
+      await expect(client.request({
+        path: "/api/v2/health",
+        requestClass: "query",
+        policy: { timeoutMs: 1_000, retry: 0 },
+      })).resolves.toEqual({ ok: true });
+      expect(nativeLikeFetch).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
