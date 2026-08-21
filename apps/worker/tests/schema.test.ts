@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const migrationPath = resolve(import.meta.dirname, "../migrations/0001_beta_schema.sql");
+const searchMigrationPath = resolve(import.meta.dirname, "../migrations/0002_search_document_sync.sql");
 
 describe("Beta D1 schema", () => {
   it("creates all public Beta domain tables", () => {
@@ -35,5 +36,15 @@ describe("Beta D1 schema", () => {
 
     expect(sql).toMatch(/operation_id TEXT NOT NULL UNIQUE/i);
     expect(sql).toMatch(/cursor INTEGER PRIMARY KEY AUTOINCREMENT/i);
+  });
+
+  it("keeps the external-content FTS index synchronized", () => {
+    expect(existsSync(searchMigrationPath)).toBe(true);
+    const sql = readFileSync(searchMigrationPath, "utf8");
+
+    expect(sql).toMatch(/AFTER INSERT ON search_documents/i);
+    expect(sql).toMatch(/AFTER UPDATE ON search_documents/i);
+    expect(sql).toMatch(/AFTER DELETE ON search_documents/i);
+    expect(sql).toMatch(/INSERT INTO search_documents_fts[\s\S]*SELECT rowid/i);
   });
 });

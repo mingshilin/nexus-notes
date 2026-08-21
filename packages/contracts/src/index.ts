@@ -1,5 +1,6 @@
 export * from "./api";
 export * from "./jobs";
+export * from "./knowledge";
 export * from "./notes";
 export * from "./pagination";
 export * from "./request-policy";

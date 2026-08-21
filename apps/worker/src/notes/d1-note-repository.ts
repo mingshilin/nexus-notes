@@ -117,8 +117,14 @@ export class D1NoteRepository implements NoteRepository {
          workspace_id, entity_type, entity_id, revision, kind, payload_json, created_at
        ) VALUES (?, 'note', ?, 1, 'create', ?, ?)`,
     ).bind(note.workspace_id, note.id, JSON.stringify(note), input.now);
+    const insertSearchDocument = this.db.prepare(
+      `INSERT INTO search_documents (
+         id, workspace_id, entity_type, entity_id, title, content, tags, properties,
+         attachment_names, ocr_text, revision, updated_at
+       ) VALUES (?, ?, 'note', ?, ?, ?, '', '', '', '', 1, ?)`,
+    ).bind(`search:note:${note.id}`, note.workspace_id, note.id, note.title, note.content, note.updated_at);
 
-    await this.db.batch([insertNote, insertRevision, insertSyncChange]);
+    await this.db.batch([insertNote, insertRevision, insertSyncChange, insertSearchDocument]);
     return note;
   }
 
@@ -217,7 +223,13 @@ export class D1NoteRepository implements NoteRepository {
       JSON.stringify(changes),
       input.now,
     );
-    const results = await this.db.batch<NoteRow>([update, insertRevision, insertSyncChange]);
+    const upsertSearchDocument = this.searchFromCurrentNote(input, nextRevision);
+    const results = await this.db.batch<NoteRow>([
+      update,
+      insertRevision,
+      insertSyncChange,
+      upsertSearchDocument,
+    ]);
     const row = firstResultRow(results[0]);
 
     if (!row) {
@@ -278,7 +290,13 @@ export class D1NoteRepository implements NoteRepository {
       JSON.stringify({ restored_revision: input.revision }),
       input.now,
     );
-    const results = await this.db.batch<NoteRow>([update, insertRevision, insertSyncChange]);
+    const upsertSearchDocument = this.searchFromCurrentNote(input, nextRevision);
+    const results = await this.db.batch<NoteRow>([
+      update,
+      insertRevision,
+      insertSyncChange,
+      upsertSearchDocument,
+    ]);
     const row = firstResultRow(results[0]);
 
     if (row) return { note: toNote(row), current: null, revisionFound: true };
@@ -337,5 +355,26 @@ export class D1NoteRepository implements NoteRepository {
        WHERE workspace_id = ? AND id = ? AND revision = ?
          AND updated_by = ? AND updated_at = ? AND deleted_at IS NULL`,
     ).bind(kind, payload, now, workspaceId, noteId, revision, userId, now);
+  }
+
+  private searchFromCurrentNote(
+    input: { workspaceId: string; noteId: string; userId: string; now: string },
+    revision: number,
+  ) {
+    return this.db.prepare(
+      `INSERT INTO search_documents (
+         id, workspace_id, entity_type, entity_id, title, content, tags, properties,
+         attachment_names, ocr_text, revision, updated_at
+       )
+       SELECT 'search:note:' || id, workspace_id, 'note', id, title, content, '', '', '', '', revision, updated_at
+       FROM notes
+       WHERE workspace_id = ? AND id = ? AND revision = ?
+         AND updated_by = ? AND updated_at = ? AND deleted_at IS NULL
+       ON CONFLICT(workspace_id, entity_type, entity_id) DO UPDATE SET
+         title = excluded.title,
+         content = excluded.content,
+         revision = excluded.revision,
+         updated_at = excluded.updated_at`,
+    ).bind(input.workspaceId, input.noteId, revision, input.userId, input.now);
   }
 }

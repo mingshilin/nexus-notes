@@ -1,0 +1,76 @@
+import { describe, expect, it } from "vitest";
+
+type ContractExports = Record<string, any>;
+
+async function loadContracts() {
+  return (await import("../src")) as ContractExports;
+}
+
+describe("knowledge contracts", () => {
+  it("validates tenant-scoped folders, tags, links, and reminders", async () => {
+    const contracts = await loadContracts();
+    expect(contracts.FolderSchema.safeParse({
+      id: "folder-1", workspace_id: "ws-1", parent_id: null, name: "Projects",
+      position: 0, revision: 1, created_at: "2026-08-21T00:00:00.000Z", updated_at: "2026-08-21T00:00:00.000Z",
+    }).success).toBe(true);
+    expect(contracts.TagSchema.safeParse({
+      id: "tag-1", workspace_id: "ws-1", name: "research", color: "#14B8A6",
+      revision: 1, created_at: "2026-08-21T00:00:00.000Z", updated_at: "2026-08-21T00:00:00.000Z",
+    }).success).toBe(true);
+    expect(contracts.NoteLinkSchema.safeParse({
+      id: "link-1", workspace_id: "ws-1", source_note_id: "note-1", target_note_id: "note-2",
+      created_at: "2026-08-21T00:00:00.000Z",
+    }).success).toBe(true);
+    expect(contracts.ReminderSchema.safeParse({
+      id: "reminder-1", workspace_id: "ws-1", note_id: "note-1", user_id: "user-1",
+      remind_at: "2026-08-22T00:00:00.000Z", status: "pending", revision: 1,
+      created_at: "2026-08-21T00:00:00.000Z", updated_at: "2026-08-21T00:00:00.000Z",
+    }).success).toBe(true);
+  });
+
+  it("persists complete saved-search filters", async () => {
+    const contracts = await loadContracts();
+    const filters = {
+      tag_ids: ["tag-1"], folder_ids: ["folder-1"], database_ids: ["db-1"], member_ids: ["user-1"],
+      attachment_types: ["application/pdf"], ocr_statuses: ["complete", "failed"],
+      source_types: ["note", "attachment"], favorite: true, pinned: false,
+      date_from: "2026-08-01", date_to: "2026-08-31",
+    };
+    expect(contracts.SavedSearchInputSchema.parse({ name: "August research", query: "FTS", filters })).toEqual({
+      name: "August research", query: "FTS", filters,
+    });
+    expect(contracts.OcrStatusSchema.safeParse("queued").success).toBe(true);
+    expect(contracts.OcrStatusSchema.safeParse("cancelled").success).toBe(true);
+    expect(contracts.OcrStatusSchema.safeParse("pending").success).toBe(false);
+    expect(contracts.SavedSearchFiltersSchema.safeParse({ ...filters, ocr_statuses: ["unknown"] }).success).toBe(false);
+  });
+
+  it("reports exact search hit sources without accepting unknown sources", async () => {
+    const contracts = await loadContracts();
+    const hit = {
+      entity_type: "note",
+      entity_id: "note-1",
+      title: "OCR result",
+      excerpt: "matched text",
+      hit_sources: ["title", "ocr"],
+      revision: 2,
+      updated_at: "2026-08-21T00:00:00.000Z",
+    };
+    expect(contracts.SearchHitSchema.safeParse(hit).success).toBe(true);
+    expect(contracts.SearchHitSchema.safeParse({ ...hit, hit_sources: [] }).success).toBe(true);
+    expect(contracts.SearchHitSchema.safeParse({ ...hit, hit_sources: ["secret_field"] }).success).toBe(false);
+  });
+
+  it("bounds reminder writes and graph responses", async () => {
+    const contracts = await loadContracts();
+    expect(contracts.CreateReminderInputSchema.safeParse({
+      note_id: "note-1", remind_at: "2026-08-22T00:00:00.000Z",
+    }).success).toBe(true);
+    expect(contracts.UpdateReminderInputSchema.safeParse({ base_revision: 1 }).success).toBe(false);
+    expect(contracts.UpdateReminderInputSchema.safeParse({ base_revision: 1, status: "dismissed" }).success).toBe(true);
+    expect(contracts.GraphResponseSchema.safeParse({
+      nodes: [{ id: "note-1", title: "Draft", is_current: true }],
+      edges: [],
+    }).success).toBe(true);
+  });
+});

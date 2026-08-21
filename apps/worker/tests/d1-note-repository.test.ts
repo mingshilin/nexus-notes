@@ -61,7 +61,7 @@ describe("D1NoteRepository", () => {
   it("creates the note, first revision, and sync change in one batch", async () => {
     const worker = await loadWorker();
     expect(worker.D1NoteRepository).toBeTypeOf("function");
-    const { db, statements } = createDb([{}, {}, {}]);
+    const { db, statements } = createDb([{}, {}, {}, {}]);
     const Repository = worker.D1NoteRepository as new (db: unknown, createId: () => string) => any;
     const repository = new Repository(db, () => "revision-1");
 
@@ -81,17 +81,18 @@ describe("D1NoteRepository", () => {
     });
 
     expect(db.batch).toHaveBeenCalledOnce();
-    expect(statements).toHaveLength(3);
+    expect(statements).toHaveLength(4);
     expect(statements[0]?.sql).toMatch(/INSERT INTO notes/i);
     expect(statements[1]?.sql).toMatch(/INSERT INTO note_revisions/i);
     expect(statements[2]?.sql).toMatch(/INSERT INTO sync_changes/i);
+    expect(statements[3]?.sql).toMatch(/INSERT INTO search_documents/i);
     expect(statements.every((statement) => statement.bindings.includes("ws-1"))).toBe(true);
     expect(note).toMatchObject({ id: "note-1", revision: 1, is_pinned: true });
   });
 
   it("updates by base revision and writes revision history and sync only on success", async () => {
     const worker = await loadWorker();
-    const { db, statements } = createDb([{ results: [noteRow] }, {}, {}]);
+    const { db, statements } = createDb([{ results: [noteRow] }, {}, {}, {}]);
     const Repository = worker.D1NoteRepository as new (db: unknown, createId: () => string) => any;
     const repository = new Repository(db, () => "revision-2");
 
@@ -109,11 +110,12 @@ describe("D1NoteRepository", () => {
     expect(statements[0]?.sql).toMatch(/UPDATE notes[\s\S]*revision = revision \+ 1[\s\S]*workspace_id = \?[\s\S]*id = \?[\s\S]*revision = \?/i);
     expect(statements[1]?.sql).toMatch(/INSERT INTO note_revisions[\s\S]*SELECT[\s\S]*FROM notes[\s\S]*updated_by = \?[\s\S]*updated_at = \?/i);
     expect(statements[2]?.sql).toMatch(/INSERT INTO sync_changes[\s\S]*SELECT[\s\S]*updated_by = \?[\s\S]*updated_at = \?/i);
+    expect(statements[3]?.sql).toMatch(/INSERT INTO search_documents[\s\S]*SELECT[\s\S]*ON CONFLICT/i);
   });
 
   it("returns the tenant-scoped current note when an optimistic update conflicts", async () => {
     const worker = await loadWorker();
-    const { db, statements } = createDb([{ results: [] }, {}, {}], noteRow);
+    const { db, statements } = createDb([{ results: [] }, {}, {}, {}], noteRow);
     const Repository = worker.D1NoteRepository as new (db: unknown, createId: () => string) => any;
     const repository = new Repository(db, () => "revision-2");
 
@@ -133,7 +135,7 @@ describe("D1NoteRepository", () => {
 
   it("restores a historical snapshot with the same optimistic lock", async () => {
     const worker = await loadWorker();
-    const { db, statements } = createDb([{ results: [noteRow] }, {}, {}]);
+    const { db, statements } = createDb([{ results: [noteRow] }, {}, {}, {}]);
     const Repository = worker.D1NoteRepository as new (db: unknown, createId: () => string) => any;
     const repository = new Repository(db, () => "revision-2");
 
@@ -150,6 +152,7 @@ describe("D1NoteRepository", () => {
     expect(statements[0]?.sql).toMatch(/UPDATE notes[\s\S]*note_revisions[\s\S]*revision = revision \+ 1[\s\S]*notes\.revision = \?/i);
     expect(statements[1]?.sql).toMatch(/updated_by = \?[\s\S]*updated_at = \?/i);
     expect(statements[2]?.sql).toMatch(/updated_by = \?[\s\S]*updated_at = \?/i);
+    expect(statements[3]?.sql).toMatch(/INSERT INTO search_documents[\s\S]*ON CONFLICT/i);
     expect(statements[1]?.bindings).toContain("restore");
   });
 

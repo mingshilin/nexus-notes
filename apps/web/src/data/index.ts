@@ -1,5 +1,6 @@
 export * from "./api-client";
 export * from "./http-sync-transport";
+export * from "./knowledge-client";
 export * from "./local-store";
 export * from "./normalized-cache";
 export * from "./note-autosave";
