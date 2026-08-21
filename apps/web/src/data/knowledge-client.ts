@@ -164,6 +164,7 @@ export class KnowledgeClient {
     if (input.mime_type) params.set("mime_type", input.mime_type);
     if (input.note_id) params.set("note_id", input.note_id);
     if (input.status) params.set("status", input.status);
+    if (input.ocr_status) params.set("ocr_status", input.ocr_status);
     if (input.cursor) params.set("cursor", input.cursor);
     params.set("limit", String(input.limit));
     return this.query<{ items: Attachment[]; next_cursor: string | null }>(

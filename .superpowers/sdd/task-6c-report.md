@@ -264,3 +264,38 @@ Implementation commit: `11e111423486aa6fa412be517130880ff8f4fc79` (`fix: complet
 | `git diff --check` | PASS. |
 
 Implementation commit: `b8e01b7327ba99321035cf13b45e4e0dad6a81b8` (`fix: discriminate OCR recovery diagnostics`).
+
+## Task 6C Fix A2.2: Live Web Recovery Surface
+
+### Scope
+
+Web-only implementation on `codex/public-beta-rewrite` from baseline `4da0c54`. No Worker, schema, AI, deployment, or Task 7 changes were made.
+
+### TDD RED Evidence
+
+| Command | Valid RED observed before production change |
+| --- | --- |
+| `npm run test --workspace=@nexus/web -- tests/knowledge-client.test.ts tests/knowledge-recovery-panel.test.tsx tests/app-auth-bootstrap.test.tsx` | 5 expected failures: missing attachment `ocr_status` query, no controlled panel state, workspace requests had no abort signal, and duplicate retry clicks issued duplicate requests. |
+| `npm run test --workspace=@nexus/web -- tests/knowledge-recovery-panel.test.tsx` | The 390px/200% CSS assertion failed because the recovery surface had no shrinkable filter grid, narrow-screen wrapping, or reduced-motion rule. |
+
+### Implemented
+
+- `KnowledgeClient.listAttachments` now sends `ocr_status` and accepts the existing `AbortSignal` through the query policy.
+- The authenticated Web container uses the supplied active workspace only; it does not invent a fallback workspace. It aborts attachment/diagnostic requests on workspace or filter changes, preserves already loaded safe data during refresh, and exposes loading, empty, error, pagination, and stale-refresh states.
+- MIME/OCR status controls are fully controlled, reset deterministically, and update the attachment query. Single and batch retry are deduplicated while pending, give categorized feedback, and refresh both data surfaces after either success or failure.
+- Diagnostics are passed to an injected `onDiagnosticNavigate` callback before safe UI navigation; no note mutation is performed by the recovery component.
+- The panel adds no scroll owner. Responsive CSS keeps controls shrinkable/wrappable at 390px/200%, preserves safe-area shell behavior, provides visible focus treatment, and disables recovery motion under `prefers-reduced-motion`.
+
+### GREEN / Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/web -- tests/knowledge-client.test.ts tests/knowledge-recovery-panel.test.tsx tests/app-auth-bootstrap.test.tsx tests/adaptive-workbench.test.tsx` | PASS, 17 tests in 4 files. |
+| `npm run typecheck --workspace=@nexus/web` | PASS. |
+| `npm run build --workspace=@nexus/web` | PASS. |
+| `npm run typecheck --workspace=@nexus/contracts` | PASS. |
+| `git diff --check` | PASS. |
+
+### Residual Risk
+
+- The Beta auth-session payload currently exposes no workspace selector. The Web surface therefore requires the active workspace id from its existing app/environment integration and deliberately renders a safe no-workspace state instead of querying a demo workspace.

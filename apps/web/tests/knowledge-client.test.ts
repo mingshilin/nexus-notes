@@ -91,7 +91,8 @@ describe("KnowledgeClient", () => {
     const api = { request: vi.fn(async () => ({ items: [], next_cursor: null, queued: [], ineligible: [], duplicate: [], attachment: { id: "attachment-1" }, deleted: true })) };
     const client = new data.KnowledgeClient(api, "ws-1", { createId: () => "operation-1" });
 
-    await client.listAttachments({ mime_type: "application/pdf", limit: 25 });
+    const controller = new AbortController();
+    await client.listAttachments({ mime_type: "application/pdf", ocr_status: "failed", limit: 25 }, controller.signal);
     await client.createAttachmentUpload({ filename: "scan.pdf", mime_type: "application/pdf", size_bytes: 5 });
     await client.retryAttachmentOcr("attachment-1");
     await client.retryAttachmentOcrBatch(["attachment-1", "attachment-2"]);
@@ -99,7 +100,7 @@ describe("KnowledgeClient", () => {
     await client.deleteAttachment("attachment-1");
 
     expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET"])).toEqual([
-      ["/api/v2/attachments?mime_type=application%2Fpdf&limit=25", "GET"],
+      ["/api/v2/attachments?mime_type=application%2Fpdf&ocr_status=failed&limit=25", "GET"],
       ["/api/v2/attachments/uploads", "POST"],
       ["/api/v2/attachments/attachment-1/ocr/retry", "POST"],
       ["/api/v2/attachments/ocr/retry", "POST"],
@@ -107,6 +108,7 @@ describe("KnowledgeClient", () => {
       ["/api/v2/attachments/attachment-1", "DELETE"],
     ]);
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
+    expect(api.request.mock.calls[0]?.[0].policy.signal).toBe(controller.signal);
     expect(api.request.mock.calls[2]?.[0].body).toEqual({ attachment_ids: ["attachment-1"] });
     expect(api.request.mock.calls[3]?.[0].body).toEqual({ attachment_ids: ["attachment-1", "attachment-2"] });
   });
