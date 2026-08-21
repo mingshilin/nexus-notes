@@ -23,7 +23,7 @@
 - [x] Task 2: Add shared `/api/v2` contracts, typed route registry, response envelope, and Beta D1 schema.
 - [x] Task 3: Build the preserved design system and adaptive workbench shell.
 - [x] Task 4: Add the API transport, normalized cache, IndexedDB persistence, mutation queue, and sync engine.
-- [ ] Task 5: Add authentication, tenant isolation, security controls, and configurable Beta quotas.
+- [x] Task 5: Add authentication, tenant isolation, security controls, and configurable Beta quotas.
 - [ ] Task 6: Deliver Capture, notes, revisions, search, graph, reminders, attachments, and diagnostics.
 - [ ] Task 7: Deliver structured databases, typed properties, views, bulk operations, CSV, and virtualized views.
 - [ ] Task 8: Deliver workspace collaboration, sharing, notifications, audit, and Durable Object presence.
