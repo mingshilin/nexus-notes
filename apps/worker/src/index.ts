@@ -17,6 +17,15 @@ export { createSecureGateway } from "./http/security-gateway";
 export { TurnstileVerifier } from "./auth/turnstile";
 export { D1NoteRepository } from "./notes/d1-note-repository";
 export { D1DatabaseRepository } from "./databases/d1-database-repository";
+export {
+  D1CollaborationRepository,
+  CollaborationRepositoryError,
+} from "./collaboration/d1-collaboration-repository";
+export type {
+  CollaborationRepositoryOptions,
+  InvitationAcceptanceContext,
+  PublicTokenHashContext,
+} from "./collaboration/d1-collaboration-repository";
 export { DatabaseRepositoryError } from "./databases/database-model";
 export { NoteService, NoteServiceError } from "./notes/note-service";
 export { D1KnowledgeRepository } from "./knowledge/d1-knowledge-repository";

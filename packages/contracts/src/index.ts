@@ -1,5 +1,6 @@
 export * from "./api";
 export * from "./auth";
+export * from "./collaboration";
 export * from "./attachments";
 export * from "./databases";
 export * from "./jobs";

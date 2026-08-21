@@ -10,6 +10,7 @@ export const migrationPaths = [
   "../../migrations/0004_attachment_consistency.sql",
   "../../migrations/0005_personal_workspace.sql",
   "../../migrations/0006_structured_databases.sql",
+  "../../migrations/0007_collaboration.sql",
 ];
 
 export function splitMigration(sql: string) {
