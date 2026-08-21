@@ -25,8 +25,10 @@ import {
   NotificationButton,
   NotificationCenter,
   PublicSharePage,
+  notificationButtonLabel,
   type CollaborationCommentTarget,
   type CollaborationShareTarget,
+  type NotificationTarget,
 } from "../collaboration";
 
 const domains = [
@@ -74,6 +76,33 @@ function isAborted(error: unknown, signal: AbortSignal) {
   return signal.aborted || (error instanceof DOMException && error.name === "AbortError");
 }
 
+function isRecordNotFound(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const details = error as { code?: string; status?: number };
+  return details.code === "RECORD_NOT_FOUND" && details.status === 404;
+}
+
+async function resolveDatabaseNotificationTarget(
+  client: DatabaseClient,
+  target: NotificationTarget,
+  signal: AbortSignal,
+) {
+  const databases = await client.listDatabases(signal);
+  const candidates = target.databaseId
+    ? databases.filter((database) => database.id === target.databaseId)
+    : databases;
+  for (const database of candidates) {
+    try {
+      const record = await client.getRecord(database.id, target.targetId, signal);
+      return { database, databases, record };
+    } catch (error) {
+      if (isRecordNotFound(error)) continue;
+      throw error;
+    }
+  }
+  throw Object.assign(new Error("Database notification target was not found"), { code: "RECORD_NOT_FOUND", status: 404 });
+}
+
 function routeFromLocation(): AppRoute {
   if (typeof window === "undefined") return { kind: "workspace" };
   const share = window.location.pathname.match(/^\/share\/([A-Za-z0-9_-]{43,256})\/?$/u)?.[1];
@@ -107,10 +136,12 @@ function AuthenticatedWorkspace({
   const [selectedNoteId, setSelectedNoteId] = useState(noteTargets[0].id);
   const [selectedDatabaseRecordId, setSelectedDatabaseRecordId] = useState<string | null>(null);
   const [selectedCommentId, setSelectedCommentId] = useState<string | null>(null);
+  const [collaborationInitialSection, setCollaborationInitialSection] = useState<"people" | "comments">("people");
   const [databases, setDatabases] = useState<Database[]>([]);
   const [selectedDatabaseId, setSelectedDatabaseId] = useState<string | null>(null);
   const [databaseBundle, setDatabaseBundle] = useState<DatabaseBundle | null>(null);
   const [databaseRecords, setDatabaseRecords] = useState<DatabaseRecord[]>([]);
+  const [resolvedNotificationRecord, setResolvedNotificationRecord] = useState<DatabaseRecord | null>(null);
   const [databaseRecordsNextCursor, setDatabaseRecordsNextCursor] = useState<string | null>(null);
   const [databaseLoading, setDatabaseLoading] = useState(false);
   const [databaseError, setDatabaseError] = useState<string | null>(null);
@@ -137,6 +168,7 @@ function AuthenticatedWorkspace({
   const attachmentQueryIdentity = useRef<string | null>(null);
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
   const notificationOpenerRef = useRef<HTMLElement | null>(null);
+  const notificationTargetController = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!inspectorOpen && inspectorOpenerRef.current) {
@@ -228,6 +260,7 @@ function AuthenticatedWorkspace({
     abortRecoveryRequests();
     abortRetryRequests();
     abortDatabaseRequests();
+    notificationTargetController.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -344,15 +377,20 @@ function AuthenticatedWorkspace({
       return [bundle, page] as const;
     }).then(([bundle, page]) => {
       if (controller.signal.aborted) return;
+      const targetRecord = resolvedNotificationRecord?.database_id === bundle.database.id
+        && !page.items.some((record) => record.id === resolvedNotificationRecord.id)
+        ? resolvedNotificationRecord
+        : null;
+      const records = targetRecord ? [targetRecord, ...page.items] : page.items;
       setDatabaseBundle(bundle);
-      setDatabaseRecords(page.items);
+      setDatabaseRecords(records);
       setDatabaseRecordsNextCursor(page.next_cursor);
-      setSelectedDatabaseRecordId((current) => current ?? page.items[0]?.id ?? null);
+      setSelectedDatabaseRecordId((current) => current ?? records[0]?.id ?? null);
       databaseCache.current.writeEntity({ workspaceId, type: "database", id: bundle.database.id, revision: bundle.database.revision, data: bundle.database });
       for (const property of bundle.properties) {
         databaseCache.current.writeEntity({ workspaceId, type: "database-property", id: property.id, revision: property.revision, data: property });
       }
-      for (const record of page.items) {
+      for (const record of records) {
         databaseCache.current.writeEntity({ workspaceId, type: "database-record", id: record.id, revision: record.revision, data: record });
       }
     }).catch((error: unknown) => {
@@ -362,7 +400,7 @@ function AuthenticatedWorkspace({
       if (!controller.signal.aborted) setDatabaseLoading(false);
     });
     return () => controller.abort();
-  }, [activeDomain, apiClient, databaseRefreshVersion, selectedDatabaseId, workspaceId]);
+  }, [activeDomain, apiClient, databaseRefreshVersion, resolvedNotificationRecord, selectedDatabaseId, workspaceId]);
 
   const requestDatabasePage = useCallback(({ cursor, limit, viewId, signal }: { cursor: string | null; limit: number; viewId?: string; signal?: AbortSignal }) => {
     if (!workspaceId || !selectedDatabaseId) return Promise.resolve({ items: [], next_cursor: null });
@@ -457,7 +495,7 @@ function AuthenticatedWorkspace({
           className={(target === "databases" ? activeDomain === "databases" : target === "collaboration" ? activeDomain === "collaboration" : activeDomain === "notes" && index === 1) ? "rail-item active" : "rail-item"}
           type="button"
           disabled={target === "collaboration" && !collaborationEnabled}
-          onClick={() => { setActiveDomain(target); setActivePane("canvas"); }}
+          onClick={() => { if (target === "collaboration") setCollaborationInitialSection("people"); setActiveDomain(target); setActivePane("canvas"); }}
         >
           <Icon aria-hidden="true" size={19} />
           <span>{label}</span>
@@ -470,8 +508,8 @@ function AuthenticatedWorkspace({
   const mobileNavigation = <>
     <button type="button" onClick={() => { setActiveDomain("notes"); setActivePane("canvas"); }}>首页</button>
     <button type="button" onClick={() => { setActiveDomain("databases"); setActivePane("canvas"); }}>数据库</button>
-    <button type="button" disabled={!collaborationEnabled} onClick={() => { setActiveDomain("collaboration"); setActivePane("canvas"); }}>协作</button>
-    <button type="button" aria-label={`通知，${unreadCount} 条未读`} onClick={(event) => toggleNotifications(event.currentTarget)}>通知{unreadCount > 0 ? ` ${unreadCount}` : ""}</button>
+    <button type="button" disabled={!collaborationEnabled} onClick={() => { setCollaborationInitialSection("people"); setActiveDomain("collaboration"); setActivePane("canvas"); }}>协作</button>
+    <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}>通知{unreadCount > 0 ? ` ${unreadCount}` : ""}</button>
     <button type="button" onClick={(event) => openInspector(event.currentTarget)}>检查器</button>
   </>;
 
@@ -483,7 +521,7 @@ function AuthenticatedWorkspace({
       </div>
       <label className="search-field"><Search size={15} /><input aria-label="搜索笔记" placeholder="搜索笔记" /></label>
       {noteTargets.map((note, index) => (
-        <button key={note.id} className={note.id === selectedNoteId ? "note-row selected" : "note-row"} type="button" onClick={() => { setSelectedNoteId(note.id); setSelectedDatabaseRecordId(null); setSelectedCommentId(null); setActivePane("canvas"); }}>
+        <button key={note.id} className={note.id === selectedNoteId ? "note-row selected" : "note-row"} type="button" onClick={() => { setSelectedNoteId(note.id); setSelectedDatabaseRecordId(null); setSelectedCommentId(null); setResolvedNotificationRecord(null); setActivePane("canvas"); }}>
           <strong>{note.label}</strong><span>{index === 0 ? "刚刚" : `${index + 1} 天前`}</span>
           <p>保持专注、可靠并且随时可以恢复的知识工作台。</p>
         </button>
@@ -501,7 +539,7 @@ function AuthenticatedWorkspace({
           key={database.id}
           className={database.id === selectedDatabaseId ? "note-row selected" : "note-row"}
           type="button"
-          onClick={() => { setSelectedDatabaseId(database.id); setSelectedDatabaseRecordId(null); setSelectedCommentId(null); setActivePane("canvas"); }}
+          onClick={() => { setSelectedDatabaseId(database.id); setSelectedDatabaseRecordId(null); setSelectedCommentId(null); setResolvedNotificationRecord(null); setActivePane("canvas"); }}
         >
           <strong>{database.name}</strong><p>{database.description || "Structured database"}</p>
         </button>
@@ -561,10 +599,13 @@ function AuthenticatedWorkspace({
     </section>
   );
 
-  const recordTargets: CollaborationCommentTarget[] = databaseRecords.map((record) => ({
+  const collaborationRecords = resolvedNotificationRecord && !databaseRecords.some((record) => record.id === resolvedNotificationRecord.id)
+    ? [...databaseRecords, resolvedNotificationRecord]
+    : databaseRecords;
+  const recordTargets: CollaborationCommentTarget[] = collaborationRecords.map((record) => ({
       type: "database_record" as const,
       id: record.id,
-      label: Object.values(record.values).find((value): value is string => typeof value === "string" && Boolean(value.trim())) ?? `Record ${record.id}`,
+      label: `${record.id === resolvedNotificationRecord?.id ? `${databases.find((database) => database.id === record.database_id)?.name ?? "数据库"} / ` : ""}${Object.values(record.values).find((value): value is string => typeof value === "string" && Boolean(value.trim())) ?? `Record ${record.id}`}`,
     }));
   const commentTargets: CollaborationCommentTarget[] = [
     ...noteTargets,
@@ -585,6 +626,56 @@ function AuthenticatedWorkspace({
   const activeCollaborationTarget = selectedDatabaseRecordId
     ? { type: "database_record" as const, id: selectedDatabaseRecordId }
     : { type: "note" as const, id: selectedNoteId };
+  const navigateNotificationTarget = (target: NotificationTarget) => {
+    setNotificationOpen(false);
+    notificationTargetController.current?.abort();
+    if (target.targetType === "note") {
+      setSelectedNoteId(target.targetId);
+      setSelectedDatabaseRecordId(null);
+      setResolvedNotificationRecord(null);
+      setSelectedCommentId(target.commentId);
+      setCollaborationInitialSection("comments");
+      setActiveDomain("collaboration");
+      setActivePane("canvas");
+      return;
+    }
+
+    const selectTarget = (availableDatabases: Database[], database: Database, record: DatabaseRecord) => {
+      setDatabases(availableDatabases);
+      setSelectedDatabaseId(database.id);
+      setSelectedDatabaseRecordId(record.id);
+      setResolvedNotificationRecord(record);
+      setSelectedCommentId(target.commentId);
+      setDatabaseError(null);
+      setCollaborationInitialSection("comments");
+      setActiveDomain("collaboration");
+      setActivePane("canvas");
+    };
+    const loadedRecord = collaborationRecords.find((record) => record.id === target.targetId && (!target.databaseId || record.database_id === target.databaseId));
+    const loadedDatabase = loadedRecord ? databases.find((database) => database.id === loadedRecord.database_id) : undefined;
+    if (loadedRecord && loadedDatabase) {
+      selectTarget(databases, loadedDatabase, loadedRecord);
+      return;
+    }
+
+    if (!workspaceId) return;
+    const controller = new AbortController();
+    notificationTargetController.current = controller;
+    void resolveDatabaseNotificationTarget(new DatabaseClient(apiClient, workspaceId), target, controller.signal).then(({ database, databases: availableDatabases, record }) => {
+      if (!controller.signal.aborted) selectTarget(availableDatabases, database, record);
+    }).catch((error: unknown) => {
+      if (isAborted(error, controller.signal)) return;
+      setSelectedDatabaseRecordId(target.targetId);
+      setResolvedNotificationRecord(null);
+      setSelectedCommentId(target.commentId);
+      setDatabaseError("无法定位通知中的数据库记录。");
+      setCollaborationInitialSection("comments");
+      setActiveDomain("collaboration");
+      setActivePane("canvas");
+    }).finally(() => {
+      if (notificationTargetController.current === controller) notificationTargetController.current = null;
+    });
+  };
 
   return (
     <>
@@ -609,11 +700,11 @@ function AuthenticatedWorkspace({
         onInspectorClose={closeInspector}
       >
         <>
-        {activeDomain === "collaboration" && collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : activeDomain === "databases" ? databaseCanvas : <article className="editor-document">
+        {activeDomain === "collaboration" && collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : activeDomain === "databases" ? databaseCanvas : <article className="editor-document">
           <header className="editor-toolbar">
             <span className="saved-state"><span /> 已保存</span>
             <div>
-              <button type="button" aria-label="通知" onClick={(event) => toggleNotifications(event.currentTarget)}><Bell size={17} /></button>
+              <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}><Bell aria-hidden="true" size={17} /></button>
               <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>
             </div>
           </header>
@@ -631,24 +722,11 @@ function AuthenticatedWorkspace({
         <NotificationCenter
           client={collaborationClient}
           open={notificationOpen}
+          unreadCount={unreadCount}
           opener={notificationOpenerRef.current}
           onClose={() => setNotificationOpen(false)}
           onNotificationRead={(count) => setUnreadCount((current) => Math.max(0, current - count))}
-          onDeepLink={(target) => {
-            setNotificationOpen(false);
-            setSelectedCommentId(target.commentId);
-            if (target.targetType === "note") {
-              setSelectedNoteId(target.targetId);
-              setSelectedDatabaseRecordId(null);
-              setActiveDomain("notes");
-            } else {
-              setSelectedDatabaseRecordId(target.targetId);
-              const record = databaseRecords.find((candidate) => candidate.id === target.targetId);
-              if (record) setSelectedDatabaseId(record.database_id);
-              setActiveDomain("databases");
-            }
-            setActivePane("canvas");
-          }}
+          onDeepLink={navigateNotificationTarget}
         />
         </>
       </AdaptiveWorkbench>

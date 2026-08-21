@@ -33,6 +33,7 @@ export interface NotificationTarget {
   targetType: "note" | "database_record";
   targetId: string;
   commentId: string | null;
+  databaseId?: string;
 }
 
 const sensitiveMetadataKey = /(content|password|token|code|cookie|authorization|attachment.*bytes|body|secret)/iu;
@@ -194,26 +195,34 @@ function PresenceSummary({ status, participants }: { status: PresenceStatus; par
 export interface NotificationCenterProps {
   client: CollaborationClient;
   open: boolean;
+  unreadCount: number;
   opener?: HTMLElement | null;
   onClose(): void;
   onNotificationRead?(count: number): void;
   onDeepLink?(target: NotificationTarget): void;
 }
 
-export function notificationTargetFromDeepLink(deepLink: string): NotificationTarget | null {
+export function notificationTargetFromDeepLink(deepLink: string, payload: Record<string, unknown> = {}): NotificationTarget | null {
   const url = new URL(deepLink, "https://nexus.invalid");
   const note = url.pathname.match(/^\/notes\/([^/]+)\/?$/u);
-  const record = url.pathname.match(/^\/databases\/records\/([^/]+)\/?$/u);
-  const match = note ?? record;
+  const routedRecord = url.pathname.match(/^\/databases\/([^/]+)\/records\/([^/]+)\/?$/u);
+  const legacyRecord = url.pathname.match(/^\/databases\/records\/([^/]+)\/?$/u);
+  const match = note ?? routedRecord?.slice(1) ?? legacyRecord;
   if (!match?.[1]) return null;
+  const databaseId = routedRecord?.[1]
+    ? decodeURIComponent(routedRecord[1])
+    : typeof payload.database_id === "string" && payload.database_id
+      ? payload.database_id
+      : undefined;
   return {
     targetType: note ? "note" : "database_record",
-    targetId: decodeURIComponent(match[1]),
+    targetId: decodeURIComponent(routedRecord?.[2] ?? match[1]),
     commentId: url.searchParams.get("comment"),
+    ...(databaseId ? { databaseId } : {}),
   };
 }
 
-export function NotificationCenter({ client, open, opener = null, onClose, onNotificationRead, onDeepLink }: NotificationCenterProps) {
+export function NotificationCenter({ client, open, unreadCount, opener = null, onClose, onNotificationRead, onDeepLink }: NotificationCenterProps) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -258,7 +267,7 @@ export function NotificationCenter({ client, open, opener = null, onClose, onNot
     }
   };
   const openNotification = async (notification: Notification) => {
-    const target = notificationTargetFromDeepLink(notification.deep_link);
+    const target = notificationTargetFromDeepLink(notification.deep_link, notification.payload);
     if (target) onDeepLink?.(target);
     try {
       if (!notification.read_at) {
@@ -305,7 +314,7 @@ export function NotificationCenter({ client, open, opener = null, onClose, onNot
       <header><div><p className="eyebrow">INBOX</p><h2>通知中心</h2></div><button ref={closeRef} type="button" aria-label="关闭通知中心" onClick={onClose}><X size={17} /></button></header>
       <div className="notification-actions">
         <button type="button" disabled={pending || selectedIds.size === 0} onClick={() => void readSelected()}>将所选通知标为已读</button>
-        <button type="button" disabled={pending || notifications.every((item) => item.read_at)} onClick={() => void readAll()}>全部标为已读</button>
+        <button type="button" disabled={pending || (unreadCount <= 0 && !nextCursor && notifications.every((item) => item.read_at))} onClick={() => void readAll()}>全部标为已读</button>
       </div>
       {loading ? <p role="status">正在加载通知…</p> : null}
       {error ? <p role="alert" className="collaboration-error">{error}</p> : null}
@@ -391,6 +400,8 @@ export function CollaborationCenter({
   const shareTarget = shareTargets.find((target) => targetKey(target) === shareTargetKey);
   const targetType = commentTarget?.type ?? "note";
   const targetId = commentTarget?.id ?? "";
+
+  useEffect(() => setSection(initialSection), [initialSection]);
 
   useEffect(() => {
     const preferred = commentTargets.find((target) => activeTarget && target.type === activeTarget.type && target.id === activeTarget.id);
@@ -620,6 +631,10 @@ export function CollaborationCenter({
   </section>;
 }
 
+export function notificationButtonLabel(unreadCount: number) {
+  return `通知，${unreadCount} 条未读`;
+}
+
 export function NotificationButton({ unreadCount, onClick }: { unreadCount: number; onClick(opener: HTMLElement): void }) {
-  return <button className="notification-button" type="button" aria-label={`通知，${unreadCount} 条未读`} onClick={(event) => onClick(event.currentTarget)}><Bell aria-hidden="true" size={18} />{unreadCount > 0 ? <span>{unreadCount}</span> : null}</button>;
+  return <button className="notification-button" type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => onClick(event.currentTarget)}><Bell aria-hidden="true" size={18} />{unreadCount > 0 ? <span>{unreadCount}</span> : null}</button>;
 }

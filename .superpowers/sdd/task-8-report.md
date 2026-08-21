@@ -522,3 +522,58 @@ Full Web: 26 files, 118/118 tests passed.
 The scoped diff contains only Beta Web source/tests plus this report. Raw invitation tokens occur only in the URL-derived in-memory route value and public request bodies; no localStorage/sessionStorage/history-state write contains them. Notification modal state leaves one scroll owner and restores its opener. Non-owner code paths do not call owner-only invitation/audit routes, and viewer code paths do not call editor-only share mutations or listings.
 
 The committed database-record notification link contains `recordId` and optional `commentId`, but no `databaseId`. App therefore preserves the exact record/comment target, selects a matching currently loaded database when available, and exposes a labelled notification target when that record is outside the loaded page. Resolving an unloaded record to its database would require a backend contract change and is outside this Web-only closure.
+
+# Task 8C Web Wave 4 Closure Report
+
+Date: 2026-08-22
+Base: `7055b99`
+Scope: Beta Web notification destination source/tests and this report only. No Worker, domain, migration, legacy product, deployment, remote, secret, or backend contract change.
+
+## TDD Evidence
+
+The App-level destination, global read-all, and shared bell-label tests were added before production implementation. The focused test was run against the Wave 3 source:
+
+```text
+npm test --workspace @nexus/web -- tests/collaboration-center.test.tsx --reporter=dot
+RED: 1 file failed; 3 failed / 7 passed.
+Expected causes: the unloaded record remained on Current database with no comment destination, read-all was disabled while global unread remained, and only one desktop bell exposed the unread-count label.
+```
+
+After implementation, with the RED destination assertions retained:
+
+```text
+Focused collaboration/invite/mobile/App: 6 files, 32/32 passed.
+Full Web: 26 files, 121/121 passed.
+```
+
+## Requirement Mapping
+
+1. The committed notification shape remains `{ target_type, target_id, comment_id }` with `/databases/records/:recordId?comment=:commentId`. The parser also accepts an optional payload `database_id` or `/databases/:databaseId/records/:recordId` path without changing the backend contract.
+2. App reuses `DatabaseClient.listDatabases` and `getRecord`; an unloaded target is resolved by a finite sequential scan of permitted databases. Only the exact `RECORD_NOT_FOUND` 404 continues to the next database, while cancellation and every other error remain terminal.
+3. Successful navigation stores the selected database, exact record, and comment, retains an off-page resolved record for later database loading, opens CollaborationCenter comments, labels the target as `database / record`, and marks the requested comment as current. Note notifications retain note selection and also open their exact comment context.
+4. The App-level test forces `db-current` to return `RECORD_NOT_FOUND`, resolves `record-target` from `db-target`, and asserts the rendered target selector and current `comment-target`; it does not stop at callback assertions.
+5. Read-all remains enabled when global unread is positive, a next cursor exists, or a loaded item is unread. App supplies the required global count to NotificationCenter.
+6. Rail, mobile, and editor controls use the same unread-count label helper and the same notification toggle behavior. Existing focus return, inert background, visualViewport handling, and one-scroll-owner modal behavior are unchanged.
+
+## Final Gate Evidence
+
+| Command | Result |
+| --- | --- |
+| focused collaboration/invite/mobile/App suite | 6 files, 32/32 passed |
+| `npm test --workspace @nexus/web -- --reporter=dot` | 26 files, 121/121 passed |
+| `npm run typecheck --workspace @nexus/web` | passed |
+| `npm run build --workspace @nexus/web` | passed; entry 381,761 bytes, lazy `DatabaseWorkbench` 46.81 kB, no large-chunk warning |
+| `npm run beta:build` | passed across all workspaces |
+| `npm test` | legacy frontend 29 files/131 tests and legacy Worker routes 11 files/62 tests passed |
+| `npm run lint` | passed |
+| `npm run build` | passed; no large-chunk warning |
+| `npm audit --omit=dev` | 0 vulnerabilities |
+| root and Beta deploy readiness | both passed against final artifacts |
+| final preload/chunk audit | root: 5 initial assets, 4 modulepreloads, 0 forbidden, max 278,944 bytes; Beta: 1 initial asset, 0 modulepreloads, 0 forbidden, max 381,761 bytes |
+| `git diff --check` | passed before report append; rerun before staging |
+
+## Self-Review
+
+The lookup is deliberately sequential to avoid request fan-out and is bounded by the permitted database list returned by the existing typed route. A known `databaseId` narrows the scan to one candidate; a loaded record avoids the scan entirely. Each navigation aborts the previous lookup and unmount aborts the active request, preventing stale notification selection.
+
+The scoped source/test diff contains only `apps/web/src/app/App.tsx`, `apps/web/src/collaboration/CollaborationCenter.tsx`, and `apps/web/tests/collaboration-center.test.tsx`; this report is the only non-Web artifact. No raw tokens, credentials, storage behavior, backend, legacy, deployment, or remote state changed.

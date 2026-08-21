@@ -2,12 +2,22 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { ApiClientError } from "../src/data/api-client";
+
 const now = "2026-08-22T00:00:00.000Z";
 const member = { user_id: "user-2", email: "lin@example.com", display_name: "Lin", role: "editor", revision: 2, joined_at: now, updated_at: now };
 const invitation = { id: "invite-1", workspace_id: "ws-1", email: "invite@example.com", role: "viewer", status: "pending", revision: 1, expires_at: "2026-08-25T00:00:00.000Z", created_by: "user-1", created_at: now, updated_at: now };
 const comment = { id: "comment-1", workspace_id: "ws-1", target_type: "note", target_id: "note-1", author_user_id: "user-1", author_display_name: "Ming", parent_id: null, body: "请查看这个段落", mention_user_ids: ["user-2"], revision: 1, created_at: now, updated_at: now };
 const notification = { id: "notification-1", workspace_id: "ws-1", user_id: "user-1", type: "mention", deep_link: "/notes/note-1?comment=comment-1", payload: { target_type: "note", target_id: "note-1", comment_id: "comment-1" }, read_at: null, revision: 1, created_at: now };
 const share = { id: "share-1", entity_type: "note", entity_id: "note-1", status: "active", password_required: true, expires_at: null, revision: 1, created_at: now, updated_at: now };
+const currentDatabase = { id: "db-current", workspace_id: "ws-1", name: "Current database", description: "Currently loaded", created_by: "user-1", revision: 1, created_at: now, updated_at: now };
+const targetDatabase = { ...currentDatabase, id: "db-target", name: "Target database", description: "Notification destination" };
+const currentProperty = { id: "name", workspace_id: "ws-1", database_id: "db-current", name: "Name", type: "text", config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now };
+const targetProperty = { ...currentProperty, database_id: "db-target" };
+const currentView = { id: "table-current", workspace_id: "ws-1", database_id: "db-current", name: "All", type: "table", config: { filters: [], sorts: [], grouping: null, visible_columns: ["name"], page_size: 50, settings: {} }, position: 0, revision: 1, created_at: now, updated_at: now };
+const targetView = { ...currentView, id: "table-target", database_id: "db-target" };
+const currentRecord = { id: "record-current", workspace_id: "ws-1", database_id: "db-current", note_id: null, values: { name: "Current record" }, created_by: "user-1", updated_by: "user-1", revision: 1, created_at: now, updated_at: now };
+const targetRecord = { ...currentRecord, id: "record-target", database_id: "db-target", values: { name: "Target record" } };
 
 function collaboration(overrides: Record<string, unknown> = {}) {
   return {
@@ -23,8 +33,8 @@ function collaboration(overrides: Record<string, unknown> = {}) {
     updateComment: vi.fn(async () => comment), deleteComment: vi.fn(async () => ({ id: comment.id })),
     listNotifications: vi.fn(async () => ({ items: [notification], next_cursor: null })),
     getUnreadCount: vi.fn(async () => 1),
-    readNotification: vi.fn(async () => ({ notification_ids: [notification.id], read_at: now })),
-    readNotifications: vi.fn(async () => ({ notification_ids: [notification.id], read_at: now })),
+    readNotification: vi.fn(async (notificationId = notification.id) => ({ notification_ids: [notificationId], read_at: now })),
+    readNotifications: vi.fn(async (input = { notification_ids: [notification.id] }) => ({ notification_ids: input.notification_ids, read_at: now })),
     readAllNotifications: vi.fn(async () => ({ count: 1, read_at: now })),
     listActivity: vi.fn(async () => ({ items: [{ id: "activity-1", workspace_id: "ws-1", actor_user_id: "user-1", request_id: "request-1", action: "note.updated", target_type: "note", target_id: "note-1", metadata: { source: "editor", token: "raw-secret" }, created_at: now }], next_cursor: null })),
     listAudit: vi.fn(async () => ({ items: [{ id: "audit-1", workspace_id: "ws-1", actor_user_id: "user-1", request_id: "request-2", action: "member.role_updated", target_type: "member", target_id: "user-2", metadata: { role: "viewer", password: "raw-password" }, outcome: "success", created_at: now }], next_cursor: null })),
@@ -53,9 +63,9 @@ describe("collaboration center", () => {
     }) };
     render(createElement(App, { authClient, apiClient, turnstileSiteKey: "test" }));
 
-    const notificationButton = await screen.findByRole("button", { name: "通知，1 条未读" });
+    const [notificationButton, editorNotificationButton] = await screen.findAllByRole("button", { name: "通知，1 条未读" });
     expect(notificationButton).toHaveTextContent("1");
-    fireEvent.click(screen.getByRole("button", { name: "通知" }));
+    fireEvent.click(editorNotificationButton!);
     expect(await screen.findByRole("dialog", { name: "通知中心" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "关闭通知中心" }));
     fireEvent.click(screen.getByRole("button", { name: "协作" }));
@@ -71,6 +81,78 @@ describe("collaboration center", () => {
     fireEvent.click(await screen.findByRole("button", { name: "评论与提及" }));
     expect(await screen.findByLabelText("评论目标")).toHaveValue("note:note-1");
     expect((await screen.findByText("请查看这个段落")).closest("article")).toHaveAttribute("aria-current", "true");
+  });
+
+  it("resolves an unloaded database notification to its database, record, and selected comment destination", async () => {
+    const { App } = await import("../src/index") as Record<string, any>;
+    const targetNotification = {
+      ...notification,
+      id: "notification-target",
+      deep_link: "/databases/records/record-target?comment=comment-target",
+      payload: { target_type: "database_record", target_id: "record-target", comment_id: "comment-target" },
+    };
+    const targetComment = {
+      ...comment,
+      id: "comment-target",
+      target_type: "database_record",
+      target_id: "record-target",
+      body: "Open this exact comment",
+    };
+    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "ming@example.com", displayName: "Ming" }, workspaces: [{ id: "ws-1", name: "Nexus", slug: "nexus", role: "owner", revision: 1 }], active_workspace_id: "ws-1" })) };
+    const apiClient = { request: vi.fn(async ({ path, method }: { path: string; method?: string }) => {
+      if (path.startsWith("/api/v2/attachments")) return { items: [], next_cursor: null };
+      if (path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
+      if (path === "/api/v2/notifications/unread") return { unread_count: 1 };
+      if (path === "/api/v2/notifications?limit=25") return { items: [targetNotification], next_cursor: null };
+      if (path === "/api/v2/notifications/notification-target/read" && method === "POST") return { notification_ids: [targetNotification.id], read_at: now };
+      if (path === "/api/v2/databases") return { items: [currentDatabase, targetDatabase] };
+      if (path === "/api/v2/databases/db-current/records/record-target") throw new ApiClientError({ code: "RECORD_NOT_FOUND", message: "Database record not found", retryable: false }, 404);
+      if (path === "/api/v2/databases/db-target/records/record-target") return { record: targetRecord };
+      if (path === "/api/v2/databases/db-current") return { database: currentDatabase, role: "owner", properties: [currentProperty], views: [currentView], templates: [] };
+      if (path === "/api/v2/databases/db-current/records?view_id=table-current&limit=50") return { items: [currentRecord], next_cursor: null };
+      if (path === "/api/v2/databases/db-target") return { database: targetDatabase, role: "owner", properties: [targetProperty], views: [targetView], templates: [] };
+      if (path === "/api/v2/databases/db-target/records?view_id=table-target&limit=50") return { items: [], next_cursor: null };
+      if (path === "/api/v2/members") return { items: [member] };
+      if (path === "/api/v2/invitations") return { items: [invitation] };
+      if (path === "/api/v2/comments/database_record/record-target") return { items: [targetComment] };
+      throw new Error(`Unexpected ${path}`);
+    }) };
+    render(createElement(App, { authClient, apiClient, turnstileSiteKey: "test" }));
+
+    const [notificationButton] = await screen.findAllByRole("button", { name: "通知，1 条未读" });
+    fireEvent.click(notificationButton!);
+    fireEvent.click(await screen.findByRole("link", { name: "打开 mention" }));
+
+    const targetSelector = await screen.findByLabelText("评论目标");
+    expect(targetSelector).toHaveValue("database_record:record-target");
+    expect(targetSelector).toHaveDisplayValue("Target database / Target record");
+    expect((await screen.findByText("Open this exact comment")).closest("article")).toHaveAttribute("aria-current", "true");
+  });
+
+  it("keeps global read-all available when the loaded page is already read", async () => {
+    const { AdaptiveWorkbench, NotificationCenter } = await import("../src/index") as Record<string, any>;
+    const client = collaboration({ listNotifications: vi.fn(async () => ({ items: [{ ...notification, read_at: now }], next_cursor: null })) });
+    render(createElement(AdaptiveWorkbench, { mode: "desktop", navigation: "", inspectorOpen: false, onInspectorClose: vi.fn() },
+      createElement(NotificationCenter, { client, open: true, unreadCount: 2, onClose: vi.fn() })));
+
+    const readAll = await screen.findByRole("button", { name: "全部标为已读" });
+    expect(readAll).toBeEnabled();
+    fireEvent.click(readAll);
+    await waitFor(() => expect(client.readAllNotifications).toHaveBeenCalledTimes(1));
+  });
+
+  it("gives the editor and rail notification controls the same unread-count label", async () => {
+    const { App } = await import("../src/index") as Record<string, any>;
+    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "ming@example.com", displayName: "Ming" }, workspaces: [{ id: "ws-1", name: "Nexus", slug: "nexus", role: "owner", revision: 1 }], active_workspace_id: "ws-1" })) };
+    const apiClient = { request: vi.fn(async ({ path }: { path: string }) => {
+      if (path.startsWith("/api/v2/attachments") || path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
+      if (path === "/api/v2/notifications/unread") return { unread_count: 2 };
+      throw new Error(`Unexpected ${path}`);
+    }) };
+    render(createElement(App, { authClient, apiClient, turnstileSiteKey: "test" }));
+
+    expect(await screen.findAllByRole("button", { name: "通知，2 条未读" })).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "通知" })).not.toBeInTheDocument();
   });
 
   it("supports member/invite roles and a comments composer with workspace mentions", async () => {
@@ -159,7 +241,7 @@ describe("collaboration center", () => {
     });
     const onDeepLink = vi.fn();
     render(createElement(AdaptiveWorkbench, { mode: "desktop", navigation: "", inspectorOpen: false, onInspectorClose: vi.fn() },
-      createElement(NotificationCenter, { client, open: true, onClose: vi.fn(), onDeepLink })));
+      createElement(NotificationCenter, { client, open: true, unreadCount: 2, onClose: vi.fn(), onDeepLink })));
 
     await screen.findByText("mention");
     fireEvent.click(screen.getByRole("button", { name: "加载更多通知" }));
