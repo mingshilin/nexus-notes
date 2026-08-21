@@ -2,6 +2,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
+function aiSection(config: string) {
+  return config.match(/^\[ai\]\r?\n([\s\S]*?)(?=^\[|$(?![\s\S]))/m)?.[1];
+}
+
 describe("preview Worker configuration", () => {
   it("dispatches API requests to the Worker before the SPA asset fallback", () => {
     const config = readFileSync(resolve(process.cwd(), "wrangler.preview.example.toml"), "utf8");
@@ -21,9 +25,14 @@ describe("preview Worker configuration", () => {
 
   it("declares the native Workers AI binding without a secret value", () => {
     const config = readFileSync(resolve(process.cwd(), "wrangler.preview.example.toml"), "utf8");
-    const aiSection = config.match(/^\[ai\]\r?\n([\s\S]*?)(?=^\[|\z)/m)?.[1];
 
-    expect(aiSection).toContain('binding = "AI"');
+    expect(aiSection(config)).toContain('binding = "AI"');
     expect(config).not.toMatch(/AI(?:_|_API)?(?:KEY|TOKEN|SECRET)\s*=/i);
+  });
+
+  it("parses an AI section at the TOML end of file", () => {
+    const config = 'name = "preview"\n\n[ai]\nbinding = "AI"\n';
+
+    expect(aiSection(config)).toContain('binding = "AI"');
   });
 });

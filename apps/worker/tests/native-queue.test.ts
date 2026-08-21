@@ -53,24 +53,59 @@ class FakeNativeBatch<T> implements MessageBatch<T> {
   }
 }
 
-function pdfObject() {
-  return {
-    body: new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]));
-        controller.close();
-      },
-    }),
-    size: 5,
-  };
+const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+
+class FakeR2Object implements R2Object {
+  readonly version = "version";
+  readonly size: number;
+  readonly etag = "etag";
+  readonly httpEtag = '"etag"';
+  readonly checksums: R2Checksums = { toJSON: () => ({}) };
+  readonly uploaded = new Date(0);
+  readonly storageClass = "Standard";
+
+  constructor(readonly key: string, bytes = pdfBytes) {
+    this.size = bytes.byteLength;
+  }
+
+  writeHttpMetadata(_headers: Headers) {}
 }
 
-function privateFiles() {
-  return {
-    async get() { return pdfObject(); },
-    async put() {},
-    async delete() {},
-  } as Pick<R2Bucket, "get" | "put" | "delete">;
+class FakeR2ObjectBody extends FakeR2Object implements R2ObjectBody {
+  get body() {
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(pdfBytes);
+        controller.close();
+      },
+    });
+  }
+
+  get bodyUsed() { return false; }
+  async arrayBuffer() { return pdfBytes.buffer.slice(0); }
+  async bytes() { return pdfBytes; }
+  async text() { return new TextDecoder().decode(pdfBytes); }
+  async json<T>() { throw new Error(`No JSON body for ${this.key}`); }
+  async blob() { return new Blob([pdfBytes], { type: "application/pdf" }); }
+}
+
+class FakeR2MultipartUpload implements R2MultipartUpload {
+  constructor(readonly key: string, readonly uploadId: string) {}
+  async uploadPart(partNumber: number) { return { partNumber, etag: `etag-${partNumber}` }; }
+  async abort() {}
+  async complete() { return new FakeR2Object(this.key); }
+}
+
+class FakeR2Bucket implements R2Bucket {
+  async head(_key: string) { return null; }
+  async get(key: string, _options?: R2GetOptions) { return new FakeR2ObjectBody(key); }
+  async put(key: string, _value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob, _options?: R2PutOptions) {
+    return new FakeR2Object(key);
+  }
+  async createMultipartUpload(key: string) { return new FakeR2MultipartUpload(key, "upload"); }
+  resumeMultipartUpload(key: string, uploadId: string) { return new FakeR2MultipartUpload(key, uploadId); }
+  async delete(_keys: string | string[]) {}
+  async list(_options?: R2ListOptions): Promise<R2Objects> { return { objects: [], delimitedPrefixes: [], truncated: false }; }
 }
 
 async function fixture() {
@@ -96,11 +131,11 @@ async function fixture() {
 
 function queueEnv(
   db: D1Database,
-  options: { ai?: OcrAiBinding; files?: Pick<R2Bucket, "get" | "put" | "delete"> } = {},
+  options: { ai?: OcrAiBinding; files?: R2Bucket } = {},
 ): BetaWorkerEnv {
   return {
     DB: db,
-    FILES: (options.files ?? privateFiles()) as R2Bucket,
+    FILES: options.files ?? new FakeR2Bucket(),
     AI: options.ai ?? { async toMarkdown() { return { format: "markdown", data: "# Private OCR" }; } },
     APP_BASE_URL: "https://beta.test",
     RATE_LIMIT_SECRET: "rate-limit-secret-at-least-32-characters",

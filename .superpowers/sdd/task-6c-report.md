@@ -819,3 +819,31 @@ This slice completes the remaining native Queue fidelity, health capability, typ
 | `git diff --check` | PASS. |
 
 Commit: independent B2.2b commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C Fix B2.2b Minor: Complete R2 Fake and EOF TOML Parsing
+
+### Scope
+
+This final B2.2b minor follow-up changes only native test fixtures and preview-config parsing tests. No Worker runtime behavior, deployment, Web, legacy, Task 7, or secrets changed.
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm run test -- tests/preview-config.test.ts` | RED: an `[ai]` TOML section at EOF returned `undefined` because JavaScript does not support the previous `\z` anchor. |
+| `npm run test -- tests/native-queue.test.ts tests/preview-config.test.ts` | GREEN: PASS, 12 tests in 2 files. |
+
+### Implemented
+
+- Replaced the partial `Pick<R2Bucket>` plus `as R2Bucket` test cast with a complete structural `R2Bucket` fake, including object body, multipart, head/get/put/delete/list APIs and concrete R2 metadata values.
+- Replaced the invalid `\z` lookahead with a true EOF negative-lookahead. Preview tests now prove the AI binding is found both in the actual `[ai]` section and when that section is at TOML EOF.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| Focused native/config Worker tests | PASS, 12 tests in 2 files. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+Commit: independent B2.2b minor commit containing this report section; SHA is recorded in the final handoff.
