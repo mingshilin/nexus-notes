@@ -593,3 +593,36 @@ Commit: independent B1 re-review-fix commit containing this report section; SHA 
 | `npm run typecheck --workspace=@nexus/worker` | PASS. |
 
 Commit: independent B1 final-review-fix commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C Fix B2.1: Repository-Authorized Consumer Outcomes
+
+### Scope
+
+This is the consumer/outcome half of B2 only. It does not change `Env`, bootstrap, health, Wrangler, Web, legacy application files, deployment configuration, or Task 7. B2.2 remains responsible for passing native Cloudflare `Message` objects and invoking their `retry()` method from the returned outcome.
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm exec vitest run --config vitest.config.ts tests/ocr-consumer.test.ts` | RED: 5 expected failures. The prior consumer returned no outcome, did not ack stale/duplicate delivery, accepted only a derived R2 key path, and had no batch outcome API. |
+| Same focused command after the B2.1 implementation | GREEN: PASS, 5 tests. |
+| Same focused command after malformed-message regression | RED: `kind: "ocr"` with no payload threw while reading `workspace_id`. |
+| Same focused command after input guard | GREEN: PASS, 6 tests. |
+
+### Implemented
+
+- `claimOcrJob()` now schema-validates the full persisted queue body and returns the attachment's D1-authorized `object_key`, filename, MIME type, size, and deadline only when the existing workspace/source-revision/deletion/deadline/full-CAS claim succeeds.
+- `OcrConsumer` receives a fakeable Queue-message shape and a fakeable authorized-input extractor. It never derives or accepts an object key from the queue body. Stale, duplicate, malformed, cross-workspace, and deleted deliveries safely return `ack`.
+- Success delegates to the existing transactional `completeOcrJob()` search upsert. Retryable failures atomically persist `pending` plus a safe error code and return capped exponential delay metadata. Terminal failures become `failed`; retryable delivery exhaustion becomes `dead_letter`; both return `ack`.
+- `consumeBatch()` preserves independent per-message outcomes. A compatibility overload keeps the unmodified current bootstrap type-safe until B2.2 replaces its legacy wiring; this slice does not claim native Queue retry handling.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| OCR/D1 focused Worker suite | PASS, 38 tests. |
+| Worker full suite | PASS, 144 tests. |
+| `npm run typecheck` in `apps/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+Commit: independent B2.1 commit containing this report section; SHA is recorded in the final handoff.

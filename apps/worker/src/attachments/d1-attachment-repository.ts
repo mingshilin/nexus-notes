@@ -219,10 +219,13 @@ export class D1AttachmentRepository {
   }
 
   async claimOcrJob(message: QueueJob, now: string) {
-    const workspaceId = message.payload.workspace_id;
-    const attachmentId = message.payload.attachment_id;
-    const sourceRevision = message.payload.source_revision;
-    if (message.kind !== "ocr" || typeof workspaceId !== "string" || typeof attachmentId !== "string"
+    const parsed = QueueJobSchema.safeParse(message);
+    if (!parsed.success) return null;
+    const job = parsed.data;
+    const workspaceId = job.payload.workspace_id;
+    const attachmentId = job.payload.attachment_id;
+    const sourceRevision = job.payload.source_revision;
+    if (job.kind !== "ocr" || typeof workspaceId !== "string" || typeof attachmentId !== "string"
       || !Number.isInteger(sourceRevision) || Number(sourceRevision) <= 0) return null;
     return this.db.prepare(
       `UPDATE beta_ocr_jobs SET status = 'processing', revision = revision + 1, updated_at = ?
@@ -233,15 +236,23 @@ export class D1AttachmentRepository {
          WHERE a.workspace_id = beta_ocr_jobs.workspace_id AND a.id = beta_ocr_jobs.attachment_id
          AND a.status = 'ready' AND a.revision = beta_ocr_jobs.source_revision
        )
-       RETURNING id, workspace_id, attachment_id, source_revision, attempt_count, deadline`,
-    ).bind(now, workspaceId, message.job_id, attachmentId, sourceRevision, message.idempotency_key,
-      message.attempt, message.deadline, now).first<{
+       RETURNING id, workspace_id, attachment_id, source_revision, attempt_count, deadline,
+         (SELECT object_key FROM beta_attachments a WHERE a.workspace_id = beta_ocr_jobs.workspace_id AND a.id = beta_ocr_jobs.attachment_id) AS object_key,
+         (SELECT filename FROM beta_attachments a WHERE a.workspace_id = beta_ocr_jobs.workspace_id AND a.id = beta_ocr_jobs.attachment_id) AS filename,
+         (SELECT mime_type FROM beta_attachments a WHERE a.workspace_id = beta_ocr_jobs.workspace_id AND a.id = beta_ocr_jobs.attachment_id) AS mime_type,
+         (SELECT size_bytes FROM beta_attachments a WHERE a.workspace_id = beta_ocr_jobs.workspace_id AND a.id = beta_ocr_jobs.attachment_id) AS size_bytes`,
+    ).bind(now, workspaceId, job.job_id, attachmentId, sourceRevision, job.idempotency_key,
+      job.attempt, job.deadline, now).first<{
         id: string;
         workspace_id: string;
         attachment_id: string;
         source_revision: number;
         attempt_count: number;
         deadline: string;
+        object_key: string;
+        filename: string;
+        mime_type: string;
+        size_bytes: number;
       }>();
   }
 
@@ -269,12 +280,21 @@ export class D1AttachmentRepository {
     return Number(results[0]?.meta.changes ?? 0) > 0;
   }
 
-  async failOcrJob(workspaceId: string, jobId: string, code: string, now: string) {
-    await this.db.prepare(
-      `UPDATE beta_ocr_jobs SET status = CASE WHEN attempt_count >= ? THEN 'dead_letter' ELSE 'failed' END,
+  async retryOcrJob(workspaceId: string, jobId: string, code: string, now: string) {
+    const result = await this.db.prepare(
+      `UPDATE beta_ocr_jobs SET status = 'pending', last_error_code = ?, revision = revision + 1, updated_at = ?
+       WHERE workspace_id = ? AND id = ? AND status = 'processing' AND deadline > ?`,
+    ).bind(code, now, workspaceId, jobId, now).run();
+    return Number(result.meta.changes ?? 0) > 0;
+  }
+
+  async failOcrJob(workspaceId: string, jobId: string, code: string, now: string, options: { deadLetter?: boolean } = {}) {
+    const result = await this.db.prepare(
+      `UPDATE beta_ocr_jobs SET status = CASE WHEN ? OR attempt_count >= ? THEN 'dead_letter' ELSE 'failed' END,
        last_error_code = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND id = ? AND status = 'processing'`,
-    ).bind(MAX_OCR_ATTEMPTS, code, now, workspaceId, jobId).run();
+    ).bind(options.deadLetter ? 1 : 0, MAX_OCR_ATTEMPTS, code, now, workspaceId, jobId).run();
+    return Number(result.meta.changes ?? 0) > 0;
   }
 
   async recoverStaleOcrJobs(now: string, limit: number) {
