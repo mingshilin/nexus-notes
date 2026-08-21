@@ -62,14 +62,50 @@ export class D1AuthRepository implements AuthRepository {
     ).bind(this.createId(), input.userId, input.purpose, input.codeHash, input.expiresAt, input.now).run();
   }
 
-  async consumeEmailCode(codeHash: string, now: string) {
-    const row = await this.db.prepare(
+  async verifyEmailCodeAndEnsurePersonalWorkspace(codeHash: string, now: string) {
+    const workspaceId = this.createId();
+    const consumeCode = this.db.prepare(
       `UPDATE email_codes
        SET consumed_at = ?
        WHERE code_hash = ? AND purpose = 'verify_email' AND consumed_at IS NULL AND expires_at > ?
        RETURNING user_id`,
-    ).bind(now, codeHash, now).first<{ user_id: string }>();
-    return row ? { userId: row.user_id } : null;
+    ).bind(now, codeHash, now);
+    const verifyUser = this.db.prepare(
+      `UPDATE users
+       SET email_verified_at = COALESCE(email_verified_at, ?), updated_at = ?
+       WHERE id IN (
+         SELECT user_id
+         FROM email_codes
+         WHERE code_hash = ? AND purpose = 'verify_email' AND consumed_at = ?
+       )`,
+    ).bind(now, now, codeHash, now);
+    const createWorkspace = this.db.prepare(
+      `INSERT INTO workspaces (
+         id, owner_user_id, slug, name, workspace_type, revision, created_at, updated_at
+       )
+       SELECT ?, user_id, ?, 'Personal workspace', 'personal', 1, ?, ?
+       FROM email_codes
+       WHERE code_hash = ? AND purpose = 'verify_email' AND consumed_at = ?
+       ON CONFLICT(owner_user_id) WHERE workspace_type = 'personal' DO NOTHING`,
+    ).bind(workspaceId, `personal-${workspaceId}`, now, now, codeHash, now);
+    const ensureOwnerMembership = this.db.prepare(
+      `INSERT INTO workspace_members (
+         workspace_id, user_id, role, revision, joined_at, updated_at
+       )
+       SELECT w.id, e.user_id, 'owner', 1, ?, ?
+       FROM email_codes e
+       JOIN workspaces w ON w.owner_user_id = e.user_id AND w.workspace_type = 'personal'
+       WHERE e.code_hash = ? AND e.purpose = 'verify_email' AND e.consumed_at = ?
+       ON CONFLICT(workspace_id, user_id) DO UPDATE SET
+         role = 'owner',
+         revision = workspace_members.revision + 1,
+         updated_at = excluded.updated_at
+       WHERE workspace_members.role <> 'owner'`,
+    ).bind(now, now, codeHash, now);
+
+    const results = await this.db.batch([consumeCode, verifyUser, createWorkspace, ensureOwnerMembership]);
+    const row = results[0]?.results?.[0] as { user_id?: string } | undefined;
+    return row?.user_id ? { userId: row.user_id } : null;
   }
 
   private personalWorkspaceStatements(userId: string, now: string) {
@@ -98,15 +134,6 @@ export class D1AuthRepository implements AuthRepository {
 
   async ensurePersonalWorkspace(userId: string, now: string) {
     await this.db.batch(this.personalWorkspaceStatements(userId, now));
-  }
-
-  async markEmailVerifiedAndEnsurePersonalWorkspace(userId: string, now: string) {
-    const markVerified = this.db.prepare(
-      `UPDATE users
-       SET email_verified_at = COALESCE(email_verified_at, ?), updated_at = ?
-       WHERE id = ?`,
-    ).bind(now, now, userId);
-    await this.db.batch([markVerified, ...this.personalWorkspaceStatements(userId, now)]);
   }
 
   async listWorkspaceMemberships(userId: string): Promise<AuthWorkspaceMembership[]> {

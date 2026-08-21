@@ -368,6 +368,37 @@ Web-only implementation on `codex/public-beta-rewrite` from baseline `4da0c54`. 
 
 Commit: the independent Task 5A commit containing this section; SHA is recorded in the final handoff.
 
+## Task 5A Review Important Fix: Atomic Email Verification Activation
+
+### Scope and Root Cause
+
+This is the single remaining Task 5A review fix. The previous implementation consumed `email_codes.consumed_at` in one repository call, then verified the user and ensured the personal workspace in a second call. A failure in the second call could permanently consume a valid code without activating the account. No Web files were changed.
+
+### TDD RED / GREEN
+
+| Command | Evidence |
+| --- | --- |
+| `npm test --workspace @nexus/worker -- tests/personal-workspace-repository.test.ts tests/auth-service.test.ts` | RED: service still called the removed two-stage methods and the repository had no atomic method. After fixing test fixtures, 2 expected production-method failures remained. |
+| `npm test --workspace @nexus/worker -- tests/personal-workspace-repository.test.ts tests/auth-service.test.ts` | GREEN: 12/12 after the atomic repository batch was implemented. |
+
+The repository test uses a real Miniflare D1 database. A database proxy replaces only the workspace statement in the four-statement batch with an invalid D1 insert. The real D1 batch rejects and rolls back `consumed_at`, `email_verified_at`, user `status`, all workspace rows, and all membership rows. A normal repository retry with the same valid code then succeeds once; a second retry returns `null`, leaving exactly one personal workspace and one owner membership.
+
+### Implemented
+
+- Added `verifyEmailCodeAndEnsurePersonalWorkspace(codeHash, now)` as the sole verification repository operation. Its D1 batch conditionally consumes the code, updates the user, creates the personal workspace, and ensures owner membership using the consumed code as the transaction-local join key.
+- `AuthService.verifyEmail()` now hashes the code and performs exactly one repository call; it no longer has a consume-then-activate window.
+- Removed the old `consumeEmailCode` and `markEmailVerifiedAndEnsurePersonalWorkspace` repository API paths to prevent future two-stage use.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `npm test --workspace @nexus/worker -- tests/auth-crypto.test.ts tests/auth-routes.test.ts tests/auth-service.test.ts tests/d1-auth-repository.test.ts tests/personal-workspace-repository.test.ts tests/personal-workspace-migration.test.ts tests/schema.test.ts tests/session-tenancy.test.ts tests/resend-email.test.ts tests/turnstile.test.ts` | PASS, 31 tests in 10 files. |
+| `npm run typecheck --workspace @nexus/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+Commit: the independent atomicity-fix commit containing this section; SHA is recorded in the final handoff.
+
 ## Task 6C A2.2 Web Review Fix
 
 ### Scope

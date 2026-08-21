@@ -19,8 +19,7 @@ export interface AuthRepository {
   getUserById(userId: string): Promise<AuthUser | null | undefined>;
   createPendingUser(input: { email: string; passwordHash: string; displayName: string; now: string }): Promise<{ id: string; email: string }>;
   createEmailCode(input: { userId: string; codeHash: string; purpose: "verify_email"; expiresAt: string; now: string }): Promise<void>;
-  consumeEmailCode(codeHash: string, now: string): Promise<{ userId: string } | null | undefined>;
-  markEmailVerifiedAndEnsurePersonalWorkspace(userId: string, now: string): Promise<void>;
+  verifyEmailCodeAndEnsurePersonalWorkspace(codeHash: string, now: string): Promise<{ userId: string } | null | undefined>;
   ensurePersonalWorkspace(userId: string, now: string): Promise<void>;
   listWorkspaceMemberships(userId: string): Promise<AuthWorkspaceMembership[]>;
   createSession(input: { userId: string; tokenHash: string; expiresAt: string; now: string }): Promise<void>;
@@ -167,9 +166,8 @@ export class AuthService {
     const now = this.dependencies.clock().toISOString();
     const email = normalizeEmail(input.email);
     const codeHash = await this.dependencies.tokens.hash(`verify_email:${email}:${input.code}`);
-    const verification = await this.dependencies.repository.consumeEmailCode(codeHash, now);
+    const verification = await this.dependencies.repository.verifyEmailCodeAndEnsurePersonalWorkspace(codeHash, now);
     if (!verification) throw new AuthServiceError("EMAIL_CODE_INVALID", "Email verification code is invalid or expired");
-    await this.dependencies.repository.markEmailVerifiedAndEnsurePersonalWorkspace(verification.userId, now);
   }
 
   async resendVerification(input: { email: string; turnstileToken: string; ip: string }) {

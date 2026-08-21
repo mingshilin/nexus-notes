@@ -13,8 +13,7 @@ function createDependencies(overrides: Record<string, unknown> = {}) {
       getUserById: vi.fn(),
       createPendingUser: vi.fn(async (input) => ({ id: "user-1", ...input })),
       createEmailCode: vi.fn(),
-      consumeEmailCode: vi.fn(),
-      markEmailVerifiedAndEnsurePersonalWorkspace: vi.fn(),
+      verifyEmailCodeAndEnsurePersonalWorkspace: vi.fn(async () => ({ userId: "user-1" })),
       ensurePersonalWorkspace: vi.fn(),
       listWorkspaceMemberships: vi.fn(async () => []),
       createSession: vi.fn(),
@@ -93,7 +92,6 @@ describe("AuthService", () => {
   it("atomically verifies email and ensures the personal workspace", async () => {
     const worker = await loadWorker();
     const dependencies = createDependencies();
-    dependencies.repository.consumeEmailCode.mockResolvedValue({ userId: "user-1" });
     const AuthService = worker.AuthService as new (dependencies: Record<string, unknown>) => {
       verifyEmail(input: Record<string, unknown>): Promise<void>;
     };
@@ -101,12 +99,8 @@ describe("AuthService", () => {
 
     await service.verifyEmail({ email: " User@Example.com ", code: "123456" });
 
-    expect(dependencies.repository.consumeEmailCode).toHaveBeenCalledWith(
+    expect(dependencies.repository.verifyEmailCodeAndEnsurePersonalWorkspace).toHaveBeenCalledWith(
       "hash:verify_email:user@example.com:123456",
-      "2026-08-21T00:00:00.000Z",
-    );
-    expect(dependencies.repository.markEmailVerifiedAndEnsurePersonalWorkspace).toHaveBeenCalledWith(
-      "user-1",
       "2026-08-21T00:00:00.000Z",
     );
   });
