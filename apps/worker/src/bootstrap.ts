@@ -11,11 +11,17 @@ import { createSecureGateway } from "./http/security-gateway";
 import { D1NoteRepository } from "./notes/d1-note-repository";
 import { NoteService } from "./notes/note-service";
 import { D1KnowledgeRepository } from "./knowledge/d1-knowledge-repository";
+import { D1GraphRepository } from "./knowledge/d1-graph-repository";
+import { D1ReminderRepository } from "./knowledge/d1-reminder-repository";
+import { D1TaxonomyRepository } from "./knowledge/d1-taxonomy-repository";
 import { KnowledgeService } from "./knowledge/knowledge-service";
 import { registerAuthRoutes } from "./routes/auth";
 import { healthRoute, type BetaWorkerEnv } from "./routes/health";
 import { registerKnowledgeRoutes } from "./routes/knowledge";
 import { registerNoteRoutes } from "./routes/notes";
+import { registerGraphRoutes } from "./routes/graph";
+import { registerReminderRoutes } from "./routes/reminders";
+import { registerTaxonomyRoutes } from "./routes/taxonomy";
 import { D1QuotaService } from "./security/quota";
 import { D1RateLimiter } from "./security/rate-limit";
 
@@ -68,7 +74,28 @@ function createNoteService(env: BetaWorkerEnv) {
 }
 
 function createKnowledgeService(env: BetaWorkerEnv) {
-  return new KnowledgeService(new D1KnowledgeRepository(env.DB));
+  const search = new D1KnowledgeRepository(env.DB);
+  const taxonomy = new D1TaxonomyRepository(env.DB);
+  const graph = new D1GraphRepository(env.DB);
+  const reminders = new D1ReminderRepository(env.DB);
+  return new KnowledgeService({
+    search: (...args) => search.search(...args),
+    listSavedSearches: (...args) => search.listSavedSearches(...args),
+    createSavedSearch: (...args) => search.createSavedSearch(...args),
+    deleteSavedSearch: (...args) => search.deleteSavedSearch(...args),
+    listFolders: (...args) => taxonomy.listFolders(...args),
+    createFolder: (...args) => taxonomy.createFolder(...args),
+    listTags: (...args) => taxonomy.listTags(...args),
+    createTag: (...args) => taxonomy.createTag(...args),
+    setNoteTags: (...args) => taxonomy.setNoteTags(...args),
+    setNoteLinks: (...args) => taxonomy.setNoteLinks(...args),
+    listNoteLinks: (...args) => taxonomy.listNoteLinks(...args),
+    listBacklinks: (...args) => taxonomy.listBacklinks(...args),
+    getGraph: (...args) => graph.getGraph(...args),
+    listReminders: (...args) => reminders.listReminders(...args),
+    createReminder: (...args) => reminders.createReminder(...args),
+    updateReminder: (...args) => reminders.updateReminder(...args),
+  });
 }
 
 function allowedOrigins(env: BetaWorkerEnv) {
@@ -105,6 +132,9 @@ export function createBetaWorker() {
   registerAuthRoutes(registry, createAuthService);
   registerNoteRoutes(registry, createNoteService);
   registerKnowledgeRoutes(registry, createKnowledgeService);
+  registerTaxonomyRoutes(registry, createKnowledgeService);
+  registerReminderRoutes(registry, createKnowledgeService);
+  registerGraphRoutes(registry, createKnowledgeService);
 
   return {
     fetch(request: Request, env: BetaWorkerEnv) {

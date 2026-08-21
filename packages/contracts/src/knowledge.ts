@@ -41,10 +41,17 @@ export const CreateTagInputSchema = z.object({
 });
 export type CreateTagInput = z.infer<typeof CreateTagInputSchema>;
 
+const UniqueIdsSchema = z.array(EntityIdSchema).max(100).transform((ids) => [...new Set(ids)]);
+
 export const SetNoteTagsInputSchema = z.object({
-  tag_ids: z.array(EntityIdSchema).max(100),
+  tag_ids: UniqueIdsSchema,
 });
 export type SetNoteTagsInput = z.infer<typeof SetNoteTagsInputSchema>;
+
+export const SetNoteLinksInputSchema = z.object({
+  target_note_ids: UniqueIdsSchema,
+});
+export type SetNoteLinksInput = z.infer<typeof SetNoteLinksInputSchema>;
 
 export const NoteLinkSchema = z.object({
   id: EntityIdSchema,

@@ -54,4 +54,35 @@ describe("KnowledgeClient", () => {
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
     expect(api.request.mock.calls[1]?.[0].policy).toMatchObject({ retry: 0, idempotencyKey: "operation-1" });
   });
+
+  it("maps taxonomy, graph, and reminder endpoints", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ items: [], nodes: [], edges: [], updated: true, reminder: {} })) };
+    const client = new data.KnowledgeClient(api, "ws-1", { createId: () => "operation-1" });
+
+    await client.listFolders();
+    await client.createFolder({ name: "Projects" });
+    await client.listTags();
+    await client.createTag({ name: "research", color: "" });
+    await client.setNoteTags("note-1", { tag_ids: ["tag-1"] });
+    await client.setNoteLinks("note-1", { target_note_ids: ["note-2"] });
+    await client.listNoteLinks("note-1");
+    await client.listBacklinks("note-1");
+    await client.getGraph();
+    await client.getGraph("note-1");
+    await client.listReminders(true);
+    await client.createReminder({ note_id: "note-1", remind_at: "2026-08-22T00:00:00.000Z" });
+    await client.updateReminder("reminder-1", { base_revision: 1, status: "dismissed" });
+
+    expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET"])).toEqual([
+      ["/api/v2/folders", "GET"], ["/api/v2/folders", "POST"],
+      ["/api/v2/tags", "GET"], ["/api/v2/tags", "POST"],
+      ["/api/v2/notes/note-1/tags", "PUT"], ["/api/v2/notes/note-1/links", "PUT"],
+      ["/api/v2/notes/note-1/links", "GET"], ["/api/v2/notes/note-1/backlinks", "GET"],
+      ["/api/v2/graph", "GET"], ["/api/v2/graph/local/note-1", "GET"],
+      ["/api/v2/reminders?include_completed=true", "GET"], ["/api/v2/reminders", "POST"],
+      ["/api/v2/reminders/reminder-1", "PATCH"],
+    ]);
+    expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
+  });
 });

@@ -69,4 +69,49 @@ describe("v2 knowledge routes", () => {
 
     expect(response.status).toBe(401);
   });
+
+  it("registers taxonomy, reminder, and graph routes with editor-only shared mutations", async () => {
+    const worker = await loadWorker();
+    expect(worker.registerTaxonomyRoutes).toBeTypeOf("function");
+    expect(worker.registerReminderRoutes).toBeTypeOf("function");
+    expect(worker.registerGraphRoutes).toBeTypeOf("function");
+    const service = {
+      listFolders: vi.fn(async () => []), createFolder: vi.fn(async () => ({ id: "folder-1" })),
+      listTags: vi.fn(async () => []), createTag: vi.fn(async () => ({ id: "tag-1" })),
+      setNoteTags: vi.fn(async () => undefined), setNoteLinks: vi.fn(async () => undefined),
+      listNoteLinks: vi.fn(async () => []), listBacklinks: vi.fn(async () => []),
+      getGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
+      listReminders: vi.fn(async () => []), createReminder: vi.fn(async () => ({ id: "reminder-1" })),
+      updateReminder: vi.fn(async () => ({ id: "reminder-1", revision: 2 })),
+    };
+    const registry = (worker.createRouteRegistry as any)({
+      requestId: () => "req-knowledge-actions",
+      authenticate: vi.fn(async () => ({ userId: "user-1" })),
+      authorizeWorkspace: vi.fn(async () => ({ ...workspace, role: "editor" })),
+    });
+    (worker.registerTaxonomyRoutes as any)(registry, () => service);
+    (worker.registerReminderRoutes as any)(registry, () => service);
+    (worker.registerGraphRoutes as any)(registry, () => service);
+
+    const responses = await Promise.all([
+      registry.fetch(request("/api/v2/folders"), {}),
+      registry.fetch(request("/api/v2/folders", { method: "POST", body: JSON.stringify({ name: "Projects" }) }), {}),
+      registry.fetch(request("/api/v2/tags"), {}),
+      registry.fetch(request("/api/v2/tags", { method: "POST", body: JSON.stringify({ name: "research" }) }), {}),
+      registry.fetch(request("/api/v2/notes/note-1/tags", { method: "PUT", body: JSON.stringify({ tag_ids: ["tag-1"] }) }), {}),
+      registry.fetch(request("/api/v2/notes/note-1/links", { method: "PUT", body: JSON.stringify({ target_note_ids: ["note-2"] }) }), {}),
+      registry.fetch(request("/api/v2/notes/note-1/links"), {}),
+      registry.fetch(request("/api/v2/notes/note-1/backlinks"), {}),
+      registry.fetch(request("/api/v2/graph"), {}),
+      registry.fetch(request("/api/v2/graph/local/note-1"), {}),
+      registry.fetch(request("/api/v2/reminders"), {}),
+      registry.fetch(request("/api/v2/reminders", { method: "POST", body: JSON.stringify({ note_id: "note-1", remind_at: "2026-08-22T00:00:00.000Z" }) }), {}),
+      registry.fetch(request("/api/v2/reminders/reminder-1", { method: "PATCH", body: JSON.stringify({ base_revision: 1, status: "dismissed" }) }), {}),
+    ]);
+
+    expect(responses.every((response: Response) => response.status >= 200 && response.status < 300)).toBe(true);
+    expect(service.setNoteTags).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "note-1", { tag_ids: ["tag-1"] });
+    expect(service.getGraph).toHaveBeenNthCalledWith(1, expect.objectContaining({ workspaceId: "ws-1" }));
+    expect(service.getGraph).toHaveBeenNthCalledWith(2, expect.objectContaining({ workspaceId: "ws-1" }), "note-1");
+  });
 });

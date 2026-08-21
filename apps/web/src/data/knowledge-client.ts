@@ -1,4 +1,20 @@
-import type { SavedSearch, SavedSearchInput, SearchHit, SearchRequest } from "@nexus/contracts";
+import type {
+  CreateFolderInput,
+  CreateReminderInput,
+  CreateTagInput,
+  Folder,
+  GraphResponse,
+  NoteLink,
+  Reminder,
+  SavedSearch,
+  SavedSearchInput,
+  SearchHit,
+  SearchRequest,
+  SetNoteLinksInput,
+  SetNoteTagsInput,
+  Tag,
+  UpdateReminderInput,
+} from "@nexus/contracts";
 
 import type { ApiClient } from "./api-client";
 
@@ -60,6 +76,108 @@ export class KnowledgeClient {
       path: `/api/v2/search/saved/${encodeURIComponent(savedSearchId)}`,
       method: "DELETE",
       headers: this.headers(),
+      requestClass: "command",
+      policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId() },
+    });
+  }
+
+  listFolders(signal?: AbortSignal) {
+    return this.listQuery<Folder>("/api/v2/folders", "folders", signal);
+  }
+
+  createFolder(input: CreateFolderInput) {
+    return this.command<{ folder: Folder }>("/api/v2/folders", "POST", input).then(({ folder }) => folder);
+  }
+
+  listTags(signal?: AbortSignal) {
+    return this.listQuery<Tag>("/api/v2/tags", "tags", signal);
+  }
+
+  createTag(input: CreateTagInput) {
+    return this.command<{ tag: Tag }>("/api/v2/tags", "POST", input).then(({ tag }) => tag);
+  }
+
+  setNoteTags(noteId: string, input: SetNoteTagsInput) {
+    return this.command<{ updated: true }>(
+      `/api/v2/notes/${encodeURIComponent(noteId)}/tags`,
+      "PUT",
+      input,
+    );
+  }
+
+  setNoteLinks(noteId: string, input: SetNoteLinksInput) {
+    return this.command<{ updated: true }>(
+      `/api/v2/notes/${encodeURIComponent(noteId)}/links`,
+      "PUT",
+      input,
+    );
+  }
+
+  listNoteLinks(noteId: string, signal?: AbortSignal) {
+    return this.listQuery<NoteLink>(
+      `/api/v2/notes/${encodeURIComponent(noteId)}/links`,
+      `note-links:${noteId}`,
+      signal,
+    );
+  }
+
+  listBacklinks(noteId: string, signal?: AbortSignal) {
+    return this.listQuery<NoteLink>(
+      `/api/v2/notes/${encodeURIComponent(noteId)}/backlinks`,
+      `note-backlinks:${noteId}`,
+      signal,
+    );
+  }
+
+  getGraph(noteId?: string, signal?: AbortSignal) {
+    const path = noteId
+      ? `/api/v2/graph/local/${encodeURIComponent(noteId)}`
+      : "/api/v2/graph";
+    return this.query<GraphResponse>(path, `graph:${noteId ?? "global"}`, signal);
+  }
+
+  listReminders(includeCompleted = false, signal?: AbortSignal) {
+    const path = `/api/v2/reminders?include_completed=${includeCompleted}`;
+    return this.listQuery<Reminder>(path, `reminders:${includeCompleted}`, signal);
+  }
+
+  createReminder(input: CreateReminderInput) {
+    return this.command<{ reminder: Reminder }>("/api/v2/reminders", "POST", input)
+      .then(({ reminder }) => reminder);
+  }
+
+  updateReminder(reminderId: string, input: UpdateReminderInput) {
+    return this.command<{ reminder: Reminder }>(
+      `/api/v2/reminders/${encodeURIComponent(reminderId)}`,
+      "PATCH",
+      input,
+    ).then(({ reminder }) => reminder);
+  }
+
+  private listQuery<T>(path: string, key: string, signal?: AbortSignal) {
+    return this.query<{ items: T[] }>(path, key, signal).then(({ items }) => items);
+  }
+
+  private query<T>(path: string, key: string, signal?: AbortSignal) {
+    return this.client.request<T>({
+      path,
+      headers: this.headers(),
+      requestClass: "query",
+      policy: {
+        timeoutMs: 8_000,
+        retry: 2,
+        dedupeKey: `knowledge:${this.workspaceId}:${key}`,
+        signal,
+      },
+    });
+  }
+
+  private command<T>(path: string, method: "POST" | "PUT" | "PATCH", body: unknown) {
+    return this.client.request<T>({
+      path,
+      method,
+      headers: this.headers(),
+      body,
       requestClass: "command",
       policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId() },
     });

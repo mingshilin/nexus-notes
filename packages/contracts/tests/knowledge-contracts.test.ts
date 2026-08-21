@@ -68,6 +68,12 @@ describe("knowledge contracts", () => {
     }).success).toBe(true);
     expect(contracts.UpdateReminderInputSchema.safeParse({ base_revision: 1 }).success).toBe(false);
     expect(contracts.UpdateReminderInputSchema.safeParse({ base_revision: 1, status: "dismissed" }).success).toBe(true);
+    expect(contracts.SetNoteTagsInputSchema.parse({ tag_ids: ["tag-1", "tag-1", "tag-2"] })).toEqual({
+      tag_ids: ["tag-1", "tag-2"],
+    });
+    expect(contracts.SetNoteLinksInputSchema.parse({ target_note_ids: ["note-2", "note-2"] })).toEqual({
+      target_note_ids: ["note-2"],
+    });
     expect(contracts.GraphResponseSchema.safeParse({
       nodes: [{ id: "note-1", title: "Draft", is_current: true }],
       edges: [],
