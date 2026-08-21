@@ -14,13 +14,17 @@ import type {
   Database,
   DatabaseComment,
   DatabasePermission,
+  DatabasePermissionList,
   DatabaseProperty,
   DatabaseRecord,
   DatabaseTemplate,
   DatabaseView,
   DeleteDatabaseInput,
+  DeleteDatabasePermissionInput,
+  DeleteFieldPermissionInput,
   DeleteDatabaseRecordInput,
   FieldPermission,
+  FieldPermissionList,
   SetDatabasePermissionInput,
   SetFieldPermissionInput,
   UpdateDatabaseCommentInput,
@@ -199,8 +203,36 @@ export class DatabaseClient {
     return this.command<{ permission: DatabasePermission }>(`${this.databasePath(databaseId)}/permissions`, "PUT", input).then(({ permission }) => permission);
   }
 
+  listDatabasePermissions(databaseId: string, signal?: AbortSignal) {
+    return this.query<DatabasePermissionList>(
+      `${this.databasePath(databaseId)}/permissions`,
+      `database-permissions:${this.workspaceId}:${databaseId}`,
+      signal,
+    ).then(({ items }) => items);
+  }
+
+  deleteDatabasePermission(databaseId: string, permissionId: string, input: DeleteDatabasePermissionInput) {
+    return this.command<{ id: string }>(`${this.databasePath(databaseId)}/permissions/${encodeURIComponent(permissionId)}`, "DELETE", input);
+  }
+
   setFieldPermission(databaseId: string, propertyId: string, input: SetFieldPermissionInput) {
     return this.command<{ permission: FieldPermission }>(`${this.databasePath(databaseId)}/properties/${encodeURIComponent(propertyId)}/permissions`, "PUT", input).then(({ permission }) => permission);
+  }
+
+  listFieldPermissions(databaseId: string, propertyId: string, signal?: AbortSignal) {
+    return this.query<FieldPermissionList>(
+      `${this.databasePath(databaseId)}/properties/${encodeURIComponent(propertyId)}/permissions`,
+      `field-permissions:${this.workspaceId}:${databaseId}:${propertyId}`,
+      signal,
+    ).then(({ items }) => items);
+  }
+
+  deleteFieldPermission(databaseId: string, propertyId: string, permissionId: string, input: DeleteFieldPermissionInput) {
+    return this.command<{ id: string }>(
+      `${this.databasePath(databaseId)}/properties/${encodeURIComponent(propertyId)}/permissions/${encodeURIComponent(permissionId)}`,
+      "DELETE",
+      input,
+    );
   }
 
   importCsv(databaseId: string, input: CsvImportInput) {

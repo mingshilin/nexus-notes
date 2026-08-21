@@ -206,6 +206,11 @@ export const DatabasePermissionSchema = z.object({
 
 export type DatabasePermission = z.infer<typeof DatabasePermissionSchema>;
 
+export const DatabasePermissionListSchema = z.object({
+  items: z.array(DatabasePermissionSchema),
+}).strict();
+export type DatabasePermissionList = z.infer<typeof DatabasePermissionListSchema>;
+
 export const FieldPermissionSchema = z.object({
   id: EntityIdSchema,
   workspace_id: EntityIdSchema,
@@ -223,6 +228,11 @@ export const FieldPermissionSchema = z.object({
 });
 
 export type FieldPermission = z.infer<typeof FieldPermissionSchema>;
+
+export const FieldPermissionListSchema = z.object({
+  items: z.array(FieldPermissionSchema),
+}).strict();
+export type FieldPermissionList = z.infer<typeof FieldPermissionListSchema>;
 
 export const CreateDatabaseInputSchema = z.object({
   name: NameSchema,
@@ -337,6 +347,12 @@ export const SetFieldPermissionInputSchema = z.object({
   path: ["can_write"],
 });
 export type SetFieldPermissionInput = z.infer<typeof SetFieldPermissionInputSchema>;
+
+export const DeleteDatabasePermissionInputSchema = z.object({ base_revision: RevisionSchema }).strict();
+export type DeleteDatabasePermissionInput = z.infer<typeof DeleteDatabasePermissionInputSchema>;
+
+export const DeleteFieldPermissionInputSchema = z.object({ base_revision: RevisionSchema }).strict();
+export type DeleteFieldPermissionInput = z.infer<typeof DeleteFieldPermissionInputSchema>;
 
 const RecordMutationSchema = z.object({
   record_id: EntityIdSchema,

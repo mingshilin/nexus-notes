@@ -168,6 +168,62 @@ describe("D1 structured database repository", () => {
     expect(fieldWrites.find((result) => result.status === "rejected")).toMatchObject({ reason: { code: "REVISION_CONFLICT" } });
   });
 
+  it("lists current permission revisions in a deterministic server-safe order", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Permission list", description: "" });
+    const property = await repository.createProperty(owner, database.id, { name: "Name", type: "text", config: {}, position: 0 });
+
+    const first = await repository.setDatabasePermission(owner, database.id, {
+      subject_type: "user", subject_id: "user-2", role: "viewer", base_revision: 1,
+    });
+    const updated = await repository.setDatabasePermission(owner, database.id, {
+      subject_type: "user", subject_id: "user-2", role: "editor", base_revision: first.revision,
+    });
+    const rolePermission = await repository.setDatabasePermission(owner, database.id, {
+      subject_type: "role", subject_id: "editor", role: "viewer", base_revision: 1,
+    });
+    const field = await repository.setFieldPermission(owner, database.id, property.id, {
+      subject_type: "role", subject_id: "editor", can_read: true, can_write: false, base_revision: 1,
+    });
+
+    await expect(repository.listDatabasePermissions(owner, database.id)).resolves.toEqual([
+      expect.objectContaining({ id: rolePermission.id, subject_type: "role", subject_id: "editor", role: "viewer", revision: 1 }),
+      expect.objectContaining({ id: updated.id, subject_type: "user", subject_id: "user-2", role: "editor", revision: 2 }),
+    ]);
+    await expect(repository.listFieldPermissions(owner, database.id, property.id)).resolves.toEqual([
+      expect.objectContaining({ id: field.id, subject_type: "role", subject_id: "editor", can_read: true, can_write: false, revision: 1 }),
+    ]);
+  });
+
+  it("deletes permissions with revision CAS and keeps them scoped to a managed database", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const viewer = context("user-2", "viewer");
+    const foreign = { ...context("user-3"), workspaceId: "ws-2" };
+    const database = await repository.createDatabase(owner, { name: "Permission delete", description: "" });
+    const property = await repository.createProperty(owner, database.id, { name: "Name", type: "text", config: {}, position: 0 });
+    const databasePermission = await repository.setDatabasePermission(owner, database.id, {
+      subject_type: "user", subject_id: "user-2", role: "viewer", base_revision: 1,
+    });
+    const fieldPermission = await repository.setFieldPermission(owner, database.id, property.id, {
+      subject_type: "user", subject_id: "user-2", can_read: true, can_write: false, base_revision: 1,
+    });
+
+    await expect(repository.listDatabasePermissions(viewer, database.id))
+      .rejects.toMatchObject({ code: "DATABASE_MANAGE_DENIED", status: 403 });
+    await expect(repository.listDatabasePermissions(foreign, database.id))
+      .rejects.toMatchObject({ code: "DATABASE_NOT_FOUND", status: 404 });
+    await expect(repository.deleteDatabasePermission(owner, database.id, databasePermission.id, { base_revision: 2 }))
+      .rejects.toMatchObject({ code: "REVISION_CONFLICT", status: 409 });
+    await expect(repository.deleteDatabasePermission(owner, database.id, databasePermission.id, { base_revision: 1 }))
+      .resolves.toEqual({ id: databasePermission.id });
+    await expect(repository.deleteFieldPermission(owner, database.id, property.id, fieldPermission.id, { base_revision: 1 }))
+      .resolves.toEqual({ id: fieldPermission.id });
+    await expect(repository.listDatabasePermissions(owner, database.id)).resolves.toEqual([]);
+    await expect(repository.listFieldPermissions(owner, database.id, property.id)).resolves.toEqual([]);
+  });
+
   it("validates member membership and relation targets within the workspace", async () => {
     const repository = await createRepository();
     const owner = context("user-1");

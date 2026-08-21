@@ -3,7 +3,9 @@ import {
   CreateDatabasePropertyInputSchema,
   CreateDatabaseTemplateInputSchema,
   CreateDatabaseViewInputSchema,
+  DeleteDatabasePermissionInputSchema,
   DeleteDatabaseInputSchema,
+  DeleteFieldPermissionInputSchema,
   SetDatabasePermissionInputSchema,
   SetFieldPermissionInputSchema,
   UpdateDatabasePropertyInputSchema,
@@ -87,9 +89,33 @@ export function registerDatabaseMetadataRoutes<TEnv>(
     }),
   });
   registry.register({
+    method: "GET", path: "/api/v2/databases/:databaseId/permissions", auth: "workspace",
+    handler: async ({ env, workspace, params }) => ({
+      data: { items: await createRepository(env).listDatabasePermissions(workspace!, params.databaseId!) },
+    }),
+  });
+  registry.register({
+    method: "DELETE", path: "/api/v2/databases/:databaseId/permissions/:permissionId", auth: "workspace", body: DeleteDatabasePermissionInputSchema,
+    handler: async ({ env, workspace, params, body }) => ({
+      data: await createRepository(env).deleteDatabasePermission(workspace!, params.databaseId!, params.permissionId!, body),
+    }),
+  });
+  registry.register({
     method: "PUT", path: "/api/v2/databases/:databaseId/properties/:propertyId/permissions", auth: "workspace", body: SetFieldPermissionInputSchema,
     handler: async ({ env, workspace, params, body }) => ({
       data: { permission: await createRepository(env).setFieldPermission(workspace!, params.databaseId!, params.propertyId!, body) },
+    }),
+  });
+  registry.register({
+    method: "GET", path: "/api/v2/databases/:databaseId/properties/:propertyId/permissions", auth: "workspace",
+    handler: async ({ env, workspace, params }) => ({
+      data: { items: await createRepository(env).listFieldPermissions(workspace!, params.databaseId!, params.propertyId!) },
+    }),
+  });
+  registry.register({
+    method: "DELETE", path: "/api/v2/databases/:databaseId/properties/:propertyId/permissions/:permissionId", auth: "workspace", body: DeleteFieldPermissionInputSchema,
+    handler: async ({ env, workspace, params, body }) => ({
+      data: await createRepository(env).deleteFieldPermission(workspace!, params.databaseId!, params.propertyId!, params.permissionId!, body),
     }),
   });
 }

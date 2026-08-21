@@ -58,6 +58,24 @@ describe("DatabaseClient", () => {
     expect(new Set(api.request.mock.calls.map(([options]) => options.policy.idempotencyKey)).size).toBe(9);
   });
 
+  it("lists and deletes permission rows through v2 envelopes", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ items: [{ id: "permission-1" }] })) };
+    const client = new data.DatabaseClient(api, "ws-1", { createId: () => "permission-delete" });
+
+    await expect(client.listDatabasePermissions("db-1")).resolves.toEqual([{ id: "permission-1" }]);
+    await expect(client.listFieldPermissions("db-1", "prop-1")).resolves.toEqual([{ id: "permission-1" }]);
+    await client.deleteDatabasePermission("db-1", "permission-1", { base_revision: 2 });
+    await client.deleteFieldPermission("db-1", "prop-1", "permission-1", { base_revision: 2 });
+
+    expect(api.request.mock.calls.map(([options]) => [options.path, options.method, options.requestClass])).toEqual([
+      ["/api/v2/databases/db-1/permissions", undefined, "query"],
+      ["/api/v2/databases/db-1/properties/prop-1/permissions", undefined, "query"],
+      ["/api/v2/databases/db-1/permissions/permission-1", "DELETE", "command"],
+      ["/api/v2/databases/db-1/properties/prop-1/permissions/permission-1", "DELETE", "command"],
+    ]);
+  });
+
   it("exports every bounded CSV page without repeating headers", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async ({ body }: { body: { cursor: string | null; include_header?: boolean } }) => {

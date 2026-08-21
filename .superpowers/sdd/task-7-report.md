@@ -201,3 +201,38 @@ The Worker suite still emits the existing `OCR_QUEUE_MESSAGE_INVALID` stderr lin
 - Complete dedicated typed CRUD/settings UI for every database entity and property type, including no-view creation paths.
 - Add user/viewport-driven bounded board/calendar loading, robust serialized optimistic bulk rollback, and confirmed snapshot reconciliation.
 - Keep CSV export consumption bounded in the UI (chunk/Blob strategy where required) and complete drawer focus-return, modal focus containment, and real-browser 390px/200%/keyboard evidence.
+
+## Task 7 Web Review Fix Wave 3 - Blocked
+
+### Blocking API evidence
+
+- `apps/worker/src/routes/database-metadata.ts` exposes only `PUT /api/v2/databases/:databaseId/permissions` and `PUT /api/v2/databases/:databaseId/properties/:propertyId/permissions`. It has no permission or field-permission list/read route and no deletion route.
+- `apps/worker/src/databases/d1-database-views.ts:getDatabase` returns only `database`, `role`, `properties`, `views`, and `templates`. It does not return database permissions or field permissions.
+- Both `SetDatabasePermissionInputSchema` and `SetFieldPermissionInputSchema` require a positive `base_revision`. With no list/read response, the Web client cannot discover an existing permission or obtain its current revision before a mutation.
+
+### Consequence
+
+The requested Web scope explicitly requires browseable/selectable database- and field-permission state and typed updates using each entity's current revision. That behavior cannot be implemented correctly against `/api/v2` at backend head `018c10e`; guessing `base_revision: 1` violates the revision contract and fails after the first edit. No Web implementation changes were made, and no Worker/domain/contracts/migration/deployment/remote/secret files were changed.
+
+## Task 7 Permission API Unblocker
+
+### RED evidence
+
+- Added repository, route, and compatible Web client tests before the API implementation. The client RED run failed with `client.listDatabasePermissions is not a function`; the Worker tests initially lacked the corresponding repository methods and route registrations.
+
+### GREEN evidence
+
+- `rtk npm run test --workspace @nexus/worker -- tests/d1-database-repository.test.ts -t "lists current permission revisions|deletes permissions" --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=dot`: passed `2/2` new repository tests. They cover deterministic list order, current revision after the first update, stale delete CAS, field permission deletion, viewer denial, and cross-workspace denial.
+- `rtk npm run test --workspace @nexus/worker -- tests/database-routes.test.ts --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=verbose`: passed `4/4`, including GET/DELETE route registration and v2 success envelopes for both permission collections.
+- `rtk npm run test --workspace @nexus/contracts -- tests/database-contracts.test.ts`: passed, including typed permission list response and deletion input schemas.
+- `rtk npm run test --workspace @nexus/web -- tests/database-client.test.ts`: passed, including typed list/delete calls through the v2 paths.
+- Full `@nexus/worker` suite: `rtk npm run test --workspace @nexus/worker -- --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=dot` passed `37/37` files and `206/206` tests in `132.88s`. Existing `OCR_QUEUE_MESSAGE_INVALID` stderr is expected poison-message coverage.
+- `rtk npm run typecheck --workspace @nexus/worker`, `@nexus/contracts`, and `@nexus/web` passed. `git diff --check` passed.
+
+### Requirement mapping
+
+- Added strict shared list response and deletion-CAS contracts for database and field permissions.
+- Repository list/delete methods require database `manage` access, scope every query to workspace/database/property, select only API fields, order by subject type/ID/entity ID, and enforce revision-CAS deletes.
+- Added `GET` list and `DELETE` routes for database and field permissions while preserving existing PUT upserts and v2 envelopes.
+- Permission collections deliberately remain outside the normal database bundle: only owner/database-manage callers can list them, so viewers cannot receive permission assignments through a readable database bundle.
+- Added `DatabaseClient` typed list/delete methods with workspace-scoped query dedupe keys and standard command idempotency policies.

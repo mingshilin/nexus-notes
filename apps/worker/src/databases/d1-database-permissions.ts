@@ -1,5 +1,7 @@
 import type {
   DatabasePermission,
+  DeleteDatabasePermissionInput,
+  DeleteFieldPermissionInput,
   FieldPermission,
   SetDatabasePermissionInput,
   SetFieldPermissionInput,
@@ -9,7 +11,115 @@ import type {
 import { assertRevision, DatabaseRepositoryBase } from "./database-repository-base";
 import { DatabaseRepositoryError } from "./database-model";
 
+interface DatabasePermissionRow {
+  id: string;
+  workspace_id: string;
+  database_id: string;
+  subject_type: DatabasePermission["subject_type"];
+  subject_id: string;
+  access_level: DatabasePermission["role"];
+  revision: number;
+  updated_at: string;
+}
+
+interface FieldPermissionRow {
+  id: string;
+  workspace_id: string;
+  database_id: string;
+  property_id: string;
+  subject_type: FieldPermission["subject_type"];
+  subject_id: string;
+  can_read: number;
+  can_write: number;
+  revision: number;
+  updated_at: string;
+}
+
+function toDatabasePermission(row: DatabasePermissionRow): DatabasePermission {
+  return {
+    id: row.id,
+    workspace_id: row.workspace_id,
+    database_id: row.database_id,
+    subject_type: row.subject_type,
+    subject_id: row.subject_id,
+    role: row.access_level,
+    revision: row.revision,
+    updated_at: row.updated_at,
+  };
+}
+
+function toFieldPermission(row: FieldPermissionRow): FieldPermission {
+  return { ...row, can_read: Boolean(row.can_read), can_write: Boolean(row.can_write) };
+}
+
 export class D1DatabasePermissionRepository extends DatabaseRepositoryBase {
+  async listDatabasePermissions(context: WorkspaceContext, databaseId: string) {
+    await this.access.assert(context, databaseId, "manage");
+    const result = await this.db.prepare(
+      `SELECT id, workspace_id, database_id, subject_type, subject_id, access_level, revision, updated_at
+       FROM database_permissions
+       WHERE workspace_id = ? AND database_id = ?
+       ORDER BY subject_type, subject_id, id`,
+    ).bind(context.workspaceId, databaseId).all<DatabasePermissionRow>();
+    return (result.results ?? []).map(toDatabasePermission);
+  }
+
+  async deleteDatabasePermission(
+    context: WorkspaceContext,
+    databaseId: string,
+    permissionId: string,
+    input: DeleteDatabasePermissionInput,
+  ) {
+    await this.access.assert(context, databaseId, "manage");
+    const current = await this.db.prepare(
+      `SELECT id, revision FROM database_permissions
+       WHERE workspace_id = ? AND database_id = ? AND id = ?`,
+    ).bind(context.workspaceId, databaseId, permissionId).first<{ id: string; revision: number }>();
+    if (!current) throw new DatabaseRepositoryError("DATABASE_PERMISSION_NOT_FOUND", "Database permission not found", 404);
+    assertRevision(current.revision, input.base_revision);
+    const result = await this.db.prepare(
+      `DELETE FROM database_permissions
+       WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
+    ).bind(context.workspaceId, databaseId, permissionId, input.base_revision).run();
+    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    return { id: permissionId };
+  }
+
+  async listFieldPermissions(context: WorkspaceContext, databaseId: string, propertyId: string) {
+    const fields = await this.access.fields(context, databaseId, "manage");
+    this.access.findProperty(fields.properties, propertyId);
+    const result = await this.db.prepare(
+      `SELECT id, workspace_id, database_id, property_id, subject_type, subject_id, can_read, can_write, revision, updated_at
+       FROM field_permissions
+       WHERE workspace_id = ? AND database_id = ? AND property_id = ?
+       ORDER BY subject_type, subject_id, id`,
+    ).bind(context.workspaceId, databaseId, propertyId).all<FieldPermissionRow>();
+    return (result.results ?? []).map(toFieldPermission);
+  }
+
+  async deleteFieldPermission(
+    context: WorkspaceContext,
+    databaseId: string,
+    propertyId: string,
+    permissionId: string,
+    input: DeleteFieldPermissionInput,
+  ) {
+    const fields = await this.access.fields(context, databaseId, "manage");
+    this.access.findProperty(fields.properties, propertyId);
+    const current = await this.db.prepare(
+      `SELECT id, revision FROM field_permissions
+       WHERE workspace_id = ? AND database_id = ? AND property_id = ? AND id = ?`,
+    ).bind(context.workspaceId, databaseId, propertyId, permissionId).first<{ id: string; revision: number }>();
+    if (!current) throw new DatabaseRepositoryError("FIELD_PERMISSION_NOT_FOUND", "Field permission not found", 404);
+    assertRevision(current.revision, input.base_revision);
+    const result = await this.db.prepare(
+      `DELETE FROM field_permissions
+       WHERE workspace_id = ? AND database_id = ? AND property_id = ? AND id = ? AND revision = ?`,
+    ).bind(context.workspaceId, databaseId, propertyId, permissionId, input.base_revision).run();
+    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    return { id: permissionId };
+  }
+
   async setDatabasePermission(context: WorkspaceContext, databaseId: string, input: SetDatabasePermissionInput) {
     await this.access.assert(context, databaseId, "manage");
     const current = await this.db.prepare(

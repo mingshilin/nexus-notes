@@ -34,6 +34,8 @@ function repositoryDouble() {
     createTemplate: vi.fn(async () => entity), updateTemplate: vi.fn(async () => entity), deleteTemplate: vi.fn(async () => ({ id: entity.id })), applyTemplate: vi.fn(async () => ({ items: [entity] })),
     listComments: vi.fn(async () => []), createComment: vi.fn(async () => entity), updateComment: vi.fn(async () => entity), deleteComment: vi.fn(async () => ({ id: entity.id })),
     setDatabasePermission: vi.fn(async () => entity), setFieldPermission: vi.fn(async () => entity),
+    listDatabasePermissions: vi.fn(async () => [entity]), listFieldPermissions: vi.fn(async () => [entity]),
+    deleteDatabasePermission: vi.fn(async () => ({ id: entity.id })), deleteFieldPermission: vi.fn(async () => ({ id: entity.id })),
     importCsv: vi.fn(async () => ({ items: [entity], imported_count: 1 })), exportCsv: vi.fn(async () => ({ csv: "Name\r\nOne", next_cursor: null })),
   };
 }
@@ -82,7 +84,11 @@ describe("v2 structured database routes", () => {
       ["PATCH", "/api/v2/databases/db-1/comments/comment-1", { base_revision: 1, body: "Resolved" }],
       ["DELETE", "/api/v2/databases/db-1/comments/comment-1", { base_revision: 1 }],
       ["PUT", "/api/v2/databases/db-1/permissions", { subject_type: "user", subject_id: "user-2", role: "viewer", base_revision: 1 }],
+      ["GET", "/api/v2/databases/db-1/permissions"],
+      ["DELETE", "/api/v2/databases/db-1/permissions/permission-1", { base_revision: 1 }],
       ["PUT", "/api/v2/databases/db-1/properties/prop-1/permissions", { subject_type: "role", subject_id: "viewer", can_read: true, can_write: false, base_revision: 1 }],
+      ["GET", "/api/v2/databases/db-1/properties/prop-1/permissions"],
+      ["DELETE", "/api/v2/databases/db-1/properties/prop-1/permissions/permission-1", { base_revision: 1 }],
       ["POST", "/api/v2/databases/db-1/import/csv", { csv: "Name\r\nOne", header_property_ids: { Name: "prop-1" } }],
       ["POST", "/api/v2/databases/db-1/export/csv", { property_ids: ["prop-1"], cursor: null, page_size: 100 }],
     ];
@@ -92,6 +98,13 @@ describe("v2 structured database routes", () => {
     expect(repository.listRecords).toHaveBeenCalledWith(workspace, "db-1", { cursor: "next", view_id: "view-1", limit: 25 });
     expect(repository.searchRecords).toHaveBeenCalledWith(workspace, "db-1", { query: "alpha", cursor: null, limit: 20 });
     expect(repository.createComment).toHaveBeenCalledWith(workspace, "db-1", { record_id: "record-1", body: "Review" });
+    expect(repository.listDatabasePermissions).toHaveBeenCalledWith(workspace, "db-1");
+    expect(repository.deleteFieldPermission).toHaveBeenCalledWith(workspace, "db-1", "prop-1", "permission-1", { base_revision: 1 });
+    const databasePermissionsResponse = await responses[cases.findIndex(([method, path]) => method === "GET" && path === "/api/v2/databases/db-1/permissions")]!.json();
+    const fieldPermissionsResponse = await responses[cases.findIndex(([method, path]) => method === "GET" && path === "/api/v2/databases/db-1/properties/prop-1/permissions")]!.json();
+    const permission = { id: "entity-1", revision: 1 };
+    expect(databasePermissionsResponse).toEqual({ success: true, data: { items: [permission] }, request_id: "req-db" });
+    expect(fieldPermissionsResponse).toEqual({ success: true, data: { items: [permission] }, request_id: "req-db" });
   });
 
   it("rejects unknown body keys before repository calls and requires workspace auth", async () => {

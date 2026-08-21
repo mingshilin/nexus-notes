@@ -37,6 +37,10 @@ export class D1DatabaseRepository {
   readonly deleteComment: D1DatabaseCommentRepository["deleteComment"];
   readonly setDatabasePermission: D1DatabasePermissionRepository["setDatabasePermission"];
   readonly setFieldPermission: D1DatabasePermissionRepository["setFieldPermission"];
+  readonly listDatabasePermissions: D1DatabasePermissionRepository["listDatabasePermissions"];
+  readonly deleteDatabasePermission: D1DatabasePermissionRepository["deleteDatabasePermission"];
+  readonly listFieldPermissions: D1DatabasePermissionRepository["listFieldPermissions"];
+  readonly deleteFieldPermission: D1DatabasePermissionRepository["deleteFieldPermission"];
   readonly importCsv: D1DatabaseCsvRepository["importCsv"];
   readonly exportCsv: D1DatabaseCsvRepository["exportCsv"];
 
@@ -78,6 +82,10 @@ export class D1DatabaseRepository {
     this.deleteComment = comments.deleteComment.bind(comments);
     this.setDatabasePermission = permissions.setDatabasePermission.bind(permissions);
     this.setFieldPermission = permissions.setFieldPermission.bind(permissions);
+    this.listDatabasePermissions = permissions.listDatabasePermissions.bind(permissions);
+    this.deleteDatabasePermission = permissions.deleteDatabasePermission.bind(permissions);
+    this.listFieldPermissions = permissions.listFieldPermissions.bind(permissions);
+    this.deleteFieldPermission = permissions.deleteFieldPermission.bind(permissions);
     this.importCsv = csv.importCsv.bind(csv);
     this.exportCsv = csv.exportCsv.bind(csv);
   }

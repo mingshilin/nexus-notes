@@ -78,6 +78,22 @@ describe("structured database contracts", () => {
     expect(schema.safeParse({ name: "Due", type: "date", config: {}, position: 0 }).success).toBe(true);
   });
 
+  it("exports typed permission list responses with current entity revisions", async () => {
+    const contracts = await loadContracts();
+    const databasePermission = {
+      id: "permission-1", workspace_id: "ws-1", database_id: "db-1", subject_type: "user", subject_id: "user-2",
+      role: "editor", revision: 2, updated_at: now,
+    };
+    const fieldPermission = {
+      id: "field-permission-1", workspace_id: "ws-1", database_id: "db-1", property_id: "prop-1",
+      subject_type: "role", subject_id: "viewer", can_read: true, can_write: false, revision: 3, updated_at: now,
+    };
+
+    expect((contracts.DatabasePermissionListSchema as Schema).safeParse({ items: [databasePermission] }).success).toBe(true);
+    expect((contracts.FieldPermissionListSchema as Schema).safeParse({ items: [fieldPermission] }).success).toBe(true);
+    expect((contracts.DatabasePermissionListSchema as Schema).safeParse({ items: [{ ...databasePermission, revision: 0 }] }).success).toBe(false);
+  });
+
   it("exports strict CRUD, permission, atomic mutation, board, calendar, template, and CSV inputs", async () => {
     const contracts = await loadContracts();
     const fixtures: Array<[string, unknown, unknown]> = [
@@ -95,6 +111,8 @@ describe("structured database contracts", () => {
       ["UpdateDatabaseCommentInputSchema", { base_revision: 1, body: "Resolved" }, { base_revision: 1, body: "" }],
       ["SetDatabasePermissionInputSchema", { subject_type: "user", subject_id: "user-2", role: "editor", base_revision: 1 }, { subject_type: "user", subject_id: "user-2", role: "admin" }],
       ["SetFieldPermissionInputSchema", { subject_type: "role", subject_id: "viewer", can_read: true, can_write: false, base_revision: 1 }, { subject_type: "role", subject_id: "viewer", can_read: false, can_write: true, base_revision: 1 }],
+      ["DeleteDatabasePermissionInputSchema", { base_revision: 1 }, { base_revision: 0 }],
+      ["DeleteFieldPermissionInputSchema", { base_revision: 1 }, { base_revision: 0 }],
       ["BulkEditRecordsInputSchema", { mutations: [{ record_id: "record-1", base_revision: 1, values: { "prop-1": "done" } }] }, { mutations: [] }],
       ["BoardMoveInputSchema", { record_id: "record-1", property_id: "prop-1", option_id: "done", base_revision: 1 }, { record_id: "record-1", property_id: "prop-1", option_id: ["done"], base_revision: 1 }],
       ["CalendarAssignmentInputSchema", { record_id: "record-1", property_id: "due", date: "2026-08-22", base_revision: 1 }, { record_id: "record-1", property_id: "due", date: "22/08/2026", base_revision: 1 }],
