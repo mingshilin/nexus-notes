@@ -190,3 +190,47 @@ Commit: focused re-review commit containing this report section; SHA is reported
 - Recovery is deliberately bounded to 50 stale jobs per minute; deterministic deadline/id ordering lets later cron runs drain additional rows.
 - Duplicate old generations cannot all remain active under the new invariant, so non-canonical rows are losslessly retained in the migration archive table rather than discarded or assigned a false source revision.
 - Queue delivery remains at-least-once; full-message consumer CAS remains the duplicate-processing guard.
+
+## Task 6C Fix A2.1: Worker/Contracts Diagnostics and Attachment Lifecycle
+
+### Scope
+
+Worker/contracts only. No Web code, Workers AI extractor, Task 7 work, or deployment was changed. The mounted recovery UI filters, loading/empty/error/success states, and retry-refresh behavior remain scoped to independent A2.2.
+
+### TDD RED Evidence
+
+| Command | Valid RED observed before production change |
+| --- | --- |
+| `npm run test --workspace=@nexus/contracts -- tests/knowledge-contracts.test.ts` | `AttachmentSchema` stripped the requested OCR status/metadata and did not strictly reject private response fields. |
+| `npm run test --workspace=@nexus/worker -- tests/d1-attachment-repository.test.ts` | Historical failed jobs produced duplicate diagnostics for one attachment with `count: 1`, no latest safe error/status, and no aggregate failure count. |
+| `npm run test --workspace=@nexus/worker -- tests/attachment-routes.test.ts tests/d1-attachment-repository.test.ts` | Real D1 list ignored `ocr_status`, returned unprojected attachment rows, and failed the private R2 lifecycle/filter assertion. |
+| `npm run test --workspace=@nexus/contracts -- tests/knowledge-contracts.test.ts` and `npm run test --workspace=@nexus/worker -- tests/d1-attachment-repository.test.ts` | New `failure_count` assertion failed because neither strict contract nor diagnostic output exposed it. |
+
+### Implemented
+
+- Failed OCR diagnostics now group every failed/dead-letter job by attachment. The per-attachment `failure_count`/legacy `count`, latest failed status, and allowlisted safe error are emitted once under the existing globally unique deterministic `failed_ocr:{attachmentId}` cursor key. Raw job errors are never returned.
+- `Attachment` responses are strict and project only `ocr_status`, latest job `ocr_attempt_count`, and `ocr_updated_at`; `object_key`, OCR text, job id, and raw/internal error fields remain absent. Attachment lists accept server-side latest `ocr_status` filtering.
+- Local Miniflare D1 plus a Map-backed private R2 integration covers all supported signatures (PDF/JPEG/PNG/WebP/UTF-8 text), invalid signature rejection, list/filter behavior, cross-workspace metadata/download/delete/OCR denial, and delete cleanup of object bytes, OCR jobs, search documents, and diagnostics.
+
+### Files
+
+- Contracts: `packages/contracts/src/attachments.ts`, `packages/contracts/tests/knowledge-contracts.test.ts`.
+- Worker: `apps/worker/src/attachments/attachment-service.ts`, `apps/worker/src/attachments/d1-attachment-repository.ts`, `apps/worker/src/routes/attachments.ts`.
+- Tests: `apps/worker/tests/d1-attachment-repository.test.ts`, `apps/worker/tests/attachment-routes.test.ts`.
+
+### GREEN / Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/contracts -- tests/knowledge-contracts.test.ts` | PASS, 6 tests. |
+| `npm run test --workspace=@nexus/worker -- tests/attachment-routes.test.ts tests/d1-attachment-repository.test.ts tests/attachment-service.test.ts` | PASS, 25 tests in 3 files. |
+| `npm run typecheck --workspace=@nexus/contracts` | PASS. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+| `git diff --check` | PASS. |
+
+### Commit and Residual Risk
+
+Implementation commit: `11e111423486aa6fa412be517130880ff8f4fc79` (`fix: complete task 6c a2.1 attachment diagnostics`).
+
+- A2.2 Web recovery filters/loading/retry refresh and layout regressions are intentionally not implemented or tested here.
+- Diagnostics retain the established key-ordered cross-kind cursor. The new `failed_ocr:{attachmentId}` key is globally unique and stable, but adding new diagnostic kinds whose keys sort before an already-issued cursor follows the existing cursor consistency model.
