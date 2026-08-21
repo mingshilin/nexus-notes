@@ -7,6 +7,7 @@ export interface BetaWorkerEnv {
   FILES?: R2Bucket;
   AI?: OcrAiBinding;
   JOBS?: Queue<QueueJob>;
+  PRESENCE?: DurableObjectNamespace;
   APP_BASE_URL: string;
   CORS_ALLOWED_ORIGINS?: string;
   RATE_LIMIT_SECRET: string;

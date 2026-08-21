@@ -1,8 +1,10 @@
 import { createBetaWorker } from "./bootstrap";
+import { PresenceRoom } from "./presence/presence-room";
 
 const betaWorker = createBetaWorker();
 
 export default betaWorker;
+export { PresenceRoom };
 
 export { createRouteRegistry } from "./http/route-registry";
 export { AuthService, AuthServiceError } from "./auth/auth-service";
@@ -45,5 +47,8 @@ export { registerTaxonomyRoutes } from "./routes/taxonomy";
 export { registerNoteRoutes } from "./routes/notes";
 export { registerAttachmentRoutes } from "./routes/attachments";
 export { registerDatabaseRoutes } from "./routes/databases";
+export { registerCollaborationRoutes } from "./routes/collaboration";
+export type { CollaborationRouteDependencies } from "./routes/collaboration";
+export { registerPresenceRoute, signPresenceIdentity } from "./routes/presence";
 export { createBetaWorker } from "./bootstrap";
 export type { BetaWorkerEnv } from "./routes/health";

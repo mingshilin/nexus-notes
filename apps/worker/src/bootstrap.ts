@@ -32,6 +32,9 @@ import { OcrExtractionError, OcrExtractor } from "./attachments/ocr-extractor";
 import { OcrOutboxDispatcher } from "./attachments/ocr-outbox-dispatcher";
 import { D1DatabaseRepository } from "./databases/d1-database-repository";
 import { registerDatabaseRoutes } from "./routes/databases";
+import { D1CollaborationRepository } from "./collaboration/d1-collaboration-repository";
+import { registerCollaborationRoutes } from "./routes/collaboration";
+import { registerPresenceRoute } from "./routes/presence";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -83,6 +86,24 @@ function createNoteService(env: BetaWorkerEnv) {
 
 function createDatabaseRepository(env: BetaWorkerEnv) {
   return new D1DatabaseRepository(env.DB);
+}
+
+function collaborationTokens(env: BetaWorkerEnv) {
+  return secureTokens(env.RATE_LIMIT_SECRET, "collaboration");
+}
+
+function createCollaborationRepository(env: BetaWorkerEnv) {
+  return new D1CollaborationRepository(env.DB, {
+    tokens: collaborationTokens(env),
+    password: new WebCryptoPasswordHasher(),
+  });
+}
+
+async function consumePublicSharePasswordAttempt(env: BetaWorkerEnv, request: Request, token: string) {
+  const limiter = new D1RateLimiter(env.DB, secureTokens(env.RATE_LIMIT_SECRET, "rate-limit"));
+  const policy = { limit: 5, windowSeconds: 300 };
+  await limiter.consume({ key: `public-share-password:ip:${clientIp(request)}`, ...policy });
+  await limiter.consume({ key: `public-share-password:token:${token}`, ...policy });
 }
 
 function createKnowledgeService(env: BetaWorkerEnv) {
@@ -177,6 +198,12 @@ export function createBetaWorker() {
   registerGraphRoutes(registry, createKnowledgeService);
   registerAttachmentRoutes(registry, createAttachmentService);
   registerDatabaseRoutes(registry, createDatabaseRepository);
+  registerCollaborationRoutes(registry, {
+    createRepository: createCollaborationRepository,
+    hashToken: (env, token) => collaborationTokens(env).hash(token),
+    consumePublicSharePasswordAttempt,
+  });
+  registerPresenceRoute(registry);
 
   return {
     fetch(request: Request, env: BetaWorkerEnv) {
