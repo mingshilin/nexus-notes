@@ -485,3 +485,35 @@ Web-only active-workspace binding from the Task 5A server session contract. No W
 | npm run build --workspace=@nexus/web | PASS. |
 | npm run typecheck --workspace=@nexus/contracts | PASS. |
 | git diff --check | PASS. |
+
+## Task 6C Fix B1: Isolated OCR Extractor Adapter
+
+### Scope
+
+This B1 slice adds only the typed Worker-side OCR extraction adapter and fake object-store/AI tests. It does not wire the Queue consumer, bootstrap, environment bindings, or Wrangler configuration; those remain the separately scoped B2 slice.
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/ocr-extractor.test.ts` | RED: `../src/attachments/ocr-extractor` did not exist. |
+| Same focused command | GREEN: PASS, 11 tests. |
+
+### Implemented
+
+- `OcrExtractor` reads only an injected private object store key. It decodes valid `text/plain` UTF-8 locally and sends PDF, JPEG, PNG, and WebP as `{ name, blob }` to an optional typed `AI.toMarkdown` dependency.
+- Input is capped at the existing 25 MiB attachment maximum using declared object size and bounded stream reads. Extracted text is capped at 1 MiB before any future D1/search consumer can receive it.
+- The adapter never logs source bytes or extracted text. It returns stable `OcrExtractionError` codes with explicit retryability for object absence/read failures, missing AI, unsupported MIME, conversion error/empty output, input/output bounds, deadline, timeout, cancellation, and invalid UTF-8.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/ocr-extractor.test.ts` | PASS, 11 tests. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+
+### B2 Boundary
+
+No Queue ack/retry/dead-letter wiring, D1/search completion, Beta `Env.AI`, preview `[ai]`, bootstrap, or frontend changes are included. B2 must inject the authorized object key and binding, then own queue state transitions.
+
+Commit: independent B1 commit containing this report section; SHA is recorded in the final handoff.
