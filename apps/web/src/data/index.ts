@@ -1,4 +1,5 @@
 export * from "./api-client";
+export * from "./collaboration-client";
 export * from "./database-client";
 export * from "./database-state";
 export * from "./http-sync-transport";

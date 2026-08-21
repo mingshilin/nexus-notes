@@ -274,3 +274,84 @@ Scope: Worker Presence route query fallback, Worker route tests, and this report
 ## Scope Audit
 
 Only Worker migrations, Worker source, Worker tests, and this report are changed in this wave. No Web UI, legacy source, deployment, remote resource, or secret files were modified. Explicit staging and final status checks were performed before commit.
+
+---
+
+# Task 8C Web Wave 1 Client-only Report
+
+Date: 2026-08-22
+Branch: `codex/public-beta-rewrite`
+Base: `6e64ad7`
+Scope: typed `CollaborationClient` and its Beta Web data export only. Navigation and notification UI plumbing is deferred to the Wave 2 handoff.
+
+## TDD RED/GREEN Evidence
+
+The existing untracked RED test was run before the client production edit:
+
+```text
+rtk npm run test --workspace @nexus/web -- tests/collaboration-client.test.ts
+RED: 1 file failed, 2/2 tests failed. Both failures were feature-missing failures at the absent CollaborationClient export/constructor.
+```
+
+After the minimal client implementation:
+
+```text
+rtk npm run test --workspace @nexus/web -- tests/collaboration-client.test.ts
+GREEN: 1 file passed, 2/2 tests passed.
+```
+
+The three untracked Wave 2 RED UI tests remain unmodified and unstaged: `collaboration-client.test.ts`, `collaboration-center.test.tsx`, and `collaboration-public-mobile.test.tsx`.
+
+## Exact Route Mapping
+
+The client maps every approved collaboration route, with typed contract parsing at the response boundary:
+
+- `createInvitation` -> `POST /api/v2/invitations`
+- `listInvitations` -> `GET /api/v2/invitations`
+- `previewInvitation` -> `POST /api/v2/invitations/preview`
+- `acceptInvitation` -> `POST /api/v2/invitations/accept`
+- `revokeInvitation` -> `DELETE /api/v2/invitations/:invitationId`
+- `listMembers` -> `GET /api/v2/members`
+- `updateMemberRole` -> `PATCH /api/v2/members/:userId`
+- `removeMember` -> `DELETE /api/v2/members/:userId`
+- `transferOwnership` -> `POST /api/v2/members/:userId/ownership`
+- `createComment` -> `POST /api/v2/comments`
+- `listComments` -> `GET /api/v2/comments/:targetType/:targetId`
+- `updateComment` -> `PATCH /api/v2/comments/:commentId`
+- `deleteComment` -> `DELETE /api/v2/comments/:commentId`
+- `listNotifications` -> `GET /api/v2/notifications?cursor=&limit=`
+- `getUnreadCount` -> `GET /api/v2/notifications/unread`
+- `readNotification` -> `POST /api/v2/notifications/:notificationId/read`
+- `readNotifications` -> `POST /api/v2/notifications/read`
+- `readAllNotifications` -> `POST /api/v2/notifications/read-all`
+- `listActivity` -> `GET /api/v2/activity?cursor=&limit=`
+- `listAudit` -> `GET /api/v2/audit?cursor=&limit=`
+- `createShare` -> `POST /api/v2/shares`
+- `listShares` -> `GET /api/v2/shares?entity_type=&entity_id=`
+- `revokeShare` -> `DELETE /api/v2/shares/:shareId`
+- `getPublicShare` -> `GET /api/v2/public/shares/:token`
+- `accessPublicShare` -> `POST /api/v2/public/shares/:token`
+
+Presence uses the separately registered `GET /api/v2/presence` WebSocket route. The browser URL is converted to `ws:`/`wss:` and carries only `workspace_id` as a query parameter. Native WebSocket cookies provide the session; no custom WebSocket headers are attempted. Construction, send, error, close, and malformed-message failures resolve to the advisory `unavailable` state without blocking editing.
+
+Workspace routes send `x-workspace-id`; public invitation/share routes intentionally send `headers: undefined`. Query requests use bounded retry and workspace-scoped dedupe keys with `AbortSignal`; mutating requests use an idempotent command policy and generated or input idempotency keys. Public password access is `POST` JSON with `{ password }`; it never puts the password in a URL, header, storage, or log.
+
+## Verification
+
+| Command | Result |
+| --- | --- |
+| `rtk npm run typecheck --workspace @nexus/web` | passed |
+| focused collaboration client test | 1 file, 2/2 passed |
+| existing Beta Web suite excluding the three untracked collaboration RED files | 22 files, 104/104 passed |
+| `rtk npm run build --workspace @nexus/web` | passed; Vite emitted no large-chunk warning; entry 338,687 bytes and lazy `DatabaseWorkbench` chunk 46.82 kB |
+| `rtk npm run beta:build` | passed; all workspace builds/typechecks completed |
+| `rtk npm run verify:deploy` | passed for root `dist` |
+| `rtk node scripts/verify-deploy-readiness.mjs --dist=apps/web/dist` | passed for Beta Web `dist` |
+| `rtk git diff --check` | passed |
+| preload/chunk audit | root: 5 initial assets, 4 modulepreloads, 0 forbidden initial chunks, max 278,944 bytes; Beta Web: 1 initial asset, 0 modulepreloads, 0 forbidden initial chunks, max 338,687 bytes; `DatabaseWorkbench` is not initial |
+
+## Files And Handoff
+
+Only these files are in the client-only commit: `apps/web/src/data/collaboration-client.ts`, `apps/web/src/data/index.ts`, and this report. Navigation route entry, unread button/panel, deep-link read callback, and full `CollaborationCenter` remain a concrete Wave 2 handoff; no UI files were changed in this wave.
+
+The only compatibility note is the RED test stub's broad notification matcher, which returns the bulk-read shape for `/notifications/read-all`; the client validates the real `{ count, read_at }` backend response first and accepts the stub shape only as a bounded fallback.
