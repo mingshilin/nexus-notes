@@ -19,7 +19,15 @@ import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
 import { DatabaseClient, type DatabaseBundle } from "../data/database-client";
 import { NormalizedCache } from "../data/normalized-cache";
-import { CollaborationCenter, NotificationButton, NotificationCenter, PublicSharePage } from "../collaboration";
+import {
+  CollaborationCenter,
+  InviteRedemptionPage,
+  NotificationButton,
+  NotificationCenter,
+  PublicSharePage,
+  type CollaborationCommentTarget,
+  type CollaborationShareTarget,
+} from "../collaboration";
 
 const domains = [
   { label: "收集", icon: Inbox, target: "notes" as const },
@@ -38,6 +46,16 @@ const LazyDatabaseWorkbench = lazy(async () => {
 const defaultAuthClient = new AuthClient(new ApiClient());
 const initialRecoveryFilters: RecoveryFilters = { mimeType: "", ocrStatus: "" };
 type OcrStatus = NonNullable<Attachment["ocr_status"]>;
+const noteTargets = [
+  { type: "note" as const, id: "note-1", label: "Public Beta 重写计划" },
+  { type: "note" as const, id: "note-2", label: "每日产品复盘" },
+  { type: "note" as const, id: "note-3", label: "数据库设计记录" },
+  { type: "note" as const, id: "note-4", label: "欢迎使用 Nexus Notes" },
+];
+type AppRoute =
+  | { kind: "workspace"; workspaceId?: string }
+  | { kind: "invite"; token: string }
+  | { kind: "share"; token: string };
 
 function resetTokenFromLocation() {
   if (typeof window === "undefined") return undefined;
@@ -56,9 +74,13 @@ function isAborted(error: unknown, signal: AbortSignal) {
   return signal.aborted || (error instanceof DOMException && error.name === "AbortError");
 }
 
-function publicShareTokenFromLocation() {
-  if (typeof window === "undefined") return undefined;
-  return window.location.pathname.match(/^\/share\/([A-Za-z0-9_-]{43,256})\/?$/u)?.[1];
+function routeFromLocation(): AppRoute {
+  if (typeof window === "undefined") return { kind: "workspace" };
+  const share = window.location.pathname.match(/^\/share\/([A-Za-z0-9_-]{43,256})\/?$/u)?.[1];
+  if (share) return { kind: "share", token: share };
+  const invite = window.location.pathname.match(/^\/invite\/([A-Za-z0-9_-]{43,256})\/?$/u)?.[1];
+  if (invite) return { kind: "invite", token: invite };
+  return { kind: "workspace" };
 }
 
 function AuthenticatedWorkspace({
@@ -82,6 +104,9 @@ function AuthenticatedWorkspace({
   const [collaborationClient] = useState(() => new CollaborationClient(apiClient, workspaceId ?? ""));
   const [unreadCount, setUnreadCount] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);
+  const [selectedNoteId, setSelectedNoteId] = useState(noteTargets[0].id);
+  const [selectedDatabaseRecordId, setSelectedDatabaseRecordId] = useState<string | null>(null);
+  const [selectedCommentId, setSelectedCommentId] = useState<string | null>(null);
   const [databases, setDatabases] = useState<Database[]>([]);
   const [selectedDatabaseId, setSelectedDatabaseId] = useState<string | null>(null);
   const [databaseBundle, setDatabaseBundle] = useState<DatabaseBundle | null>(null);
@@ -111,6 +136,7 @@ function AuthenticatedWorkspace({
   const databaseCache = useRef(new NormalizedCache());
   const attachmentQueryIdentity = useRef<string | null>(null);
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
+  const notificationOpenerRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!inspectorOpen && inspectorOpenerRef.current) {
@@ -125,6 +151,11 @@ function AuthenticatedWorkspace({
   };
 
   const closeInspector = () => setInspectorOpen(false);
+  const toggleNotifications = (opener: HTMLElement) => {
+    if (!collaborationEnabled) return;
+    notificationOpenerRef.current = opener;
+    setNotificationOpen((open) => !open);
+  };
 
   const abortRecoveryRequests = () => {
     requestControllers.current.forEach((controller) => controller.abort());
@@ -316,6 +347,7 @@ function AuthenticatedWorkspace({
       setDatabaseBundle(bundle);
       setDatabaseRecords(page.items);
       setDatabaseRecordsNextCursor(page.next_cursor);
+      setSelectedDatabaseRecordId((current) => current ?? page.items[0]?.id ?? null);
       databaseCache.current.writeEntity({ workspaceId, type: "database", id: bundle.database.id, revision: bundle.database.revision, data: bundle.database });
       for (const property of bundle.properties) {
         databaseCache.current.writeEntity({ workspaceId, type: "database-property", id: property.id, revision: property.revision, data: property });
@@ -431,7 +463,7 @@ function AuthenticatedWorkspace({
           <span>{label}</span>
         </button>
       ))}
-      <NotificationButton unreadCount={unreadCount} onClick={() => { if (collaborationEnabled) setNotificationOpen((open) => !open); }} />
+      <NotificationButton unreadCount={unreadCount} onClick={toggleNotifications} />
     </>
   );
 
@@ -439,7 +471,7 @@ function AuthenticatedWorkspace({
     <button type="button" onClick={() => { setActiveDomain("notes"); setActivePane("canvas"); }}>首页</button>
     <button type="button" onClick={() => { setActiveDomain("databases"); setActivePane("canvas"); }}>数据库</button>
     <button type="button" disabled={!collaborationEnabled} onClick={() => { setActiveDomain("collaboration"); setActivePane("canvas"); }}>协作</button>
-    <button type="button" aria-label={`通知，${unreadCount} 条未读`} onClick={() => { if (collaborationEnabled) setNotificationOpen((open) => !open); }}>通知{unreadCount > 0 ? ` ${unreadCount}` : ""}</button>
+    <button type="button" aria-label={`通知，${unreadCount} 条未读`} onClick={(event) => toggleNotifications(event.currentTarget)}>通知{unreadCount > 0 ? ` ${unreadCount}` : ""}</button>
     <button type="button" onClick={(event) => openInspector(event.currentTarget)}>检查器</button>
   </>;
 
@@ -450,9 +482,9 @@ function AuthenticatedWorkspace({
         <button type="button" aria-label="新建笔记"><Sparkles size={17} /></button>
       </div>
       <label className="search-field"><Search size={15} /><input aria-label="搜索笔记" placeholder="搜索笔记" /></label>
-      {["Public Beta 重写计划", "每日产品复盘", "数据库设计记录", "欢迎使用 Nexus Notes"].map((title, index) => (
-        <button key={title} className={index === 0 ? "note-row selected" : "note-row"} type="button" onClick={() => setActivePane("canvas")}>
-          <strong>{title}</strong><span>{index === 0 ? "刚刚" : `${index + 1} 天前`}</span>
+      {noteTargets.map((note, index) => (
+        <button key={note.id} className={note.id === selectedNoteId ? "note-row selected" : "note-row"} type="button" onClick={() => { setSelectedNoteId(note.id); setSelectedDatabaseRecordId(null); setSelectedCommentId(null); setActivePane("canvas"); }}>
+          <strong>{note.label}</strong><span>{index === 0 ? "刚刚" : `${index + 1} 天前`}</span>
           <p>保持专注、可靠并且随时可以恢复的知识工作台。</p>
         </button>
       ))}
@@ -469,7 +501,7 @@ function AuthenticatedWorkspace({
           key={database.id}
           className={database.id === selectedDatabaseId ? "note-row selected" : "note-row"}
           type="button"
-          onClick={() => { setSelectedDatabaseId(database.id); setActivePane("canvas"); }}
+          onClick={() => { setSelectedDatabaseId(database.id); setSelectedDatabaseRecordId(null); setSelectedCommentId(null); setActivePane("canvas"); }}
         >
           <strong>{database.name}</strong><p>{database.description || "Structured database"}</p>
         </button>
@@ -529,6 +561,31 @@ function AuthenticatedWorkspace({
     </section>
   );
 
+  const recordTargets: CollaborationCommentTarget[] = databaseRecords.map((record) => ({
+      type: "database_record" as const,
+      id: record.id,
+      label: Object.values(record.values).find((value): value is string => typeof value === "string" && Boolean(value.trim())) ?? `Record ${record.id}`,
+    }));
+  const commentTargets: CollaborationCommentTarget[] = [
+    ...noteTargets,
+    ...(noteTargets.some((target) => target.id === selectedNoteId) ? [] : [{ type: "note" as const, id: selectedNoteId, label: "通知中的笔记" }]),
+    ...recordTargets,
+    ...(selectedDatabaseRecordId && !recordTargets.some((target) => target.id === selectedDatabaseRecordId)
+      ? [{ type: "database_record" as const, id: selectedDatabaseRecordId, label: "通知中的数据库记录" }]
+      : []),
+  ];
+  const shareTargets: CollaborationShareTarget[] = [
+    ...noteTargets,
+    ...(databaseBundle?.views.map((view) => ({
+      type: "database_view" as const,
+      id: view.id,
+      label: `${databaseBundle.database.name} / ${view.name}`,
+    })) ?? []),
+  ];
+  const activeCollaborationTarget = selectedDatabaseRecordId
+    ? { type: "database_record" as const, id: selectedDatabaseRecordId }
+    : { type: "note" as const, id: selectedNoteId };
+
   return (
     <>
       {serviceWorkerUpdate ? (
@@ -551,11 +608,12 @@ function AuthenticatedWorkspace({
         onInspectorOpen={openInspector}
         onInspectorClose={closeInspector}
       >
-        {activeDomain === "collaboration" && collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} /> : activeDomain === "databases" ? databaseCanvas : <article className="editor-document">
+        <>
+        {activeDomain === "collaboration" && collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : activeDomain === "databases" ? databaseCanvas : <article className="editor-document">
           <header className="editor-toolbar">
             <span className="saved-state"><span /> 已保存</span>
             <div>
-              <button type="button" aria-label="通知"><Bell size={17} /></button>
+              <button type="button" aria-label="通知" onClick={(event) => toggleNotifications(event.currentTarget)}><Bell size={17} /></button>
               <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>
             </div>
           </header>
@@ -570,19 +628,30 @@ function AuthenticatedWorkspace({
             {recoveryPanel}
           </div>
         </article>}
+        <NotificationCenter
+          client={collaborationClient}
+          open={notificationOpen}
+          opener={notificationOpenerRef.current}
+          onClose={() => setNotificationOpen(false)}
+          onNotificationRead={(count) => setUnreadCount((current) => Math.max(0, current - count))}
+          onDeepLink={(target) => {
+            setNotificationOpen(false);
+            setSelectedCommentId(target.commentId);
+            if (target.targetType === "note") {
+              setSelectedNoteId(target.targetId);
+              setSelectedDatabaseRecordId(null);
+              setActiveDomain("notes");
+            } else {
+              setSelectedDatabaseRecordId(target.targetId);
+              const record = databaseRecords.find((candidate) => candidate.id === target.targetId);
+              if (record) setSelectedDatabaseId(record.database_id);
+              setActiveDomain("databases");
+            }
+            setActivePane("canvas");
+          }}
+        />
+        </>
       </AdaptiveWorkbench>
-      <NotificationCenter
-        client={collaborationClient}
-        open={notificationOpen}
-        onClose={() => setNotificationOpen(false)}
-        onNotificationRead={() => setUnreadCount((count) => Math.max(0, count - 1))}
-        onDeepLink={(deepLink) => {
-          setNotificationOpen(false);
-          if (deepLink.startsWith("/notes/")) setActiveDomain("notes");
-          if (deepLink.startsWith("/databases/")) setActiveDomain("databases");
-          setActivePane("canvas");
-        }}
-      />
     </>
   );
 }
@@ -602,14 +671,26 @@ export function App({
   resetToken?: string;
   onDiagnosticNavigate?: (diagnostic: KnowledgeDiagnostic) => void;
 } = {}) {
-  const publicShareToken = publicShareTokenFromLocation();
-  if (publicShareToken) {
-    return <PublicSharePage client={new CollaborationClient(apiClient, "public-share")} token={publicShareToken} />;
+  const [route, setRoute] = useState<AppRoute>(() => routeFromLocation());
+  if (route.kind === "share") {
+    return <PublicSharePage client={new CollaborationClient(apiClient, "public-share")} token={route.token} />;
+  }
+  if (route.kind === "invite") {
+    return <InviteRedemptionPage
+      authClient={authClient}
+      client={new CollaborationClient(apiClient, "invite-redemption")}
+      token={route.token}
+      turnstileSiteKey={turnstileSiteKey}
+      onAccepted={(acceptedWorkspaceId) => {
+        window.history.replaceState(null, "", "/");
+        setRoute({ kind: "workspace", workspaceId: acceptedWorkspaceId });
+      }}
+    />;
   }
   return (
     <AuthGate client={authClient} turnstileSiteKey={turnstileSiteKey} resetToken={resetToken}>
       {(session) => {
-        const activeWorkspaceId = workspaceId ?? session.active_workspace_id;
+        const activeWorkspaceId = workspaceId ?? route.workspaceId ?? session.active_workspace_id;
         const memberships = Array.isArray(session.workspaces) ? session.workspaces : [];
         const activeWorkspace = memberships.find((candidate) => candidate.id === activeWorkspaceId);
         return (

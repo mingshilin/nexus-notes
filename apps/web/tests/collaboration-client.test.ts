@@ -22,11 +22,11 @@ describe("CollaborationClient", () => {
       if (path.startsWith("/api/v2/invitations/")) return { invitation: { ...invitation, status: "revoked", revision: 2 } };
       if (path === "/api/v2/members") return { items: [member] };
       if (path.endsWith("/ownership") || (path.startsWith("/api/v2/members/") && method === "PATCH")) return { member };
-      if (path.startsWith("/api/v2/members/") && method === "DELETE") return { removed: true };
+      if (path.startsWith("/api/v2/members/") && method === "DELETE") return { user_id: member.user_id };
       if (path === "/api/v2/comments" && method === "POST") return { comment };
       if (path.startsWith("/api/v2/comments/note/")) return { items: [comment] };
       if (path.startsWith("/api/v2/comments/") && method === "PATCH") return { comment };
-      if (path.startsWith("/api/v2/comments/") && method === "DELETE") return { deleted: true };
+      if (path.startsWith("/api/v2/comments/") && method === "DELETE") return { id: comment.id };
       if (path === "/api/v2/notifications/unread") return { unread_count: 1 };
       if (path === "/api/v2/notifications?limit=25") return { items: [notification], next_cursor: null };
       if (path.includes("/notifications/") || path === "/api/v2/notifications/read") return { notification_ids: [notification.id], read_at: now };
@@ -49,12 +49,12 @@ describe("CollaborationClient", () => {
     await client.revokeInvitation(invitation.id, invitation.revision);
     await client.listMembers(signal);
     await client.updateMemberRole(member.user_id, { role: "viewer", base_revision: member.revision });
-    await client.removeMember(member.user_id, member.revision);
+    await expect(client.removeMember(member.user_id, member.revision)).resolves.toEqual({ user_id: member.user_id });
     await client.transferOwnership(member.user_id, member.revision);
     await client.createComment({ target_type: "note", target_id: "note-1", body: comment.body, parent_id: null, mention_user_ids: [member.user_id], idempotency_key: "comment-op" });
     await client.listComments("note", "note-1", signal);
     await client.updateComment(comment.id, { body: "updated", mention_user_ids: [], base_revision: 1 });
-    await client.deleteComment(comment.id, 1);
+    await expect(client.deleteComment(comment.id, 1)).resolves.toEqual({ id: comment.id });
     await client.listNotifications({ limit: 25, signal });
     await client.getUnreadCount(signal);
     await client.readNotification(notification.id, notification.revision);

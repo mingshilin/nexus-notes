@@ -184,11 +184,11 @@ export class CollaborationClient {
   }
 
   removeMember(userId: string, baseRevision: number, signal?: AbortSignal) {
-    return this.command<{ removed: true }>(
+    return this.command<{ user_id: unknown }>(
       `/api/v2/members/${encodeURIComponent(userId)}`, "DELETE", { base_revision: baseRevision }, signal,
     ).then((data) => {
-      if (data.removed !== true) throw invalidResponse("Invalid collaboration member removal response");
-      return data;
+      if (data.user_id !== userId) throw invalidResponse("Invalid collaboration member removal response");
+      return { user_id: data.user_id };
     });
   }
 
@@ -218,11 +218,11 @@ export class CollaborationClient {
   }
 
   deleteComment(commentId: string, baseRevision: number, signal?: AbortSignal) {
-    return this.command<{ deleted: true }>(
+    return this.command<{ id: unknown }>(
       `/api/v2/comments/${encodeURIComponent(commentId)}`, "DELETE", { base_revision: baseRevision }, signal,
     ).then((data) => {
-      if (data.deleted !== true) throw invalidResponse("Invalid collaboration comment deletion response");
-      return data;
+      if (data.id !== commentId) throw invalidResponse("Invalid collaboration comment deletion response");
+      return { id: data.id };
     });
   }
 

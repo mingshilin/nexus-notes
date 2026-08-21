@@ -94,16 +94,22 @@ button { color: inherit; }
 .adaptive-workbench[data-has-context="false"] { grid-template-columns: 76px minmax(0, 1fr); }
 .notification-button { position: relative; display: grid; width: 42px; min-height: 42px; flex: 0 0 auto; place-items: center; border: 1px solid var(--border-subtle); border-radius: 13px; color: hsl(var(--muted-foreground)); background: rgba(255,255,255,.46); cursor: pointer; }
 .notification-button span { position: absolute; top: -5px; right: -5px; display: grid; min-width: 19px; height: 19px; padding: 0 5px; place-items: center; border: 2px solid var(--surface-sidebar); border-radius: 99px; color: white; background: #ff3b30; font-size: 10px; font-weight: 750; }
-.notification-center { position: fixed; top: max(22px, env(safe-area-inset-top)); right: max(22px, env(safe-area-inset-right)); z-index: 45; width: min(390px, calc(100vw - 28px)); max-height: min(720px, calc(100dvh - 44px)); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border: 1px solid var(--border-subtle); border-radius: 22px; background: var(--surface-overlay); box-shadow: var(--shadow-lg); backdrop-filter: blur(28px) saturate(150%); }
+.notification-center { width: min(430px, 100%); padding: 20px; backdrop-filter: blur(28px) saturate(150%); }
 .notification-center > header, .collaboration-card > header, .comment-list article > header, .audit-list article > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .notification-center h2, .collaboration-card h2 { margin: 4px 0 0; font-size: 20px; }
 .notification-center > header button, .collaboration-dialog header button { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 11px; background: rgba(0,0,0,.05); cursor: pointer; }
+.notification-actions, .notification-row-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.notification-actions { margin-top: 14px; }
+.notification-actions button, .notification-row-actions button, .notification-load-more { min-height: 32px; border: 1px solid var(--border-subtle); border-radius: 10px; padding: 6px 10px; color: var(--nexus-accent); background: rgba(255,255,255,.52); cursor: pointer; font-size: 11px; }
+.notification-actions button:disabled, .notification-row-actions button:disabled, .notification-load-more:disabled { cursor: default; opacity: .45; }
 .notification-list { display: grid; gap: 8px; margin-top: 14px; }
 .notification-list article { display: grid; gap: 10px; padding: 13px; border: 1px solid var(--border-subtle); border-radius: 14px; background: rgba(255,255,255,.42); }
 .notification-list article.unread { border-color: rgba(0,122,255,.25); background: rgba(0,122,255,.06); }
 .notification-list article > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.notification-list label { display: flex; align-items: center; gap: 8px; }
 .notification-list time, .comment-list time, .audit-list time { color: hsl(var(--muted-foreground)); font-size: 10px; }
 .notification-list a { justify-self: start; color: var(--nexus-accent); font-size: 12px; font-weight: 700; text-decoration: none; }
+.notification-load-more { width: 100%; margin-top: 12px; }
 
 .collaboration-center { width: min(1180px, calc(100% - 48px)); min-height: 100%; margin: 0 auto; padding: clamp(38px, 6vw, 76px) 0 max(100px, env(safe-area-inset-bottom)); }
 .collaboration-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; margin-bottom: 28px; }
@@ -132,15 +138,17 @@ button { color: inherit; }
 .collaboration-person, .share-list article > div { display: grid; min-width: 0; gap: 3px; }
 .collaboration-person strong, .share-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .collaboration-person span, .share-list span { color: hsl(var(--muted-foreground)); font-size: 10px; }
-.collaboration-role select, .collaboration-form input, .collaboration-form select, .collaboration-form textarea, .comment-list textarea, .public-share-password input { width: 100%; min-width: 0; border: 1px solid var(--border-subtle); border-radius: 11px; outline: 0; color: hsl(var(--foreground)); background: rgba(255,255,255,.56); }
+.collaboration-role select, .collaboration-target-select select, .collaboration-form input, .collaboration-form select, .collaboration-form textarea, .comment-list textarea, .public-share-password input { width: 100%; min-width: 0; border: 1px solid var(--border-subtle); border-radius: 11px; outline: 0; color: hsl(var(--foreground)); background: rgba(255,255,255,.56); }
 .collaboration-role select { min-height: 34px; padding: 6px 8px; font-size: 11px; }
-.collaboration-role select:focus-visible, .collaboration-form input:focus-visible, .collaboration-form select:focus-visible, .collaboration-form textarea:focus-visible, .collaboration-center button:focus-visible, .notification-center button:focus-visible, .collaboration-dialog :focus-visible, .public-share-page :focus-visible { outline: 3px solid rgba(0,122,255,.24); outline-offset: 2px; }
+.collaboration-role select:focus-visible, .collaboration-target-select select:focus-visible, .collaboration-form input:focus-visible, .collaboration-form select:focus-visible, .collaboration-form textarea:focus-visible, .collaboration-center button:focus-visible, .notification-center button:focus-visible, .collaboration-dialog :focus-visible, .public-share-page :focus-visible { outline: 3px solid rgba(0,122,255,.24); outline-offset: 2px; }
 .collaboration-row-actions { display: flex; flex-direction: column; gap: 4px; }
 .collaboration-row-actions button, .collaboration-list article > button, .share-list button, .comment-list button, .collaboration-card > header button { min-height: 31px; border: 1px solid var(--border-subtle); border-radius: 10px; padding: 6px 9px; color: var(--nexus-accent); background: rgba(255,255,255,.48); cursor: pointer; font-size: 10px; }
 .collaboration-center button.danger { color: hsl(var(--destructive)); }
 .collaboration-form { display: grid; gap: 10px; margin-bottom: 18px; }
 .collaboration-form label { display: grid; gap: 6px; color: hsl(var(--muted-foreground)); font-size: 11px; }
 .collaboration-form input, .collaboration-form select { height: 39px; padding: 0 10px; }
+.collaboration-target-select { display: grid; gap: 6px; margin: 14px 0 18px; color: hsl(var(--muted-foreground)); font-size: 11px; }
+.collaboration-target-select select { min-height: 40px; padding: 0 10px; }
 .collaboration-form textarea, .comment-list textarea { min-height: 96px; resize: vertical; padding: 10px; }
 .collaboration-form > button { min-height: 39px; border: 0; border-radius: 11px; padding: 8px 14px; color: white; background: var(--nexus-accent); box-shadow: 0 8px 18px rgba(0,122,255,.18); cursor: pointer; font-weight: 700; }
 .invitation-form { grid-template-columns: minmax(0, 1fr) minmax(110px, .4fr) auto; align-items: end; }
@@ -165,6 +173,21 @@ button { color: inherit; }
 .collaboration-dialog h2 { margin: 5px 0 0; font-size: 23px; }
 .collaboration-dialog > p { color: hsl(var(--muted-foreground)); font-size: 13px; line-height: 1.6; }
 .collaboration-one-time-link { display: block; overflow-wrap: anywhere; border: 1px solid rgba(0,122,255,.18); border-radius: 13px; padding: 12px; color: var(--nexus-accent); background: rgba(0,122,255,.055); font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; text-decoration: none; }
+
+.invite-route { min-height: 100dvh; display: grid; grid-template-columns: minmax(300px, .75fr) minmax(420px, 1.25fr); background: var(--desktop-wallpaper), var(--surface-app); }
+.invite-preview { display: grid; align-content: center; gap: 18px; padding: clamp(40px, 8vw, 110px); color: white; background: linear-gradient(145deg, #075cb5, #0084dc 55%, #45b8eb); }
+.invite-preview h1 { margin: 0; font-size: clamp(38px, 5vw, 64px); letter-spacing: -.05em; }
+.invite-preview > p { margin: 0; line-height: 1.65; }
+.invite-preview dl { display: grid; gap: 10px; margin: 14px 0 0; }
+.invite-preview dl div { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 12px; padding: 11px 0; border-bottom: 1px solid rgba(255,255,255,.22); }
+.invite-preview dt { color: rgba(255,255,255,.7); font-size: 12px; }
+.invite-preview dd { margin: 0; overflow-wrap: anywhere; font-weight: 700; }
+.invite-route > .auth-bootstrap, .invite-route > .invite-actions { align-self: center; justify-self: center; }
+.invite-route > .auth-page { min-height: 100dvh; grid-template-columns: 1fr; border: 0; border-radius: 0; box-shadow: none; }
+.invite-route > .auth-page .auth-intro { display: none; }
+.invite-actions { display: grid; width: min(420px, calc(100% - 40px)); gap: 14px; padding: 34px; border: 1px solid var(--border-subtle); border-radius: 24px; background: var(--surface-overlay); box-shadow: var(--shadow-md); }
+.invite-actions button { min-height: 48px; border: 0; border-radius: 13px; color: white; background: var(--nexus-accent); cursor: pointer; font-weight: 750; }
+.invite-actions button:disabled { cursor: default; opacity: .5; }
 
 .public-share-page { display: grid; width: 100%; min-height: 100dvh; overflow-y: auto; padding: clamp(18px, 4vw, 48px); place-items: center; background: radial-gradient(circle at 15% 15%, rgba(0,122,255,.14), transparent 30%), radial-gradient(circle at 85% 75%, rgba(52,199,89,.08), transparent 32%), var(--surface-app); }
 .public-share-shell { width: min(760px, 100%); min-height: min(720px, calc(100dvh - 80px)); padding: clamp(24px, 6vw, 66px); border: 1px solid var(--border-subtle); border-radius: 30px; background: var(--surface-window); box-shadow: var(--shadow-lg); backdrop-filter: blur(28px); }
@@ -315,7 +338,13 @@ button { color: inherit; }
   .collaboration-role, .collaboration-row-actions { grid-column: 2; }
   .collaboration-row-actions { align-items: flex-start; }
   .comment-list article footer { align-items: flex-start; flex-direction: column; }
-  .notification-center { top: max(10px, env(safe-area-inset-top)); right: 10px; max-height: calc(100dvh - max(20px, env(safe-area-inset-top) + env(safe-area-inset-bottom))); }
+  .notification-center-backdrop { place-items: end center; padding-right: 0; padding-bottom: max(env(safe-area-inset-bottom), var(--collaboration-keyboard, 0px)); padding-left: 0; }
+  .notification-center { width: 100%; max-height: min(78dvh, 680px); border-radius: 24px 24px 0 0; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+  .notification-actions { align-items: stretch; flex-direction: column; }
+  .invite-route { grid-template-columns: 1fr; }
+  .invite-preview { min-height: 42dvh; padding: max(38px, env(safe-area-inset-top)) 24px 38px; }
+  .invite-route > .auth-page { min-height: 58dvh; height: auto; }
+  .invite-actions { margin: 32px auto; }
   .public-share-page { padding: 0; place-items: stretch; }
   .public-share-shell { min-height: 100dvh; border: 0; border-radius: 0; padding: max(24px, env(safe-area-inset-top)) 22px max(30px, env(safe-area-inset-bottom)); }
   .public-share-brand { margin-bottom: 64px; }

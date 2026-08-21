@@ -466,3 +466,59 @@ GREEN: 25 files, 112/112 tests passed.
 | `git diff --check` | passed before compatibility report append; rerun before staging |
 
 Compatibility residual risk is limited to browsers that delay idle work: the 500 ms idle timeout guarantees the unread query is eventually scheduled while the component remains mounted. Presence and all editing flows remain independent of unread failure. No raw credentials or tokens are persisted, and no Worker/domain/migration/legacy/deployment/remote/secret file changed.
+
+# Task 8C Web Wave 3 Closure Report
+
+Date: 2026-08-22
+Base: `05016be`
+Scope: Beta Web source/tests and this report only. No Worker, domain, migration, legacy product, deployment, remote, or secret change.
+
+## TDD Evidence
+
+The Wave 3 tests were added before production implementation and run together:
+
+```text
+npm test --workspace @nexus/web -- tests/collaboration-client.test.ts tests/collaboration-center.test.tsx tests/collaboration-public-mobile.test.tsx tests/invite-redemption.test.tsx --reporter=dot
+RED: 4/4 files failed; 11 failed / 3 passed.
+Expected causes: no invite route/page, synthetic delete DTO parsing, no notification paging/bulk/read-all or modal semantics, unauthorized role requests, opaque target inputs, missing target reload dependencies, and an unwired editor bell.
+```
+
+After implementation, with the RED assertions retained:
+
+```text
+GREEN: 4 files, 14/14 tests passed.
+Full Web: 26 files, 118/118 tests passed.
+```
+
+## Requirement Mapping
+
+1. `/invite/:token` is parsed into in-memory App route state. Preview and accept send only `{ token }` to the public POST routes, the token is never written to browser storage/history state, AuthGate preserves the route through login, and a refreshed session identifies and switches to the accepted workspace after clearing the URL.
+2. `removeMember` parses the committed `{ user_id }` DTO and `deleteComment` parses `{ id }`; tests use the real repository/route shapes and reject mismatched identifiers.
+3. NotificationCenter retains `next_cursor`, appends deduplicated pages, supports single, selected bulk, and all-read actions, updates unread state, and parses note/record/comment deep links into exact App callbacks.
+4. Invitation fetch/controls, audit, role/ownership/removal controls are owner-only. Viewer comments/activity remain readable without write/share/audit requests; editors retain backend-supported comments/shares/activity; owners can moderate any comment.
+5. App passes selected note, loaded database-record, selected comment, and shareable note/view contexts into CollaborationCenter. Comments/shares use labelled selectors rather than free-form opaque IDs.
+6. Mobile notifications reuse the one-time dialog's portal, visualViewport keyboard inset, focus trap/return, Workbench inert state, body lock, and single dialog scroll owner; mobile CSS presents the same modal as a bottom sheet.
+7. Comment reload depends on the selected target, deep target state survives domain changes, and the duplicate editor notification bell now opens the shared notification center.
+
+## Final Gate Evidence
+
+| Command | Result |
+| --- | --- |
+| focused Wave 3 suite | 4 files, 14/14 passed |
+| `npm test --workspace @nexus/web -- --reporter=dot` | 26 files, 118/118 passed |
+| `npm run typecheck --workspace @nexus/web` | passed |
+| `npm run build --workspace @nexus/web` | passed; entry 379,919 bytes, lazy `DatabaseWorkbench` 46.81 kB, no large-chunk warning |
+| `npm run beta:build` | passed across all workspaces |
+| `npm test` | legacy frontend 29 files/131 tests and legacy Worker routes 11 files/62 tests passed |
+| `npm run lint` | passed |
+| `npm run build` | passed; no large-chunk warning |
+| `npm audit --omit=dev` | 0 vulnerabilities |
+| root and Beta deploy readiness | both passed against final artifacts |
+| final preload/chunk audit | root 5 initial/4 modulepreload/0 forbidden/max 278,944 bytes; Beta 1/0/0/max 379,919 bytes |
+| `git diff --check` | passed before report append; rerun before staging |
+
+## Self-Review
+
+The scoped diff contains only Beta Web source/tests plus this report. Raw invitation tokens occur only in the URL-derived in-memory route value and public request bodies; no localStorage/sessionStorage/history-state write contains them. Notification modal state leaves one scroll owner and restores its opener. Non-owner code paths do not call owner-only invitation/audit routes, and viewer code paths do not call editor-only share mutations or listings.
+
+The committed database-record notification link contains `recordId` and optional `commentId`, but no `databaseId`. App therefore preserves the exact record/comment target, selects a matching currently loaded database when available, and exposes a labelled notification target when that record is outside the loaded page. Resolving an unloaded record to its database would require a backend contract change and is outside this Web-only closure.

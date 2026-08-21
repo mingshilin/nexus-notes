@@ -6,7 +6,7 @@ const now = "2026-08-22T00:00:00.000Z";
 const member = { user_id: "user-2", email: "lin@example.com", display_name: "Lin", role: "editor", revision: 2, joined_at: now, updated_at: now };
 const invitation = { id: "invite-1", workspace_id: "ws-1", email: "invite@example.com", role: "viewer", status: "pending", revision: 1, expires_at: "2026-08-25T00:00:00.000Z", created_by: "user-1", created_at: now, updated_at: now };
 const comment = { id: "comment-1", workspace_id: "ws-1", target_type: "note", target_id: "note-1", author_user_id: "user-1", author_display_name: "Ming", parent_id: null, body: "请查看这个段落", mention_user_ids: ["user-2"], revision: 1, created_at: now, updated_at: now };
-const notification = { id: "notification-1", workspace_id: "ws-1", user_id: "user-1", type: "mention", deep_link: "/notes/note-1", payload: { target: "note" }, read_at: null, revision: 1, created_at: now };
+const notification = { id: "notification-1", workspace_id: "ws-1", user_id: "user-1", type: "mention", deep_link: "/notes/note-1?comment=comment-1", payload: { target_type: "note", target_id: "note-1", comment_id: "comment-1" }, read_at: null, revision: 1, created_at: now };
 const share = { id: "share-1", entity_type: "note", entity_id: "note-1", status: "active", password_required: true, expires_at: null, revision: 1, created_at: now, updated_at: now };
 
 function collaboration(overrides: Record<string, unknown> = {}) {
@@ -16,11 +16,11 @@ function collaboration(overrides: Record<string, unknown> = {}) {
     createInvitation: vi.fn(async () => ({ invitation, token: "i".repeat(43) })),
     revokeInvitation: vi.fn(async () => ({ ...invitation, status: "revoked" })),
     updateMemberRole: vi.fn(async () => ({ ...member, role: "viewer", revision: 3 })),
-    removeMember: vi.fn(async () => ({ removed: true })),
+    removeMember: vi.fn(async () => ({ user_id: member.user_id })),
     transferOwnership: vi.fn(async () => ({ ...member, role: "owner" })),
     listComments: vi.fn(async () => [comment]),
     createComment: vi.fn(async (input) => ({ ...comment, body: input.body, mention_user_ids: input.mention_user_ids })),
-    updateComment: vi.fn(async () => comment), deleteComment: vi.fn(async () => ({ deleted: true })),
+    updateComment: vi.fn(async () => comment), deleteComment: vi.fn(async () => ({ id: comment.id })),
     listNotifications: vi.fn(async () => ({ items: [notification], next_cursor: null })),
     getUnreadCount: vi.fn(async () => 1),
     readNotification: vi.fn(async () => ({ notification_ids: [notification.id], read_at: now })),
@@ -48,27 +48,38 @@ describe("collaboration center", () => {
       if (path === "/api/v2/notifications/notification-1/read" && method === "POST") return { notification_ids: [notification.id], read_at: now };
       if (path === "/api/v2/members") return { items: [member] };
       if (path === "/api/v2/invitations") return { items: [invitation] };
+      if (path === "/api/v2/comments/note/note-1") return { items: [comment] };
       throw new Error(`Unexpected ${path}`);
     }) };
     render(createElement(App, { authClient, apiClient, turnstileSiteKey: "test" }));
 
     const notificationButton = await screen.findByRole("button", { name: "通知，1 条未读" });
     expect(notificationButton).toHaveTextContent("1");
+    fireEvent.click(screen.getByRole("button", { name: "通知" }));
+    expect(await screen.findByRole("dialog", { name: "通知中心" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭通知中心" }));
     fireEvent.click(screen.getByRole("button", { name: "协作" }));
     expect(await screen.findByRole("heading", { name: "协作中心" })).toBeInTheDocument();
     expect(screen.getByText("Lin")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Public Beta 重写计划" })).not.toBeInTheDocument();
 
     fireEvent.click(notificationButton);
-    expect(await screen.findByRole("heading", { name: "通知中心" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "通知中心" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("link", { name: "打开 mention" }));
     await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/notifications/notification-1/read", method: "POST", body: { base_revision: 1 } })));
+    fireEvent.click(screen.getByRole("button", { name: "协作" }));
+    fireEvent.click(await screen.findByRole("button", { name: "评论与提及" }));
+    expect(await screen.findByLabelText("评论目标")).toHaveValue("note:note-1");
+    expect((await screen.findByText("请查看这个段落")).closest("article")).toHaveAttribute("aria-current", "true");
   });
 
   it("supports member/invite roles and a comments composer with workspace mentions", async () => {
     const { CollaborationCenter } = await import("../src/index") as Record<string, any>;
     const client = collaboration();
-    render(createElement(CollaborationCenter, { client, workspaceId: "ws-1", userId: "user-1", role: "owner" }));
+    render(createElement(CollaborationCenter, {
+      client, workspaceId: "ws-1", userId: "user-1", role: "owner",
+      commentTargets: [{ type: "note", id: "note-1", label: "Public Beta 重写计划" }],
+    }));
 
     expect(await screen.findByText("Lin")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Lin 的角色"), { target: { value: "viewer" } });
@@ -82,7 +93,7 @@ describe("collaboration center", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "评论与提及" }));
     await screen.findByText("请查看这个段落");
-    fireEvent.change(screen.getByLabelText("目标 ID"), { target: { value: "note-1" } });
+    expect(screen.getByLabelText("评论目标")).toHaveValue("note:note-1");
     fireEvent.change(screen.getByLabelText("评论内容"), { target: { value: "请 Lin 复核" } });
     fireEvent.click(screen.getByLabelText("提及 Lin"));
     fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
@@ -92,11 +103,17 @@ describe("collaboration center", () => {
   it("creates and revokes protected shares, and renders activity/audit metadata defensively", async () => {
     const { CollaborationCenter } = await import("../src/index") as Record<string, any>;
     const client = collaboration();
-    render(createElement(CollaborationCenter, { client, workspaceId: "ws-1", userId: "user-1", role: "owner" }));
+    render(createElement(CollaborationCenter, {
+      client, workspaceId: "ws-1", userId: "user-1", role: "owner",
+      shareTargets: [
+        { type: "note", id: "note-1", label: "Public Beta 重写计划" },
+        { type: "note", id: "note-2", label: "每日产品复盘" },
+      ],
+    }));
 
     fireEvent.click(screen.getByRole("button", { name: "公开分享" }));
     await screen.findByText("note-1");
-    fireEvent.change(screen.getByLabelText("分享对象 ID"), { target: { value: "note-2" } });
+    fireEvent.change(screen.getByLabelText("分享对象"), { target: { value: "note:note-2" } });
     fireEvent.change(screen.getByLabelText("分享密码"), { target: { value: "password-123" } });
     fireEvent.change(screen.getByLabelText("有效小时"), { target: { value: "48" } });
     fireEvent.click(screen.getByRole("button", { name: "创建分享" }));
@@ -130,5 +147,85 @@ describe("collaboration center", () => {
     expect(collaborationErrorMessage({ status: 409, code: "REVISION_CONFLICT" })).toMatch("冲突");
     expect(collaborationErrorMessage({ status: 429, code: "RATE_LIMITED" })).toMatch("频繁");
     expect(collaborationErrorMessage({ code: "NETWORK_ERROR" })).toMatch("网络");
+  });
+
+  it("retains notification cursors and supports selected, single, all-read, and exact deep targets", async () => {
+    const { AdaptiveWorkbench, NotificationCenter } = await import("../src/index") as Record<string, any>;
+    const recordNotification = { ...notification, id: "notification-2", deep_link: "/databases/records/record-9?comment=comment-9", payload: { target_type: "database_record", target_id: "record-9", comment_id: "comment-9" } };
+    const client = collaboration({
+      listNotifications: vi.fn(async ({ cursor }: { cursor?: string }) => cursor
+        ? { items: [recordNotification], next_cursor: null }
+        : { items: [notification], next_cursor: "cursor-2" }),
+    });
+    const onDeepLink = vi.fn();
+    render(createElement(AdaptiveWorkbench, { mode: "desktop", navigation: "", inspectorOpen: false, onInspectorClose: vi.fn() },
+      createElement(NotificationCenter, { client, open: true, onClose: vi.fn(), onDeepLink })));
+
+    await screen.findByText("mention");
+    fireEvent.click(screen.getByRole("button", { name: "加载更多通知" }));
+    await waitFor(() => expect(client.listNotifications).toHaveBeenCalledWith(expect.objectContaining({ cursor: "cursor-2", limit: 25 })));
+    expect(screen.getAllByText("mention")).toHaveLength(2);
+
+    fireEvent.click(screen.getByLabelText("选择通知 notification-1"));
+    fireEvent.click(screen.getByRole("button", { name: "将所选通知标为已读" }));
+    await waitFor(() => expect(client.readNotifications).toHaveBeenCalledWith({ notification_ids: ["notification-1"], base_revisions: { "notification-1": 1 } }));
+    fireEvent.click(screen.getByRole("button", { name: "标记通知 notification-2 已读" }));
+    await waitFor(() => expect(client.readNotification).toHaveBeenCalledWith("notification-2", 1));
+    fireEvent.click(screen.getByRole("button", { name: "全部标为已读" }));
+    await waitFor(() => expect(client.readAllNotifications).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getAllByRole("link", { name: "打开 mention" })[1]!);
+    expect(onDeepLink).toHaveBeenCalledWith({ targetType: "database_record", targetId: "record-9", commentId: "comment-9" });
+  });
+
+  it("enforces the viewer request matrix while keeping readable comments and activity", async () => {
+    const { CollaborationCenter } = await import("../src/index") as Record<string, any>;
+    const client = collaboration();
+    render(createElement(CollaborationCenter, {
+      client, workspaceId: "ws-1", userId: "user-1", role: "viewer",
+      commentTargets: [{ type: "note", id: "note-1", label: "Public Beta 重写计划" }],
+    }));
+
+    await screen.findByText("Lin");
+    expect(client.listInvitations).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Lin 的角色")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /移交所有权|移除 Lin|发送邀请/u })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "评论与提及" }));
+    expect(await screen.findByText("请查看这个段落")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "发表评论" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "公开分享" }));
+    expect(await screen.findByText("查看者无法访问公开分享管理。" )).toBeInTheDocument();
+    expect(client.listShares).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "活动记录" }));
+    expect(await screen.findByText("note.updated")).toBeInTheDocument();
+    expect(client.listActivity).toHaveBeenCalled();
+    expect(client.listAudit).not.toHaveBeenCalled();
+  });
+
+  it("uses selectable context targets, reloads on target changes, and lets owners moderate comments", async () => {
+    const { CollaborationCenter } = await import("../src/index") as Record<string, any>;
+    const otherComment = { ...comment, author_user_id: "user-2", author_display_name: "Lin" };
+    const client = collaboration({ listComments: vi.fn(async () => [otherComment]) });
+    render(createElement(CollaborationCenter, {
+      client, workspaceId: "ws-1", userId: "user-1", role: "owner", initialSection: "comments",
+      activeTarget: { type: "database_record", id: "record-2" }, selectedCommentId: "comment-1",
+      commentTargets: [
+        { type: "note", id: "note-1", label: "Public Beta 重写计划" },
+        { type: "database_record", id: "record-2", label: "Roadmap row" },
+      ],
+      shareTargets: [
+        { type: "note", id: "note-1", label: "Public Beta 重写计划" },
+        { type: "database_view", id: "view-1", label: "Roadmap / Table" },
+      ],
+    }));
+
+    await waitFor(() => expect(client.listComments).toHaveBeenCalledWith("database_record", "record-2", expect.any(AbortSignal)));
+    expect(screen.queryByLabelText("目标 ID")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("评论目标"), { target: { value: "note:note-1" } });
+    await waitFor(() => expect(client.listComments).toHaveBeenCalledWith("note", "note-1", expect.any(AbortSignal)));
+    expect((await screen.findByText("请查看这个段落")).closest("article")).toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("button", { name: "删除评论" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "公开分享" }));
+    expect(await screen.findByLabelText("分享对象")).toHaveDisplayValue("Public Beta 重写计划");
+    expect(screen.queryByLabelText("分享对象 ID")).not.toBeInTheDocument();
   });
 });
