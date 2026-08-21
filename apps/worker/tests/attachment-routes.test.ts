@@ -41,7 +41,13 @@ describe("v2 attachment routes", () => {
       uploadContent: vi.fn(async () => attachment),
       deleteAttachment: vi.fn(async () => undefined),
       retryOcr: vi.fn(async () => ({ queued: ["attachment-1"], ineligible: [], duplicate: [] })),
-      diagnostics: vi.fn(async () => ({ items: [], next_cursor: null })),
+      diagnostics: vi.fn(async () => ({
+        items: [{
+          kind: "failed_ocr", entity_id: "attachment-1", title: "scan.pdf", count: 2,
+          failure_count: 2, ocr_status: "dead_letter", latest_error: "ocr_attempts_exhausted",
+        }],
+        next_cursor: null,
+      })),
       download: vi.fn(async () => ({ body: new Uint8Array([1, 2, 3]), mime_type: "application/pdf", filename: "scan.pdf" })),
     };
     const registry = (worker.createRouteRegistry as any)({
@@ -65,6 +71,10 @@ describe("v2 attachment routes", () => {
     expect(service.listAttachments).toHaveBeenCalledWith(workspace, expect.objectContaining({ mime_type: "application/pdf", limit: 10 }));
     expect(service.retryOcr).toHaveBeenCalledWith(workspace, { attachment_ids: ["attachment-1"] });
     expect(service.diagnostics).toHaveBeenCalledWith(workspace, { limit: 25 });
+    expect((await responses[4]!.json()).data.items).toEqual([{
+      kind: "failed_ocr", entity_id: "attachment-1", title: "scan.pdf", count: 2,
+      failure_count: 2, ocr_status: "dead_letter", latest_error: "ocr_attempts_exhausted",
+    }]);
     expect(download.status).toBe(200);
     expect(download.headers.get("cache-control")).toBe("private, no-store");
     expect(download.headers.get("x-content-type-options")).toBe("nosniff");

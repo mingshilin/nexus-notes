@@ -33,6 +33,7 @@ describe("knowledge contracts", () => {
     expect(contracts.KnowledgeDiagnosticsRequestSchema.parse({ limit: 25 })).toEqual({ limit: 25 });
     expect(contracts.KnowledgeDiagnosticSchema.safeParse({
       kind: "failed_ocr", entity_id: "attachment-1", title: "scan.pdf", count: 1,
+      failure_count: 1, ocr_status: "failed", latest_error: "ocr_failed",
     }).success).toBe(true);
   });
 
@@ -62,6 +63,25 @@ describe("knowledge contracts", () => {
       kind: "failed_ocr", entity_id: "attachment-1", title: "scan.pdf", count: 2,
       ocr_status: "dead_letter", latest_error: "OCR_INTERNAL_STACK_TRACE",
     }).success).toBe(false);
+    expect(contracts.KnowledgeDiagnosticSchema.safeParse({
+      kind: "failed_ocr", entity_id: "attachment-1", title: "scan.pdf", count: 2,
+      failure_count: 2, ocr_status: "completed", latest_error: "ocr_failed",
+    }).success).toBe(false);
+    expect(contracts.KnowledgeDiagnosticSchema.safeParse({
+      kind: "failed_ocr", entity_id: "attachment-1", title: "scan.pdf", count: 2,
+      ocr_status: "failed", latest_error: "ocr_failed",
+    }).success).toBe(false);
+    expect(contracts.KnowledgeDiagnosticSchema.safeParse({
+      kind: "failed_ocr", entity_id: "attachment-1", title: "scan.pdf", count: 2,
+      failure_count: 2, ocr_status: "failed",
+    }).success).toBe(false);
+    expect(contracts.KnowledgeDiagnosticSchema.safeParse({
+      kind: "unfiled_note", entity_id: "note-1", title: "Inbox", count: 1,
+      failure_count: 1, ocr_status: "failed", latest_error: "ocr_failed",
+    }).success).toBe(false);
+    expect(contracts.KnowledgeDiagnosticSchema.safeParse({
+      kind: "unfiled_note", entity_id: "note-1", title: "Inbox", count: 1,
+    }).success).toBe(true);
   });
 
   it("validates tenant-scoped folders, tags, links, and reminders", async () => {

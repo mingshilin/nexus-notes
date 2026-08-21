@@ -85,15 +85,24 @@ export const KnowledgeDiagnosticKindSchema = z.enum([
   "broken_link",
   "failed_ocr",
 ]);
-export const KnowledgeDiagnosticSchema = z.object({
-  kind: KnowledgeDiagnosticKindSchema,
+const KnowledgeDiagnosticBaseSchema = z.object({
   entity_id: EntityIdSchema,
   title: z.string().max(255),
   count: z.number().int().positive(),
-  failure_count: z.number().int().positive().optional(),
-  ocr_status: OcrJobStatusSchema.nullable().optional(),
-  latest_error: SafeOcrDiagnosticErrorSchema.nullable().optional(),
+});
+export const FailedOcrDiagnosticSchema = KnowledgeDiagnosticBaseSchema.extend({
+  kind: z.literal("failed_ocr"),
+  failure_count: z.number().int().positive(),
+  ocr_status: z.enum(["failed", "dead_letter"]),
+  latest_error: SafeOcrDiagnosticErrorSchema,
 }).strict();
+export const NonOcrDiagnosticSchema = KnowledgeDiagnosticBaseSchema.extend({
+  kind: z.enum(["unfiled_note", "orphan_note", "duplicate_title", "broken_link"]),
+}).strict();
+export const KnowledgeDiagnosticSchema = z.discriminatedUnion("kind", [
+  FailedOcrDiagnosticSchema,
+  NonOcrDiagnosticSchema,
+]);
 export type KnowledgeDiagnostic = z.infer<typeof KnowledgeDiagnosticSchema>;
 
 export const KnowledgeDiagnosticsRequestSchema = z.object({
