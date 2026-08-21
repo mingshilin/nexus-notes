@@ -241,6 +241,27 @@ describe("OcrExtractor", () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
+  it("cancels an R2 body exactly once when abort and fulfillment share the dependency-start cycle", async () => {
+    const controller = new AbortController();
+    const cancel = vi.fn();
+    const object = { body: stream(new Uint8Array([1]), cancel), size: 1 };
+    const sameCycleObject = {
+      then<TResult1 = typeof object, TResult2 = never>(
+        onfulfilled?: ((value: typeof object) => TResult1 | PromiseLike<TResult1>) | null,
+      ) {
+        controller.abort();
+        queueMicrotask(() => { void onfulfilled?.(object); });
+        return new Promise<TResult1>(() => undefined);
+      },
+    } as unknown as Promise<typeof object>;
+    const files: OcrObjectStore = { get: vi.fn(() => sameCycleObject) };
+    const extractor = new OcrExtractor({ files });
+
+    await expectExtractionError(extractor.extract(request({ signal: controller.signal })), "OCR_CANCELLED", true);
+    await flushAsyncWork();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it("observes a late AI rejection when its operation aborts the caller during startup", async () => {
     const controller = new AbortController();
     const lateAi = deferred<unknown>();

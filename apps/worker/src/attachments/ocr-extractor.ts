@@ -71,6 +71,7 @@ async function guarded<T>(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let abort: (() => void) | undefined;
   let settled = false;
+  let cancelled = false;
   let timedOut = false;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
@@ -80,7 +81,10 @@ async function guarded<T>(
     }, waitMs);
   });
   const cancellation = new Promise<never>((_resolve, reject) => {
-    abort = () => reject(timedOut ? timeoutError(request) : new OcrExtractionError("OCR_CANCELLED", true));
+    abort = () => {
+      cancelled = true;
+      reject(timedOut ? timeoutError(request) : new OcrExtractionError("OCR_CANCELLED", true));
+    };
     request.signal?.addEventListener("abort", abort, { once: true });
   });
   try {
@@ -88,7 +92,7 @@ async function guarded<T>(
     const started = operation();
     const watched = started.then(
       async (value) => {
-        if (settled) await options.onLateResolve?.(value);
+        if (settled || cancelled || timedOut) await options.onLateResolve?.(value);
         return value;
       },
       (error) => Promise.reject(error),

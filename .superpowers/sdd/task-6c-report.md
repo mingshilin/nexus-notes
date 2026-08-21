@@ -569,3 +569,27 @@ Commit: independent B1 review-fix commit containing this report section; SHA is 
 | `npm run typecheck --workspace=@nexus/worker` | PASS. |
 
 Commit: independent B1 re-review-fix commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C Fix B1 Final Review Fix: Same-Cycle R2 Cleanup
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/ocr-extractor.test.ts` | RED: deterministic same-cycle AbortSignal/R2 fulfillment left the body uncancelled. |
+| Same focused command | GREEN: PASS, 22 tests. |
+
+### Implemented
+
+- `guarded()` tracks synchronous `cancelled` alongside `timedOut` and `settled`.
+- Late cleanup now runs when any of those flags is true, covering fulfillment in the event/microtask window before `Promise.race` reaches its `finally` block.
+- The regression thenable resolves its R2 object before the race installs a rejection observer and proves that abort still cancels the body exactly once.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `npm run test --workspace=@nexus/worker -- tests/ocr-extractor.test.ts` | PASS, 22 tests. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+
+Commit: independent B1 final-review-fix commit containing this report section; SHA is recorded in the final handoff.
