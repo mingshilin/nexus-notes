@@ -22,8 +22,22 @@ function isEmpty(value: unknown) {
 }
 
 function compare(value: unknown, expected: unknown) {
+  if (Array.isArray(expected)) {
+    if (expected.length === 0) return isEmpty(value);
+    return Array.isArray(value)
+      && value.length === expected.length
+      && value.every((item, index) => String(item) === String(expected[index]));
+  }
   if (Array.isArray(value)) return value.some((item) => String(item) === String(expected));
   return String(value) === String(expected);
+}
+
+function contains(value: unknown, expected: unknown) {
+  if (Array.isArray(value)) {
+    const member = Array.isArray(expected) ? expected[0] : expected;
+    return value.some((item) => String(item) === String(member));
+  }
+  return String(value ?? "").toLowerCase().includes(String(expected ?? "").toLowerCase());
 }
 
 function matches(record: DatabaseRecord, view: DatabaseView) {
@@ -33,8 +47,8 @@ function matches(record: DatabaseRecord, view: DatabaseView) {
     switch (filter.operator) {
       case "equals": return compare(value, needle);
       case "not_equals": return !compare(value, needle);
-      case "contains": return Array.isArray(value) ? value.some((item) => String(item).toLowerCase().includes(String(needle ?? "").toLowerCase())) : String(value ?? "").toLowerCase().includes(String(needle ?? "").toLowerCase());
-      case "not_contains": return Array.isArray(value) ? !value.some((item) => String(item).toLowerCase().includes(String(needle ?? "").toLowerCase())) : !String(value ?? "").toLowerCase().includes(String(needle ?? "").toLowerCase());
+      case "contains": return contains(value, needle);
+      case "not_contains": return !contains(value, needle);
       case "is_empty": return isEmpty(value);
       case "is_not_empty": return !isEmpty(value);
       case "before": return typeof value === "string" && typeof needle === "string" && value < needle;

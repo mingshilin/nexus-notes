@@ -124,6 +124,48 @@ describe("Task 7 database web behavior", () => {
     await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({ method: "DELETE", path: "/api/v2/databases/db-1/properties/name/permissions/field-permission", body: { base_revision: 6 } })));
   });
 
+  it("upserts database and field permissions for role subjects with role-specific revisions", async () => {
+    const { DatabaseWorkbench, DatabaseClient } = await web() as Record<string, any>;
+    const databasePermissions = [
+      { id: "db-user", workspace_id: "ws-1", database_id: "db-1", subject_type: "user", subject_id: "viewer", role: "viewer", revision: 4, updated_at: now },
+      { id: "db-role", workspace_id: "ws-1", database_id: "db-1", subject_type: "role", subject_id: "viewer", role: "viewer", revision: 7, updated_at: now },
+    ];
+    const fieldPermissions = [
+      { id: "field-user", workspace_id: "ws-1", database_id: "db-1", property_id: "name", subject_type: "user", subject_id: "viewer", can_read: true, can_write: false, revision: 6, updated_at: now },
+      { id: "field-role", workspace_id: "ws-1", database_id: "db-1", property_id: "name", subject_type: "role", subject_id: "viewer", can_read: true, can_write: false, revision: 9, updated_at: now },
+    ];
+    const api = { request: vi.fn(async ({ path, method }: { path: string; method?: string }) => {
+      if (method === undefined && path.endsWith("/properties/name/permissions")) return { items: fieldPermissions };
+      if (method === undefined && path.endsWith("/permissions")) return { items: databasePermissions };
+      if (path.endsWith("/properties/name/permissions")) return { permission: fieldPermissions[1] };
+      return { permission: databasePermissions[1] };
+    }) };
+    render(createElement(DatabaseWorkbench, {
+      database, properties: [name], records: [], views: [view("table", "table", config)],
+      client: new DatabaseClient(api, "ws-1", { createId: () => "role-permission" }),
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
+    const drawer = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(drawer).getByRole("button", { name: "权限" }));
+    await within(drawer).findByText("viewer · viewer · r7");
+
+    fireEvent.change(within(drawer).getByLabelText("主体类型"), { target: { value: "role" } });
+    expect(within(drawer).queryByLabelText("成员 ID")).not.toBeInTheDocument();
+    fireEvent.change(within(drawer).getByLabelText("工作区角色"), { target: { value: "viewer" } });
+    fireEvent.change(within(drawer).getByLabelText("权限角色"), { target: { value: "editor" } });
+    fireEvent.click(within(drawer).getByRole("button", { name: "保存权限" }));
+    await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      method: "PUT", path: "/api/v2/databases/db-1/permissions",
+      body: { subject_type: "role", subject_id: "viewer", role: "editor", base_revision: 7 },
+    })));
+    await waitFor(() => expect(within(drawer).getByRole("button", { name: "保存字段权限" })).not.toBeDisabled());
+    fireEvent.click(within(drawer).getByRole("button", { name: "保存字段权限" }));
+    await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      method: "PUT", path: "/api/v2/databases/db-1/properties/name/permissions",
+      body: { subject_type: "role", subject_id: "viewer", can_read: true, can_write: false, base_revision: 9 },
+    })));
+  });
+
   it("executes saved filters, sorts, visible columns, and page size against loaded records", async () => {
     const { DatabaseWorkbench } = await web() as { DatabaseWorkbench: ComponentType<any> };
     render(createElement(DatabaseWorkbench, {

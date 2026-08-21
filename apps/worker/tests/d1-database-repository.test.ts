@@ -389,6 +389,50 @@ describe("D1 structured database repository", () => {
     expect(exported.csv).toContain("'=SUM(1,2)");
   });
 
+  it("round-trips scalar member and relation values through CSV as string IDs", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    await db.prepare(
+      "INSERT INTO workspace_members (workspace_id, user_id, role, joined_at, updated_at) VALUES ('ws-1', 'user-1', 'owner', ?, ?)",
+    ).bind(now, now).run();
+    const target = await repository.createDatabase(owner, { name: "Target", description: "" });
+    const targetRecord = await repository.createRecord(owner, target.id, { note_id: null, values: {} });
+    const source = await repository.createDatabase(owner, { name: "CSV source", description: "" });
+    const sourceMember = await repository.createProperty(owner, source.id, {
+      name: "Member", type: "member", config: { allow_multiple: false }, position: 0,
+    });
+    const sourceRelation = await repository.createProperty(owner, source.id, {
+      name: "Relation", type: "relation", config: { target_database_id: target.id, allow_multiple: false }, position: 1,
+    });
+    await repository.createRecord(owner, source.id, {
+      note_id: null,
+      values: { [sourceMember.id]: "user-1", [sourceRelation.id]: targetRecord.id },
+    });
+    const exported = await repository.exportCsv(owner, source.id, {
+      property_ids: [sourceMember.id, sourceRelation.id], cursor: null, page_size: 100,
+    });
+
+    const destination = await repository.createDatabase(owner, { name: "CSV destination", description: "" });
+    const destinationMember = await repository.createProperty(owner, destination.id, {
+      name: "Member", type: "member", config: { allow_multiple: false }, position: 0,
+    });
+    const destinationRelation = await repository.createProperty(owner, destination.id, {
+      name: "Relation", type: "relation", config: { target_database_id: target.id, allow_multiple: false }, position: 1,
+    });
+    const imported = await repository.importCsv(owner, destination.id, {
+      csv: exported.csv,
+      header_property_ids: { Member: destinationMember.id, Relation: destinationRelation.id },
+    });
+
+    expect(imported.items).toHaveLength(1);
+    expect(imported.items[0]?.values).toEqual({
+      [destinationMember.id]: "user-1",
+      [destinationRelation.id]: targetRecord.id,
+    });
+    expect(typeof imported.items[0]?.values[destinationMember.id]).toBe("string");
+    expect(typeof imported.items[0]?.values[destinationRelation.id]).toBe("string");
+  });
+
   it("imports 500 many-column rows with bounded statements and rolls back invalid batches", async () => {
     const repository = await createRepository();
     const owner = context("user-1");

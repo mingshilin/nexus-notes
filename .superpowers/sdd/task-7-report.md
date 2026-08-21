@@ -366,3 +366,48 @@ The requested Web scope explicitly requires browseable/selectable database- and 
 - Security/resources: IDs and arrays are bounded at the domain boundary; reference guard sets and JSON bindings cannot exceed the 1,000-item cap. No SQL, deployment, secret, remote, migration, or Web files were changed.
 - Compatibility: `/api/v2` envelopes, `WorkspaceContext`, D1 rollback, and detach-before-delete behavior remain unchanged. No contracts changes were required because existing `EntityIdSchema` already enforces the 128-character ID bound.
 - Residual concern: full Worker validation uses a serial fork pool to avoid the known Miniflare contention/timeout behavior; no test timeout or assertion was changed. Real-browser Web evidence remains outside this backend wave.
+
+## Task 7 Review Fix Wave 5
+
+### RED evidence
+
+- Base/head before Wave 5 tests: `d41cb34` on `codex/public-beta-rewrite`; the worktree was clean.
+- Worker focused RED: `rtk npm run test --workspace @nexus/worker -- tests/d1-database-repository.test.ts -t "round-trips scalar member and relation values through CSV as string IDs" --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=dot` failed `1/1` as expected. CSV import coerced scalar member/relation IDs to arrays, and repository normalization raised `Invalid value` before the export/import round trip could complete.
+- Web focused RED: `rtk npm run test --workspace @nexus/web -- tests/database-view-utils.test.ts tests/database-task7-web.test.tsx -t "local saved-view array filters|upserts database and field permissions for role subjects" --reporter=dot` failed `3/3` as expected. The permission drawer had no `主体类型` control; array equality removed the exact server-matched record; array `contains` used substring matching and incorrectly retained the `ab`/`record-20` prefix record.
+- All Wave 5 behavior tests were added and observed failing for the expected missing behavior before any production-code edit.
+
+### GREEN and gate evidence
+
+- Exact RED commands after implementation: Worker passed `1/1`; Web passed `3/3` across `2/2` files.
+- Broader focused gates: `d1-database-repository.test.ts` passed `32/32`; domain `database-values.test.ts` passed `4/4`; affected Web files passed `21/21`.
+- Mandatory full Worker suite: `rtk npm run test --workspace @nexus/worker -- --pool=forks --maxWorkers=1 --minWorkers=1 --reporter=dot` passed `37/37` files and `212/212` tests in `145.05s`. Existing poison-message coverage emitted the expected `OCR_QUEUE_MESSAGE_INVALID` stderr lines.
+- Mandatory full Web suite: the final non-concurrent run passed `22/22` files and `104/104` tests. An initial run executed concurrently with the full Worker suite passed `103/104` but observed the pre-existing inspector focus effect after dialog removal; the exact focused test immediately passed `1/1`, no code/timeout/assertion was changed, and the required sequential full Web rerun passed completely.
+- `rtk npm run typecheck --workspace @nexus/worker`, `@nexus/web`, and `@nexus/domain`: all exited `0`.
+- `rtk npm run beta:build`: passed Web, Worker, contracts, domain, testkit, and UI. Vite transformed `1,752` modules; main JS is `333.11 kB` (`98.97 kB` gzip), lazy `DatabaseWorkbench` is `46.82 kB` (`12.98 kB` gzip), and no `>500 kB` warning was emitted.
+- `rtk npm run verify:deploy`: passed local deploy readiness checks. `git diff --check` passed with no output.
+- Generated Web audit: `modulepreload_count=0`, `database_workbench_preload_count=0`, initial script `/assets/index-DL0xl6Tm.js`, lazy chunk `DatabaseWorkbench-DaKmW9m2.js`, and `markdown_ocr_named_assets=0`.
+
+### Requirement mapping
+
+1. Worker CSV coercion now always parses `multi_select` as a normalized semicolon-delimited array, but parses member/relation as arrays only when property config has `allow_multiple: true`; scalar references remain string IDs. A real D1 repository test creates scalar member/relation source values, exports CSV, imports it into equivalent destination properties, and verifies both imported values remain strings.
+2. Local saved-view execution now mirrors server array semantics: array-valued filter needles use exact ordered equality (including missing/null/empty equivalence for `[]`), while scalar `equals`/`contains` against an array performs exact membership rather than substring matching. Multi-select and multi-value member/relation tests cover exact, partial, prefix, empty, missing, contains, not-contains, equals, and not-empty cases.
+3. Database and field permission workflows expose a `user`/`role` subject-type selector. User subjects use a member-ID input; role subjects use owner/editor/viewer options. Both upserts include the selected subject type, and both existing-row lookups match `(subject_type, subject_id)` before selecting `base_revision`; the role update test includes a same-ID user row to prove revisions cannot cross subject types.
+
+### Attachment quota gate justification
+
+- Task 7 requires a deterministic full Worker gate. The attachment quota concurrency test historically seeded `1,023 MiB` through `41` sequential `reserveUpload` calls (`40 x 25 MiB` plus `1 x 23 MiB`); each call performs D1 insert/lookup work, and suite contention previously pushed the unchanged `5,000ms` test past timeout at `5,099ms`.
+- The existing test-only setup optimization in `apps/worker/tests/d1-attachment-repository.test.ts` seeds the same 41 valid uploading rows in one `db.batch`, then runs the same two concurrent `1 MiB` reservations and the same fulfillment/rejection/final-usage assertions. This optimization is necessary to test the quota race rather than repeated setup I/O. Wave 5 retained it unchanged; no production behavior, timeout, or assertion was altered.
+
+### Files changed
+
+- Worker: `apps/worker/src/databases/d1-database-csv.ts` and `apps/worker/tests/d1-database-repository.test.ts`.
+- Web: `apps/web/src/databases/DatabaseCollaborationForms.tsx`, `DatabaseToolsDrawer.tsx`, `database-view-utils.ts`, `apps/web/tests/database-task7-web.test.tsx`, and new `database-view-utils.test.ts`.
+- Evidence: `.superpowers/sdd/task-7-report.md`.
+
+### Self-review and concerns
+
+- Correctness/robustness: verified scalar/array coercion at export/import boundaries, ordered array equality, exact membership, missing/null/empty arrays, same-ID cross-subject permission revisions, and both database/field role payloads. Existing multi-value CSV, user permission, rollback, detach-before-delete, and saved-view tests remain green.
+- Security/resources: authorization remains server-enforced through existing `/api/v2` endpoints and `WorkspaceContext`; no SQL shape, dynamic command, secret, migration, remote, deployment, or legacy code changed. CSV values still pass domain normalization and bounded reference validation.
+- Performance/readability: changes are constant-time branches over already bounded property arrays and permission lists; no new requests or unbounded accumulations were introduced. Shared subject controls avoid duplicate user/role parsing logic.
+- Test quality: tests exercise real repository/component/utility behavior; mocks are limited to the existing HTTP boundary and include competing user/role rows so revision selection is observable. No assertion was weakened to obtain GREEN.
+- Residual concern: the inspector focus test is scheduler-sensitive when full Web and the 145-second Miniflare suite run concurrently on this host; required full suites pass when run sequentially. This is a test-runner contention concern, not a Wave 5 product behavior change.

@@ -22,9 +22,12 @@ function coerceCsvValue(property: DatabaseProperty, value: string): unknown {
       if (/^(false|0|no)$/iu.test(value)) return false;
       return value;
     case "multi_select":
+      return value.split(";").map((item) => item.trim()).filter(Boolean);
     case "member":
     case "relation":
-      return value.split(";").map((item) => item.trim()).filter(Boolean);
+      return (property.config as { allow_multiple?: boolean }).allow_multiple === true
+        ? value.split(";").map((item) => item.trim()).filter(Boolean)
+        : value;
     default:
       return value;
   }
