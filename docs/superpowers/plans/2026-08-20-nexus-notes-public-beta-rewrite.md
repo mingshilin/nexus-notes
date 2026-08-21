@@ -24,7 +24,7 @@
 - [x] Task 3: Build the preserved design system and adaptive workbench shell.
 - [x] Task 4: Add the API transport, normalized cache, IndexedDB persistence, mutation queue, and sync engine.
 - [x] Task 5: Add authentication, tenant isolation, security controls, and configurable Beta quotas.
-- [ ] Task 6: Deliver Capture, notes, revisions, search, graph, reminders, attachments, and diagnostics.
+- [x] Task 6: Deliver Capture, notes, revisions, search, graph, reminders, attachments, and diagnostics.
   - [x] Task 6A: Add tenant-scoped note CRUD, keyset pagination, quick capture, optimistic revisions, restore, and 800 ms autosave conflict preservation.
   - [x] Task 6B: Add folders, tags, links, reminders, graph, FTS search documents, and saved-search filters.
     - [x] Task 6B.1: Add atomic note search indexing, FTS5 synchronization, complete search filters, hit sources, and owner-scoped saved searches.
