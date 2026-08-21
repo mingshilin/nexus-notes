@@ -107,7 +107,9 @@ export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
       id: this.id(), workspace_id: record.workspace_id, database_id: record.database_id, record_id: record.id,
       property_id: propertyId, value_json: JSON.stringify(value), updated_at: record.updated_at,
     })));
-    const statements: D1PreparedStatement[] = [];
+    const requestId = (context as WorkspaceContext & { requestId?: string }).requestId;
+    const operation = requestId ? this.beginOperation("database.csv_import", context.workspaceId, databaseId, "1 = 1") : null;
+    const statements: D1PreparedStatement[] = [...(operation?.statements ?? [])];
     statements.push(...this.referenceGuards(context, references));
     statements.push(
       ...splitJsonBatches(recordRows).map((rows) => this.db.prepare(
@@ -128,12 +130,19 @@ export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
       ).bind(JSON.stringify(rows))),
     );
     statements.push(...this.referenceGuards(context, references));
+    statements.push(...this.auditStatements(context, "database.csv_imported", "database", databaseId, 1, now, operation ? this.operationCondition(operation.operationId) : undefined, undefined, {
+      imported_count: records.length,
+    }));
+    if (operation) statements.push(this.operationCleanup(operation.operationId));
     try {
       if (statements.length > 0) await this.db.batch(statements);
     } catch (error) {
       const referenceFailure = this.referenceGuardFailure(error, references);
       if (referenceFailure) throw referenceFailure;
       throw error;
+    }
+    for (const record of records) {
+      await this.notifyPresence(context.workspaceId, "database_record", record.id, record.revision);
     }
     return { items: records, imported_count: records.length };
   }

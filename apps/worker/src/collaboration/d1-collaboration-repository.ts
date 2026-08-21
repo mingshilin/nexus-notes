@@ -77,6 +77,7 @@ interface CommentRow {
   updated_at: string;
   deleted_at: string | null;
   idempotency_key: string | null;
+  idempotency_fingerprint: string | null;
 }
 
 interface NotificationRow {
@@ -263,7 +264,7 @@ const invitationColumns = `id, workspace_id, email, role, status, revision, expi
 const memberColumns = `m.user_id, u.email, u.display_name, m.role, m.revision, m.joined_at, m.updated_at`;
 const commentColumns = `c.id, c.workspace_id, c.entity_type AS target_type, c.entity_id AS target_id,
   c.author_user_id, u.display_name AS author_display_name, c.parent_id, c.body,
-  c.revision, c.created_at, c.updated_at, c.deleted_at, c.idempotency_key`;
+  c.revision, c.created_at, c.updated_at, c.deleted_at, c.idempotency_key, c.idempotency_fingerprint`;
 const notificationColumns = `id, workspace_id, user_id, type, payload_json, deep_link, read_at, revision, created_at`;
 const shareColumns = `id, workspace_id, entity_type, entity_id, token_hash, password_hash,
   expires_at, revoked_at, status, revision, created_by, created_at, updated_at`;
@@ -659,6 +660,7 @@ export class D1CollaborationRepository {
     const id = this.options.createId();
     const operationId = this.options.createId();
     const createdAt = this.now();
+    const idempotencyFingerprint = this.commentFingerprint(context.userId, input);
     const statements: D1PreparedStatement[] = [...this.operationStart(
       operationId,
       "comment.create",
@@ -675,11 +677,11 @@ export class D1CollaborationRepository {
       [context.workspaceId, context.userId, JSON.stringify(input.mention_user_ids), context.workspaceId],
     ), this.db.prepare(
       `INSERT INTO comments
-       (id, workspace_id, entity_type, entity_id, author_user_id, parent_id, body, revision, created_at, updated_at, idempotency_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+       (id, workspace_id, entity_type, entity_id, author_user_id, parent_id, body, revision, created_at, updated_at, idempotency_key, idempotency_fingerprint)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
     ).bind(
       id, context.workspaceId, input.target_type, input.target_id, context.userId,
-      input.parent_id ?? null, input.body.trim(), createdAt, createdAt, input.idempotency_key,
+      input.parent_id ?? null, input.body.trim(), createdAt, createdAt, input.idempotency_key, idempotencyFingerprint,
     )];
     statements.push(...this.mentionAndNotificationStatements(context, id, 1, input.target_type, input.target_id, input.mention_user_ids, createdAt));
     statements.push(...this.logStatements(context.workspaceId, context.userId, requestId, "comment.created", "comment", id, {
@@ -1219,7 +1221,7 @@ export class D1CollaborationRepository {
     input: CreateCommentInput,
   ) {
     const expected = this.commentFingerprint(actorUserId, input);
-    const actual = this.commentFingerprint(existing.row.author_user_id, {
+    const actual = existing.row.idempotency_fingerprint ?? this.commentFingerprint(existing.row.author_user_id, {
       target_type: existing.row.target_type,
       target_id: existing.row.target_id,
       ...(existing.row.parent_id ? { parent_id: existing.row.parent_id } : {}),
@@ -1260,7 +1262,7 @@ export class D1CollaborationRepository {
     const mentions = await this.db.prepare(
       "SELECT mentioned_user_id FROM mentions WHERE workspace_id = ? AND comment_id = ? ORDER BY mentioned_user_id",
     ).bind(row.workspace_id, row.id).all<{ mentioned_user_id: string }>();
-    const { deleted_at: _deletedAt, idempotency_key: _idempotencyKey, ...comment } = row;
+    const { deleted_at: _deletedAt, idempotency_key: _idempotencyKey, idempotency_fingerprint: _idempotencyFingerprint, ...comment } = row;
     return { ...comment, mention_user_ids: (mentions.results ?? []).map((mention) => mention.mentioned_user_id) };
   }
 

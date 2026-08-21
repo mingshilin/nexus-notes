@@ -14,12 +14,16 @@ class FakeSocket {
 class FakeState {
   sockets: FakeSocket[] = [];
   alarm?: number;
+  failPut = false;
   acceptedTags: string[][] = [];
   stored = new Map<string, unknown>();
   storage = {
     setAlarm: async (when: number) => { this.alarm = when; },
     get: async (key: string) => structuredClone(this.stored.get(key)),
-    put: async (key: string, value: unknown) => { this.stored.set(key, structuredClone(value)); },
+    put: async (key: string, value: unknown) => {
+      if (this.failPut) throw new Error("presence state unavailable");
+      this.stored.set(key, structuredClone(value));
+    },
   };
 
   acceptWebSocket(socket: FakeSocket, tags: string[] = []) {
@@ -192,5 +196,38 @@ describe("PresenceRoom", () => {
     state.stored.set("membership-epoch:user-1", 4);
     await room.webSocketMessage(pairs[1].server, JSON.stringify({ type: "presence.heartbeat" }));
     expect(pairs[1].server.closed).toEqual({ code: 4003, reason: "Membership revoked" });
+  });
+
+  it("checks D1 membership state after a failed revocation dispatch before renewing a heartbeat", async () => {
+    const worker = await import("../src/index") as Record<string, any>;
+    const state = new FakeState();
+    const pairs: Array<{ client: FakeSocket; server: FakeSocket }> = [];
+    let durableMembership = { membershipEpoch: 1, active: true };
+    const room = new worker.PresenceRoom(state, { RATE_LIMIT_SECRET: "presence-secret-at-least-32-characters" }, {
+      clock: () => new Date("2026-08-22T00:00:00.000Z"),
+      verifyIdentity: async () => true,
+      verifyCommand: async () => true,
+      readMembershipState: async () => durableMembership,
+      createWebSocketPair: () => {
+        const pair = { client: new FakeSocket(), server: new FakeSocket() };
+        pairs.push(pair);
+        return pair;
+      },
+      createUpgradeResponse: (client: FakeSocket) => {
+        const response = new Response(null, { status: 204 });
+        Object.defineProperty(response, "webSocket", { value: client });
+        return response;
+      },
+    });
+
+    expect((await room.fetch(identityRequest("GET", undefined, 1))).status).toBe(204);
+    durableMembership = { membershipEpoch: 2, active: false };
+    state.failPut = true;
+    await expect(room.fetch(commandRequest({
+      type: "membership.revoked", user_id: "user-1", membership_epoch: 2,
+    }))).rejects.toThrow("presence state unavailable");
+
+    await room.webSocketMessage(pairs[0].server, JSON.stringify({ type: "presence.heartbeat" }));
+    expect(pairs[0].server.closed).toEqual({ code: 4003, reason: "Membership revoked" });
   });
 });

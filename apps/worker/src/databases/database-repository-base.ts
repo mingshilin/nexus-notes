@@ -396,6 +396,54 @@ export abstract class DatabaseRepositoryBase {
     return this.options.clock().toISOString();
   }
 
+  protected beginOperation(
+    operationType: string,
+    workspaceId: string,
+    targetId: string | null,
+    condition: string,
+    conditionBindings: unknown[] = [],
+  ) {
+    const operationId = this.id();
+    return {
+      operationId,
+      statements: [
+        this.db.prepare(
+          `INSERT INTO collaboration_operation_results
+           (operation_id, workspace_id, operation_type, target_id, created_at)
+           SELECT ?, ?, ?, ?, ? WHERE ${condition}`,
+        ).bind(operationId, workspaceId, operationType, targetId, this.now(), ...conditionBindings),
+        this.db.prepare(
+          `INSERT INTO collaboration_operation_guard (id)
+           SELECT 1 WHERE NOT EXISTS (
+             SELECT 1 FROM collaboration_operation_results WHERE operation_id = ?
+           )`,
+        ).bind(operationId),
+      ] as D1PreparedStatement[],
+    };
+  }
+
+  protected operationCondition(operationId: string) {
+    return `EXISTS (SELECT 1 FROM collaboration_operation_results WHERE operation_id = '${operationId.replaceAll("'", "''")}')`;
+  }
+
+  protected operationCleanup(operationId: string) {
+    return this.db.prepare(
+      "DELETE FROM collaboration_operation_results WHERE operation_id = ?",
+    ).bind(operationId);
+  }
+
+  protected operationAbortWhen(condition: string, bindings: unknown[] = []) {
+    return this.db.prepare(
+      `INSERT INTO collaboration_operation_guard (id)
+       SELECT 1 WHERE ${condition}`,
+    ).bind(...bindings);
+  }
+
+  protected isOperationGuardError(error: unknown) {
+    return error instanceof Error
+      && /UNIQUE constraint failed: collaboration_operation_guard\.id/iu.test(error.message);
+  }
+
   protected auditStatements(
     context: WorkspaceContext,
     action: string,

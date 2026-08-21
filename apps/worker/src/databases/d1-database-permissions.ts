@@ -77,11 +77,24 @@ export class D1DatabasePermissionRepository extends DatabaseRepositoryBase {
     ).bind(context.workspaceId, databaseId, permissionId).first<{ id: string; revision: number }>();
     if (!current) throw new DatabaseRepositoryError("DATABASE_PERMISSION_NOT_FOUND", "Database permission not found", 404);
     assertRevision(current.revision, input.base_revision);
-    const result = await this.db.prepare(
+    const remove = this.db.prepare(
       `DELETE FROM database_permissions
        WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
-    ).bind(context.workspaceId, databaseId, permissionId, input.base_revision).run();
-    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    ).bind(context.workspaceId, databaseId, permissionId, input.base_revision);
+    const now = this.now();
+    const operation = this.beginOperation(
+      "database_permission.delete", context.workspaceId, permissionId,
+      "EXISTS (SELECT 1 FROM database_permissions WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?)",
+      [context.workspaceId, databaseId, permissionId, input.base_revision],
+    );
+    const results = await this.db.batch([
+      ...operation.statements,
+      remove,
+      ...this.auditStatements(context, "database_permission.deleted", "database_permission", permissionId, input.base_revision + 1, now, this.operationCondition(operation.operationId)),
+      this.operationCleanup(operation.operationId),
+    ]);
+    if (results[operation.statements.length]?.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    await this.notifyPresence(context.workspaceId, "database_permission", permissionId, input.base_revision + 1);
     return { id: permissionId };
   }
 
@@ -112,11 +125,24 @@ export class D1DatabasePermissionRepository extends DatabaseRepositoryBase {
     ).bind(context.workspaceId, databaseId, propertyId, permissionId).first<{ id: string; revision: number }>();
     if (!current) throw new DatabaseRepositoryError("FIELD_PERMISSION_NOT_FOUND", "Field permission not found", 404);
     assertRevision(current.revision, input.base_revision);
-    const result = await this.db.prepare(
+    const remove = this.db.prepare(
       `DELETE FROM field_permissions
        WHERE workspace_id = ? AND database_id = ? AND property_id = ? AND id = ? AND revision = ?`,
-    ).bind(context.workspaceId, databaseId, propertyId, permissionId, input.base_revision).run();
-    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    ).bind(context.workspaceId, databaseId, propertyId, permissionId, input.base_revision);
+    const now = this.now();
+    const operation = this.beginOperation(
+      "field_permission.delete", context.workspaceId, permissionId,
+      "EXISTS (SELECT 1 FROM field_permissions WHERE workspace_id = ? AND database_id = ? AND property_id = ? AND id = ? AND revision = ?)",
+      [context.workspaceId, databaseId, propertyId, permissionId, input.base_revision],
+    );
+    const results = await this.db.batch([
+      ...operation.statements,
+      remove,
+      ...this.auditStatements(context, "field_permission.deleted", "field_permission", permissionId, input.base_revision + 1, now, this.operationCondition(operation.operationId)),
+      this.operationCleanup(operation.operationId),
+    ]);
+    if (results[operation.statements.length]?.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    await this.notifyPresence(context.workspaceId, "field_permission", permissionId, input.base_revision + 1);
     return { id: permissionId };
   }
 
@@ -130,7 +156,7 @@ export class D1DatabasePermissionRepository extends DatabaseRepositoryBase {
     else assertRevision(1, input.base_revision);
     const now = this.now();
     const id = current?.id ?? this.id();
-    const result = await this.db.prepare(
+    const upsert = this.db.prepare(
       `INSERT INTO database_permissions
        (id, workspace_id, database_id, subject_type, subject_id, can_read, can_write, revision, updated_at, access_level)
        VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?, ?)
@@ -138,13 +164,32 @@ export class D1DatabasePermissionRepository extends DatabaseRepositoryBase {
          can_read = 1, can_write = excluded.can_write, access_level = excluded.access_level,
          revision = database_permissions.revision + 1, updated_at = excluded.updated_at
        WHERE database_permissions.revision = ?`,
-    ).bind(id, context.workspaceId, databaseId, input.subject_type, input.subject_id, Number(input.role !== "viewer"), now, input.role, input.base_revision).run();
-    if (result.meta.changes !== 1) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    ).bind(id, context.workspaceId, databaseId, input.subject_type, input.subject_id, Number(input.role !== "viewer"), now, input.role, input.base_revision);
+    const operation = this.beginOperation(
+      "database_permission.set", context.workspaceId, id,
+      `NOT EXISTS (SELECT 1 FROM database_permissions WHERE workspace_id = ? AND database_id = ? AND subject_type = ? AND subject_id = ?)
+       OR EXISTS (SELECT 1 FROM database_permissions WHERE workspace_id = ? AND database_id = ? AND subject_type = ? AND subject_id = ? AND revision = ?)`,
+      [context.workspaceId, databaseId, input.subject_type, input.subject_id, context.workspaceId, databaseId, input.subject_type, input.subject_id, input.base_revision],
+    );
+    let results: D1Result[];
+    try {
+      results = await this.db.batch([
+        ...operation.statements,
+        upsert,
+        ...this.auditStatements(context, "database_permission.set", "database_permission", id, current ? current.revision + 1 : 1, now, this.operationCondition(operation.operationId)),
+        this.operationCleanup(operation.operationId),
+      ]);
+    } catch (error) {
+      if (this.isOperationGuardError(error)) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+      throw error;
+    }
+    if (results[operation.statements.length]?.meta.changes !== 1) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     const permission: DatabasePermission = {
       id, workspace_id: context.workspaceId, database_id: databaseId,
       subject_type: input.subject_type, subject_id: input.subject_id, role: input.role,
       revision: current ? current.revision + 1 : 1, updated_at: now,
     };
+    await this.notifyPresence(context.workspaceId, "database_permission", id, permission.revision);
     return permission;
   }
 
@@ -160,7 +205,7 @@ export class D1DatabasePermissionRepository extends DatabaseRepositoryBase {
     if (input.can_write && !input.can_read) throw new DatabaseRepositoryError("INVALID_FIELD_PERMISSION", "Writable fields must be readable", 400);
     const now = this.now();
     const id = current?.id ?? this.id();
-    const result = await this.db.prepare(
+    const upsert = this.db.prepare(
       `INSERT INTO field_permissions
        (id, workspace_id, database_id, property_id, subject_type, subject_id, can_read, can_write, revision, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
@@ -168,14 +213,33 @@ export class D1DatabasePermissionRepository extends DatabaseRepositoryBase {
          can_read = excluded.can_read, can_write = excluded.can_write,
          revision = field_permissions.revision + 1, updated_at = excluded.updated_at
        WHERE field_permissions.revision = ?`,
-    ).bind(id, context.workspaceId, databaseId, propertyId, input.subject_type, input.subject_id, Number(input.can_read), Number(input.can_write), now, input.base_revision).run();
-    if (result.meta.changes !== 1) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    ).bind(id, context.workspaceId, databaseId, propertyId, input.subject_type, input.subject_id, Number(input.can_read), Number(input.can_write), now, input.base_revision);
+    const operation = this.beginOperation(
+      "field_permission.set", context.workspaceId, id,
+      `NOT EXISTS (SELECT 1 FROM field_permissions WHERE workspace_id = ? AND database_id = ? AND property_id = ? AND subject_type = ? AND subject_id = ?)
+       OR EXISTS (SELECT 1 FROM field_permissions WHERE workspace_id = ? AND database_id = ? AND property_id = ? AND subject_type = ? AND subject_id = ? AND revision = ?)`,
+      [context.workspaceId, databaseId, propertyId, input.subject_type, input.subject_id, context.workspaceId, databaseId, propertyId, input.subject_type, input.subject_id, input.base_revision],
+    );
+    let results: D1Result[];
+    try {
+      results = await this.db.batch([
+        ...operation.statements,
+        upsert,
+        ...this.auditStatements(context, "field_permission.set", "field_permission", id, current ? current.revision + 1 : 1, now, this.operationCondition(operation.operationId)),
+        this.operationCleanup(operation.operationId),
+      ]);
+    } catch (error) {
+      if (this.isOperationGuardError(error)) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+      throw error;
+    }
+    if (results[operation.statements.length]?.meta.changes !== 1) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     const permission: FieldPermission = {
       id, workspace_id: context.workspaceId, database_id: databaseId, property_id: propertyId,
       subject_type: input.subject_type, subject_id: input.subject_id,
       can_read: input.can_read, can_write: input.can_write,
       revision: current ? current.revision + 1 : 1, updated_at: now,
     };
+    await this.notifyPresence(context.workspaceId, "field_permission", id, permission.revision);
     return permission;
   }
 }

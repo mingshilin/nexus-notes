@@ -193,3 +193,56 @@ Tests  12 passed (12)
 | `git diff --check` | passed before report append; rerun after append before commit |
 
 No collaboration repository or Presence design was changed in this closure beyond wiring the existing optional notifier into the two already-RED database record mutation paths.
+
+---
+
+# Task 8 Backend Fix Wave 4 Report
+
+Date: 2026-08-22
+Branch: `codex/public-beta-rewrite`
+Scope: immutable collaboration migration history, additive closure migration, durable Presence revocation checks, and complete Beta database mutation audit/invalidation integration.
+
+## TDD Evidence
+
+RED tests were added before the corresponding production edits:
+
+| RED block | Evidence | GREEN result |
+| --- | --- | --- |
+| Migration upgrade | 4/5 migration tests failed: committed `0007` hash mismatch, missing `0008` fixture path, and unavailable upgrade path | `collaboration-migration.test.ts`: 5/5 |
+| Presence revocation heartbeat | New failed-dispatch test left a stale socket open after heartbeat | `presence-room.test.ts`: 4/4 |
+| Database mutation audit/invalidation | New coverage initially found only the existing 7 activity entries instead of all listed mutations | `mutation-audit.test.ts`: 6/6 |
+| Same-millisecond stale marker | Two competing database updates produced two audits under revision+timestamp guards | One winner and one activity/audit pair |
+
+An initial full Worker run exposed four compatibility regressions after the first implementation: raw permission guard errors, missing database-delete postcondition abort, and two bounded prepare-count increases. Those root causes were fixed, and the complete Worker suite was rerun successfully.
+
+## Migration Result
+
+- `apps/worker/migrations/0007_collaboration.sql` is byte-for-byte identical to committed Wave 8A (`07fb09f`); SHA-256 is `01b8036f40a4c8af1e8fb4aa55b19e96733d99e391bd5bae295d6c20f4027991`.
+- `apps/worker/migrations/0008_task8_backend_closure.sql` is additive and contains activity backfill, operation-result/guard schema, comment fingerprint and actor-scoped idempotency index, membership epoch active/revocation state, and membership triggers.
+- Local D1 fixtures now apply `0008`; upgrade tests start from a populated `0007` database and verify data preservation, backfill, epoch state, marker tables, and same-key comments from different actors.
+
+## Mutation and Presence Result
+
+- Database core, records, views, templates, permissions, CSV import, and database comments now couple source writes and redacted activity/audit rows in one D1 batch, with post-commit Presence invalidation. Record delete and database delete are included.
+- Database core revision audit guards use operation-local markers and an explicit postcondition abort; no timestamp-only audit winner inference remains in those paths.
+- Presence heartbeats and reconnects read D1 `workspace_membership_epochs` when the DB binding is available. Inactive or stale epochs close sockets; DO storage remains only a fallback for environments without a DB binding. D1 remains authoritative and Presence failures remain isolated from committed edits.
+- Comment idempotency persists an actor-scoped fingerprint while retaining deterministic fallback calculation for legacy rows.
+
+## Full Verification
+
+| Command | Result |
+| --- | --- |
+| Sequential Beta Worker tests | 43 files, 252/252 passed; each file ran in an isolated single-worker Vitest process |
+| `npm test --workspace @nexus/contracts` | 6 files, 28/28 passed |
+| `npm test --workspace @nexus/domain` | 5 files, 19/19 passed |
+| `npx vitest run --config vitest.worker.config.ts --pool=threads --maxWorkers=1 --minWorkers=1` | Legacy Worker route suite: 11 files, 62/62 passed |
+| contracts/domain/worker typechecks | All passed; `npm run beta:lint` also passed across all workspaces |
+| `npm run beta:build` | Passed; Web initial JS 338,687 bytes and no Vite large-chunk warning |
+| `npm run verify:deploy` | Passed for root `dist`; entry plus four modulepreload vendor assets passed readiness |
+| `node scripts/verify-deploy-readiness.mjs --dist=apps/web/dist` | Passed for Beta Web dist; entry `/assets/index-BtHqVHQI.js` |
+| Initial preload/chunk audit | Root `dist`: 5 initial assets, 4 modulepreloads, 0 forbidden, max 278,944 bytes. Beta Web: 1 initial asset, 0 modulepreloads, 0 forbidden, max 338,687 bytes. |
+| `git diff --check` | Passed after all code/report edits |
+
+## Scope Audit
+
+Only Worker migrations, Worker source, Worker tests, and this report are changed in this wave. No Web UI, legacy source, deployment, remote resource, or secret files were modified. Explicit staging and final status checks were performed before commit.

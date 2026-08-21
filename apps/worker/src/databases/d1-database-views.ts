@@ -68,10 +68,18 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
       name: input.name, type: input.type, config: input.config, position: input.position ?? 0,
       revision: 1, created_at: now, updated_at: now,
     };
-    await this.db.prepare(
+    const insert = this.db.prepare(
       `INSERT INTO database_views (id, workspace_id, database_id, name, type, config_json, position, revision, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-    ).bind(view.id, view.workspace_id, databaseId, view.name, view.type, JSON.stringify(view.config), view.position, now, now).run();
+    ).bind(view.id, view.workspace_id, databaseId, view.name, view.type, JSON.stringify(view.config), view.position, now, now);
+    const operation = this.beginOperation("database_view.create", context.workspaceId, view.id, "1 = 1");
+    await this.db.batch([
+      ...operation.statements,
+      insert,
+      ...this.auditStatements(context, "database_view.created", "database_view", view.id, 1, now, this.operationCondition(operation.operationId)),
+      this.operationCleanup(operation.operationId),
+    ]);
+    await this.notifyPresence(context.workspaceId, "database_view", view.id, view.revision);
     return view;
   }
 
@@ -83,11 +91,29 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
     this.assertViewFields(config, fields.properties);
     const now = this.now();
     const updated = { ...view, name: input.name ?? view.name, config, position: input.position ?? view.position, revision: view.revision + 1, updated_at: now };
-    const result = await this.db.prepare(
+    const update = this.db.prepare(
       `UPDATE database_views SET name = ?, config_json = ?, position = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
-    ).bind(updated.name, JSON.stringify(config), updated.position, now, context.workspaceId, databaseId, viewId, input.base_revision).run();
-    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    ).bind(updated.name, JSON.stringify(config), updated.position, now, context.workspaceId, databaseId, viewId, input.base_revision);
+    const operation = this.beginOperation(
+      "database_view.update", context.workspaceId, viewId,
+      "EXISTS (SELECT 1 FROM database_views WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?)",
+      [context.workspaceId, databaseId, viewId, input.base_revision],
+    );
+    let results: D1Result[];
+    try {
+      results = await this.db.batch([
+        ...operation.statements,
+        update,
+        ...this.auditStatements(context, "database_view.updated", "database_view", viewId, input.base_revision + 1, now, this.operationCondition(operation.operationId)),
+        this.operationCleanup(operation.operationId),
+      ]);
+    } catch (error) {
+      if (this.isOperationGuardError(error)) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+      throw error;
+    }
+    if (results[operation.statements.length]?.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    await this.notifyPresence(context.workspaceId, "database_view", viewId, updated.revision);
     return updated;
   }
 
@@ -95,10 +121,23 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
     await this.access.assert(context, databaseId, "write");
     const view = await this.view(context.workspaceId, databaseId, viewId);
     assertRevision(view.revision, input.base_revision);
-    const result = await this.db.prepare(
+    const remove = this.db.prepare(
       "DELETE FROM database_views WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?",
-    ).bind(context.workspaceId, databaseId, viewId, input.base_revision).run();
-    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    ).bind(context.workspaceId, databaseId, viewId, input.base_revision);
+    const now = this.now();
+    const operation = this.beginOperation(
+      "database_view.delete", context.workspaceId, viewId,
+      "EXISTS (SELECT 1 FROM database_views WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?)",
+      [context.workspaceId, databaseId, viewId, input.base_revision],
+    );
+    const results = await this.db.batch([
+      ...operation.statements,
+      remove,
+      ...this.auditStatements(context, "database_view.deleted", "database_view", viewId, input.base_revision + 1, now, this.operationCondition(operation.operationId)),
+      this.operationCleanup(operation.operationId),
+    ]);
+    if (results[operation.statements.length]?.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    await this.notifyPresence(context.workspaceId, "database_view", viewId, input.base_revision + 1);
     return { id: viewId };
   }
 
@@ -114,13 +153,16 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
       id: this.id(), workspace_id: context.workspaceId, database_id: databaseId,
       name: input.name, default_values: defaults, revision: 1, created_at: now, updated_at: now,
     };
-    const statements: D1PreparedStatement[] = [];
+    const operation = this.beginOperation("database_template.create", context.workspaceId, template.id, "1 = 1");
+    const statements: D1PreparedStatement[] = [...operation.statements];
     statements.push(...this.referenceGuards(context, references));
     statements.push(this.db.prepare(
       `INSERT INTO database_templates (id, workspace_id, database_id, name, default_values_json, revision, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
     ).bind(template.id, context.workspaceId, databaseId, template.name, JSON.stringify(defaults), now, now));
     statements.push(...this.referenceGuards(context, references));
+    statements.push(...this.auditStatements(context, "database_template.created", "database_template", template.id, 1, now, this.operationCondition(operation.operationId)));
+    statements.push(this.operationCleanup(operation.operationId));
     try {
       await this.db.batch(statements);
     } catch (error) {
@@ -128,6 +170,7 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
       if (referenceFailure) throw referenceFailure;
       throw error;
     }
+    await this.notifyPresence(context.workspaceId, "database_template", template.id, template.revision);
     return template;
   }
 
@@ -144,7 +187,12 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
     await this.validateReferenceItems(context, references);
     const now = this.now();
     const updated = { ...template, name: input.name ?? template.name, default_values: defaults, revision: template.revision + 1, updated_at: now };
-    const statements: D1PreparedStatement[] = [];
+    const operation = this.beginOperation(
+      "database_template.update", context.workspaceId, templateId,
+      "EXISTS (SELECT 1 FROM database_templates WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?)",
+      [context.workspaceId, databaseId, templateId, input.base_revision],
+    );
+    const statements: D1PreparedStatement[] = [...operation.statements];
     const beforeReferenceGuards = this.referenceGuards(context, references);
     statements.push(...beforeReferenceGuards);
     statements.push(this.db.prepare(
@@ -152,15 +200,19 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
        WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
     ).bind(updated.name, JSON.stringify(defaults), now, context.workspaceId, databaseId, templateId, input.base_revision));
     statements.push(...this.referenceGuards(context, references));
+    statements.push(...this.auditStatements(context, "database_template.updated", "database_template", templateId, updated.revision, now, this.operationCondition(operation.operationId)));
+    statements.push(this.operationCleanup(operation.operationId));
     try {
       const results = await this.db.batch(statements);
-      const update = results[beforeReferenceGuards.length]!;
+      const update = results[operation.statements.length + beforeReferenceGuards.length]!;
       if (update.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
     } catch (error) {
       const referenceFailure = this.referenceGuardFailure(error, references);
       if (referenceFailure) throw referenceFailure;
+      if (this.isOperationGuardError(error)) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
       throw error;
     }
+    await this.notifyPresence(context.workspaceId, "database_template", templateId, updated.revision);
     return updated;
   }
 
@@ -168,10 +220,23 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
     await this.access.assert(context, databaseId, "write");
     const template = await this.template(context.workspaceId, databaseId, templateId);
     assertRevision(template.revision, input.base_revision);
-    const result = await this.db.prepare(
+    const remove = this.db.prepare(
       "DELETE FROM database_templates WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?",
-    ).bind(context.workspaceId, databaseId, templateId, input.base_revision).run();
-    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    ).bind(context.workspaceId, databaseId, templateId, input.base_revision);
+    const now = this.now();
+    const operation = this.beginOperation(
+      "database_template.delete", context.workspaceId, templateId,
+      "EXISTS (SELECT 1 FROM database_templates WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?)",
+      [context.workspaceId, databaseId, templateId, input.base_revision],
+    );
+    const results = await this.db.batch([
+      ...operation.statements,
+      remove,
+      ...this.auditStatements(context, "database_template.deleted", "database_template", templateId, input.base_revision + 1, now, this.operationCondition(operation.operationId)),
+      this.operationCleanup(operation.operationId),
+    ]);
+    if (results[operation.statements.length]?.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    await this.notifyPresence(context.workspaceId, "database_template", templateId, input.base_revision + 1);
     return { id: templateId };
   }
 

@@ -189,4 +189,102 @@ describe("Beta mutation audit and Presence invalidation", () => {
       name: "Committed", description: "",
     })).resolves.toMatchObject({ id: "database-presence-failure" });
   });
+
+  it("audits and invalidates every security-relevant Beta database mutation", async () => {
+    const { db, worker } = await setup();
+    const invalidate = vi.fn(async () => undefined);
+    let id = 0;
+    const repository = new worker.D1DatabaseRepository(db, {
+      createId: () => `database-wave4-${++id}`,
+      clock: () => new Date(now),
+      presence: { invalidate },
+    });
+    const actor = (requestId: string) => ({
+      workspaceId: "ws-1", userId: "user-1", role: "owner", capabilities: new Set<string>(), requestId,
+    });
+    const config = {
+      filters: [], sorts: [], grouping: null, visible_columns: [], page_size: 25, settings: {},
+    };
+
+    const database = await repository.createDatabase(actor("req-wave-database-create"), { name: "Wave database", description: "secret" });
+    const property = await repository.createProperty(actor("req-wave-property-create"), database.id, {
+      name: "Wave field", type: "text", config: {}, position: 0,
+    });
+    const record = await repository.createRecord(actor("req-wave-record-create"), database.id, {
+      note_id: null, values: { [property.id]: "private value" },
+    });
+    const view = await repository.createView(actor("req-wave-view-create"), database.id, {
+      name: "Wave view", type: "table", config: { ...config, visible_columns: [property.id] }, position: 0,
+    });
+    await repository.updateView(actor("req-wave-view-update"), database.id, view.id, { base_revision: 1, name: "Wave view updated" });
+    await repository.deleteView(actor("req-wave-view-delete"), database.id, view.id, { base_revision: 2 });
+    const template = await repository.createTemplate(actor("req-wave-template-create"), database.id, {
+      name: "Wave template", default_values: {},
+    });
+    await repository.updateTemplate(actor("req-wave-template-update"), database.id, template.id, { base_revision: 1, name: "Wave template updated" });
+    await repository.deleteTemplate(actor("req-wave-template-delete"), database.id, template.id, { base_revision: 2 });
+    const databasePermission = await repository.setDatabasePermission(actor("req-wave-database-permission-set"), database.id, {
+      subject_type: "user", subject_id: "user-2", role: "viewer", base_revision: 1,
+    });
+    await repository.deleteDatabasePermission(actor("req-wave-database-permission-delete"), database.id, databasePermission.id, { base_revision: 1 });
+    const fieldPermission = await repository.setFieldPermission(actor("req-wave-field-permission-set"), database.id, property.id, {
+      subject_type: "user", subject_id: "user-2", can_read: true, can_write: false, base_revision: 1,
+    });
+    await repository.deleteFieldPermission(actor("req-wave-field-permission-delete"), database.id, property.id, fieldPermission.id, { base_revision: 1 });
+    await repository.importCsv(actor("req-wave-csv-import"), database.id, {
+      csv: "Wave field\nimported",
+      header_property_ids: { "Wave field": property.id },
+    });
+    const comment = await repository.createComment(actor("req-wave-comment-create"), database.id, {
+      record_id: record.id, body: "private comment",
+    });
+    await repository.updateComment(actor("req-wave-comment-update"), database.id, comment.id, {
+      base_revision: 1, body: "private comment updated",
+    });
+    await repository.deleteComment(actor("req-wave-comment-delete"), database.id, comment.id, { base_revision: 2 });
+    await repository.deleteRecord(actor("req-wave-record-delete"), database.id, record.id, { base_revision: 1 });
+    await repository.updateProperty(actor("req-wave-property-update"), database.id, property.id, {
+      base_revision: 1, name: "Wave field updated",
+    });
+    await repository.deleteProperty(actor("req-wave-property-delete"), database.id, property.id, { base_revision: 2 });
+    await repository.updateDatabase(actor("req-wave-database-update"), database.id, { base_revision: 1, description: "changed" });
+    await repository.deleteDatabase(actor("req-wave-database-delete"), database.id, { base_revision: 2 });
+
+    const requestIds = [
+      "req-wave-comment-create", "req-wave-comment-delete", "req-wave-comment-update",
+      "req-wave-csv-import", "req-wave-database-create", "req-wave-database-delete", "req-wave-database-permission-delete",
+      "req-wave-database-permission-set", "req-wave-database-update", "req-wave-field-permission-delete",
+      "req-wave-field-permission-set", "req-wave-property-create", "req-wave-property-delete", "req-wave-property-update",
+      "req-wave-record-create", "req-wave-record-delete", "req-wave-template-create", "req-wave-template-delete",
+      "req-wave-template-update", "req-wave-view-create", "req-wave-view-delete", "req-wave-view-update",
+    ];
+    const logs = await loggedActions(db, requestIds);
+    expect(logs.activity.map((entry) => entry.request_id).sort()).toEqual([...requestIds].sort());
+    expect(logs.audit).toHaveLength(requestIds.length);
+    expect(JSON.stringify(logs)).not.toMatch(/secret|private value|private comment|Wave field/iu);
+    expect(invalidate.mock.calls.length).toBeGreaterThanOrEqual(requestIds.length);
+  });
+
+  it("records only the winner when competing database updates share a revision and timestamp", async () => {
+    const { db, worker } = await setup();
+    const create = new worker.D1DatabaseRepository(db, { createId: () => "race-database", clock: () => new Date(now) });
+    const database = await create.createDatabase({
+      workspaceId: "ws-1", userId: "user-1", role: "owner", capabilities: new Set<string>(), requestId: "req-race-create",
+    }, { name: "Race database", description: "" });
+    const makeRepository = (suffix: string) => new worker.D1DatabaseRepository(db, {
+      createId: () => `race-${suffix}`,
+      clock: () => new Date(now),
+    });
+    const context = (requestId: string) => ({
+      workspaceId: "ws-1", userId: "user-1", role: "owner", capabilities: new Set<string>(), requestId,
+    });
+    const outcomes = await Promise.allSettled([
+      makeRepository("a").updateDatabase(context("req-race-a"), database.id, { base_revision: 1, description: "a" }),
+      makeRepository("b").updateDatabase(context("req-race-b"), database.id, { base_revision: 1, description: "b" }),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const logs = await loggedActions(db, ["req-race-a", "req-race-b"]);
+    expect(logs.audit).toHaveLength(1);
+    expect(logs.activity).toHaveLength(1);
+  });
 });

@@ -11,6 +11,7 @@ export const migrationPaths = [
   "../../migrations/0005_personal_workspace.sql",
   "../../migrations/0006_structured_databases.sql",
   "../../migrations/0007_collaboration.sql",
+  "../../migrations/0008_task8_backend_closure.sql",
 ];
 
 export function splitMigration(sql: string) {
@@ -19,7 +20,7 @@ export function splitMigration(sql: string) {
   let trigger = false;
   for (const sourceLine of sql.split(/\r?\n/u)) {
     const line = sourceLine.trim();
-    if (!line || /^PRAGMA foreign_keys = ON;$/iu.test(line)) continue;
+    if (!line || line.startsWith("--") || /^PRAGMA foreign_keys = ON;$/iu.test(line)) continue;
     if (/^CREATE TRIGGER\b/iu.test(line)) trigger = true;
     statement += `${statement ? " " : ""}${line}`;
     const complete = trigger ? /^END;$/iu.test(line) : line.endsWith(";");

@@ -30,11 +30,19 @@ export class D1DatabaseCommentRepository extends DatabaseRepositoryBase {
       author_user_id: context.userId, parent_id: input.parent_id ?? null, body: input.body.trim(),
       revision: 1, created_at: now, updated_at: now,
     };
-    await this.db.prepare(
+    const insert = this.db.prepare(
       `INSERT INTO comments
        (id, workspace_id, entity_type, entity_id, author_user_id, parent_id, body, revision, created_at, updated_at)
        VALUES (?, ?, 'database_record', ?, ?, ?, ?, 1, ?, ?)`,
-    ).bind(comment.id, context.workspaceId, comment.record_id, comment.author_user_id, comment.parent_id, comment.body, now, now).run();
+    ).bind(comment.id, context.workspaceId, comment.record_id, comment.author_user_id, comment.parent_id, comment.body, now, now);
+    const operation = this.beginOperation("database_comment.create", context.workspaceId, comment.id, "1 = 1");
+    await this.db.batch([
+      ...operation.statements,
+      insert,
+      ...this.auditStatements(context, "database_comment.created", "database_comment", comment.id, 1, now, this.operationCondition(operation.operationId)),
+      this.operationCleanup(operation.operationId),
+    ]);
+    await this.notifyPresence(context.workspaceId, "database_comment", comment.id, comment.revision);
     return comment;
   }
 
@@ -58,11 +66,29 @@ export class D1DatabaseCommentRepository extends DatabaseRepositoryBase {
     assertRevision(comment.revision, input.base_revision);
     const now = this.now();
     const updated = { ...comment, body: input.body.trim(), revision: comment.revision + 1, updated_at: now };
-    const result = await this.db.prepare(
+    const update = this.db.prepare(
       `UPDATE comments SET body = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND id = ? AND revision = ?`,
-    ).bind(updated.body, now, context.workspaceId, commentId, input.base_revision).run();
-    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    ).bind(updated.body, now, context.workspaceId, commentId, input.base_revision);
+    const operation = this.beginOperation(
+      "database_comment.update", context.workspaceId, commentId,
+      "EXISTS (SELECT 1 FROM comments WHERE workspace_id = ? AND id = ? AND revision = ? AND deleted_at IS NULL)",
+      [context.workspaceId, commentId, input.base_revision],
+    );
+    let results: D1Result[];
+    try {
+      results = await this.db.batch([
+        ...operation.statements,
+        update,
+        ...this.auditStatements(context, "database_comment.updated", "database_comment", commentId, input.base_revision + 1, now, this.operationCondition(operation.operationId)),
+        this.operationCleanup(operation.operationId),
+      ]);
+    } catch (error) {
+      if (this.isOperationGuardError(error)) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+      throw error;
+    }
+    if (results[operation.statements.length]?.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    await this.notifyPresence(context.workspaceId, "database_comment", commentId, updated.revision);
     return updated;
   }
 
@@ -74,11 +100,29 @@ export class D1DatabaseCommentRepository extends DatabaseRepositoryBase {
     }
     assertRevision(comment.revision, input.base_revision);
     const now = this.now();
-    const result = await this.db.prepare(
+    const update = this.db.prepare(
       `UPDATE comments SET deleted_at = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND id = ? AND revision = ?`,
-    ).bind(now, now, context.workspaceId, commentId, input.base_revision).run();
-    if (result.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    ).bind(now, now, context.workspaceId, commentId, input.base_revision);
+    const operation = this.beginOperation(
+      "database_comment.delete", context.workspaceId, commentId,
+      "EXISTS (SELECT 1 FROM comments WHERE workspace_id = ? AND id = ? AND revision = ? AND deleted_at IS NULL)",
+      [context.workspaceId, commentId, input.base_revision],
+    );
+    let results: D1Result[];
+    try {
+      results = await this.db.batch([
+        ...operation.statements,
+        update,
+        ...this.auditStatements(context, "database_comment.deleted", "database_comment", commentId, input.base_revision + 1, now, this.operationCondition(operation.operationId)),
+        this.operationCleanup(operation.operationId),
+      ]);
+    } catch (error) {
+      if (this.isOperationGuardError(error)) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+      throw error;
+    }
+    if (results[operation.statements.length]?.meta.changes === 0) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    await this.notifyPresence(context.workspaceId, "database_comment", commentId, input.base_revision + 1);
     return { id: commentId };
   }
 

@@ -30,6 +30,12 @@ interface PresenceSocket extends WebSocket {
 
 interface PresenceRoomEnv {
   RATE_LIMIT_SECRET: string;
+  DB?: D1Database;
+}
+
+interface PresenceMembershipState {
+  membershipEpoch: number;
+  active: boolean;
 }
 
 interface PresenceIdentity {
@@ -44,6 +50,11 @@ export interface PresenceRoomDependencies {
   clock(): Date;
   verifyIdentity(env: PresenceRoomEnv, identity: PresenceIdentity): Promise<boolean>;
   verifyCommand(env: PresenceRoomEnv, workspaceId: string, body: string, signature: string): Promise<boolean>;
+  readMembershipState(
+    env: PresenceRoomEnv,
+    workspaceId: string,
+    userId: string,
+  ): Promise<PresenceMembershipState | null | undefined>;
   createWebSocketPair(): { client: WebSocket; server: PresenceSocket };
   createUpgradeResponse(client: WebSocket): Response;
 }
@@ -74,6 +85,14 @@ const defaultDependencies: PresenceRoomDependencies = {
       presenceCommandPayload(workspaceId, body),
     );
     return equalText(expected, signature);
+  },
+  async readMembershipState(env, workspaceId, userId) {
+    if (!env.DB) return undefined;
+    const row = await env.DB.prepare(
+      `SELECT membership_epoch, is_active FROM workspace_membership_epochs
+       WHERE workspace_id = ? AND user_id = ? LIMIT 1`,
+    ).bind(workspaceId, userId).first<{ membership_epoch: number; is_active: number }>();
+    return row ? { membershipEpoch: row.membership_epoch, active: row.is_active === 1 } : null;
   },
   createWebSocketPair() {
     const pair = new WebSocketPair();
@@ -130,7 +149,7 @@ export class PresenceRoom {
     }
 
     await this.cleanupExpired();
-    if (identity.membershipEpoch < await this.revokedMembershipEpoch(identity.userId)) {
+    if (await this.isMembershipRevoked(identity.workspaceId, identity.userId, identity.membershipEpoch)) {
       return response(403, "FORBIDDEN");
     }
     for (const socket of this.sockets()) {
@@ -179,7 +198,7 @@ export class PresenceRoom {
     }
     const current = socket.deserializeAttachment();
     if (!current?.connected) return;
-    if (current.membershipEpoch < await this.revokedMembershipEpoch(current.userId)) {
+    if (await this.isMembershipRevoked(current.workspaceId, current.userId, current.membershipEpoch)) {
       this.disconnect(socket, 4003, "Membership revoked");
       return;
     }
@@ -276,6 +295,12 @@ export class PresenceRoom {
 
   private async revokedMembershipEpoch(userId: string) {
     return await this.state.storage.get<number>(this.membershipEpochKey(userId)) ?? 0;
+  }
+
+  private async isMembershipRevoked(workspaceId: string, userId: string, membershipEpoch: number) {
+    const durable = await this.dependencies.readMembershipState(this.env, workspaceId, userId);
+    if (durable !== undefined) return !durable || !durable.active || membershipEpoch < durable.membershipEpoch;
+    return membershipEpoch < await this.revokedMembershipEpoch(userId);
   }
 
   private sockets() {

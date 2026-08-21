@@ -76,7 +76,8 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
       note_id: input.note_id ?? null, values, created_by: context.userId, updated_by: context.userId,
       revision: 1, created_at: now, updated_at: now,
     };
-    const statements = [...this.referenceGuards(context, references), ...this.createRecordStatements(record)];
+    const operation = this.beginOperation("database_record.create", context.workspaceId, record.id, "1 = 1");
+    const statements = [...operation.statements, ...this.referenceGuards(context, references), ...this.createRecordStatements(record)];
     if (record.note_id) {
       const note = await this.db.prepare(
         "SELECT id, database_id FROM notes WHERE workspace_id = ? AND id = ? AND deleted_at IS NULL",
@@ -99,10 +100,10 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
         record.id,
         record.revision,
         now,
-        "EXISTS (SELECT 1 FROM database_records WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?)",
-        [context.workspaceId, databaseId, record.id, record.revision],
+        this.operationCondition(operation.operationId),
       ),
       ...this.referenceGuards(context, references),
+      this.operationCleanup(operation.operationId),
     );
     try {
       await this.db.batch(statements);
@@ -186,11 +187,37 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     if (!row) throw new DatabaseRepositoryError("RECORD_NOT_FOUND", "Database record not found", 404);
     assertRevision(row.revision, input.base_revision);
     const now = this.now();
-    const result = await this.db.prepare(
+    const update = this.db.prepare(
       `UPDATE database_records SET deleted_at = ?, note_id = NULL, updated_by = ?, revision = revision + 1, updated_at = ?
        WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ?`,
-    ).bind(now, context.userId, now, context.workspaceId, databaseId, recordId, input.base_revision).run();
-    if (result.meta.changes !== 1) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    ).bind(now, context.userId, now, context.workspaceId, databaseId, recordId, input.base_revision);
+    const operation = this.beginOperation(
+      "database_record.delete", context.workspaceId, recordId,
+      "EXISTS (SELECT 1 FROM database_records WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ? AND deleted_at IS NULL)",
+      [context.workspaceId, databaseId, recordId, input.base_revision],
+    );
+    let results: D1Result[];
+    try {
+      results = await this.db.batch([
+        ...operation.statements,
+        update,
+        ...this.auditStatements(
+          context,
+          "database_record.deleted",
+          "database_record",
+          recordId,
+          input.base_revision + 1,
+          now,
+          this.operationCondition(operation.operationId),
+        ),
+        this.operationCleanup(operation.operationId),
+      ]);
+    } catch (error) {
+      if (this.isOperationGuardError(error)) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+      throw error;
+    }
+    if (results[operation.statements.length]?.meta.changes !== 1) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+    await this.notifyPresence(context.workspaceId, "database_record", recordId, input.base_revision + 1);
     return { id: recordId };
   }
 
@@ -216,10 +243,23 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     await this.validateReferenceItems(context, references);
     const now = this.now();
     const expected = prepared.map(({ mutation }) => ({ record_id: mutation.record_id, revision: mutation.base_revision }));
+    const requestId = (context as WorkspaceContext & { requestId?: string }).requestId;
+    const operation = requestId ? this.beginOperation(
+        "database_record.update", context.workspaceId, databaseId,
+        `NOT EXISTS (
+           SELECT 1 FROM json_each(?) expected
+           WHERE NOT EXISTS (
+             SELECT 1 FROM database_records
+             WHERE workspace_id = ? AND database_id = ? AND id = json_extract(expected.value, '$.record_id')
+               AND revision = json_extract(expected.value, '$.revision') AND deleted_at IS NULL
+           )
+         )`,
+        [JSON.stringify(expected), context.workspaceId, databaseId],
+      ) : null;
     const valueRows = prepared.flatMap((item) => Object.entries(item.values).map(([property_id, value]) => ({
       id: this.id(), record_id: item.mutation.record_id, property_id, value_json: JSON.stringify(value),
     })));
-    const statements: D1PreparedStatement[] = [revisionGuard(this.db, context, databaseId, expected)];
+    const statements: D1PreparedStatement[] = [...(operation?.statements ?? []), revisionGuard(this.db, context, databaseId, expected)];
     statements.push(...this.referenceGuards(context, references));
     statements.push(this.db.prepare(
       `UPDATE database_records SET updated_by = ?, revision = revision + 1, updated_at = ?
@@ -250,17 +290,19 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
         mutation.record_id,
         mutation.base_revision + 1,
         now,
-        "EXISTS (SELECT 1 FROM database_records WHERE workspace_id = ? AND database_id = ? AND id = ? AND revision = ? AND updated_at = ?)",
-        [context.workspaceId, databaseId, mutation.record_id, mutation.base_revision + 1, now],
+        operation ? this.operationCondition(operation.operationId) : undefined,
       ));
     }
     statements.push(...this.referenceGuards(context, references));
+    if (operation) statements.push(this.operationCleanup(operation.operationId));
     try {
       await this.db.batch(statements);
     } catch (error) {
       const referenceFailure = this.referenceGuardFailure(error, references);
       if (referenceFailure) throw referenceFailure;
-      if (isRecordRevisionGuardError(error)) throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+      if (isRecordRevisionGuardError(error) || this.isOperationGuardError(error)) {
+        throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+      }
       throw error;
     }
     for (const { mutation } of prepared) {
