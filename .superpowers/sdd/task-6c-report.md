@@ -785,3 +785,37 @@ This review fix completes the remaining B2.2a Important and Minor findings only.
 | `git diff --check` | PASS. |
 
 Commit: independent B2.2a review-fix commit containing this report section; SHA is recorded in the final handoff.
+
+## Task 6C Fix B2.2b: Native Fidelity and Health
+
+### Scope
+
+This slice completes the remaining native Queue fidelity, health capability, typed-test, and preview-TOML findings. It does not deploy or modify Web, legacy, Task 7, storage schema, or AI UI.
+
+### TDD RED / GREEN
+
+| Command | Result |
+| --- | --- |
+| `npm run test -- tests/native-queue.test.ts tests/health-ocr.test.ts tests/preview-config.test.ts` | RED: this-dependent native `ack()` was not called; native retry exception resolved the handler; partial FILES and non-callable AI reported unsafe readiness. |
+| Same focused command after implementation | GREEN: PASS, 16 tests in 3 files. |
+
+### Implemented
+
+- Queue message normalization now invokes `ack` with its original native receiver and typed native Message/MessageBatch fakes assert one ack per successful, duplicate, stale, terminal, and missing-binding delivery.
+- Native `retry({ delaySeconds })` errors now propagate from the queue handler, allowing Cloudflare to retry the batch instead of default-acking it.
+- Health checks callable `FILES.get/put/delete` and callable `AI.toMarkdown`; it reports only the safe `unconfigured`, `degraded`, or `ready` OCR state. Tests assert exact response data and envelope key sets.
+- Native queue tests no longer contain `any`; they use structurally faithful Cloudflare interfaces and real D1 lifecycle checks, retaining B2.2a coverage for OCR search writes, native attempts, stale/terminal delivery, and recovery.
+- Preview config test parses the `[ai]` section and verifies that the AI binding is declared within it, without any secret value.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| Focused native/health/config Worker tests | PASS, 16 tests in 3 files. |
+| `npm run test --workspace=@nexus/worker` | PASS, 173 tests in 34 files. |
+| `npm run typecheck --workspace=@nexus/worker` | PASS. |
+| `npm run beta:build` | PASS. |
+| `node scripts/verify-deploy-readiness.mjs --dist=apps/web/dist` | PASS; no initial OCR/Markdown preload. |
+| `git diff --check` | PASS. |
+
+Commit: independent B2.2b commit containing this report section; SHA is recorded in the final handoff.

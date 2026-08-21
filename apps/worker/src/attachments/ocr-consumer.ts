@@ -98,7 +98,7 @@ function toSafeMessage(input: unknown): SafeMessage {
     return {
       body: input.body,
       attempts: attemptsFrom(input.attempts),
-      ack: typeof acknowledge === "function" ? () => acknowledge() : () => undefined,
+      ack: typeof acknowledge === "function" ? () => acknowledge.call(input) : () => undefined,
     };
   }
   return {

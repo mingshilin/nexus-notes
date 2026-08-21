@@ -21,9 +21,9 @@ describe("preview Worker configuration", () => {
 
   it("declares the native Workers AI binding without a secret value", () => {
     const config = readFileSync(resolve(process.cwd(), "wrangler.preview.example.toml"), "utf8");
+    const aiSection = config.match(/^\[ai\]\r?\n([\s\S]*?)(?=^\[|\z)/m)?.[1];
 
-    expect(config).toContain('[ai]');
-    expect(config).toContain('binding = "AI"');
+    expect(aiSection).toContain('binding = "AI"');
     expect(config).not.toMatch(/AI(?:_|_API)?(?:KEY|TOKEN|SECRET)\s*=/i);
   });
 });

@@ -129,11 +129,7 @@ function createOcrExtractor(env: BetaWorkerEnv) {
 }
 
 function retryNativeMessage(message: Message<unknown>, delaySeconds: number) {
-  try {
-    message.retry({ delaySeconds });
-  } catch {
-    // The message remains unacknowledged if the platform retry call itself fails.
-  }
+  message.retry({ delaySeconds });
 }
 
 function allowedOrigins(env: BetaWorkerEnv) {

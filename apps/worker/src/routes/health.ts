@@ -17,8 +17,11 @@ export interface BetaWorkerEnv {
 }
 
 function ocrCapability(env: BetaWorkerEnv) {
-  if (!env.FILES) return "unconfigured" as const;
-  return env.AI ? "ready" as const : "degraded" as const;
+  const filesReady = typeof env.FILES?.get === "function"
+    && typeof env.FILES.put === "function"
+    && typeof env.FILES.delete === "function";
+  if (!filesReady) return "unconfigured" as const;
+  return typeof env.AI?.toMarkdown === "function" ? "ready" as const : "degraded" as const;
 }
 
 export const healthRoute: RouteDefinition<BetaWorkerEnv, unknown, { status: "ok"; version: string; ocr: "unconfigured" | "degraded" | "ready" }> = {
