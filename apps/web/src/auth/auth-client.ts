@@ -1,11 +1,11 @@
 import type { ApiClient } from "../data/api-client";
-import {
-  AuthSessionSchema,
-  type AuthSession,
-  type AuthUserSummary,
-} from "@nexus/contracts";
+import { AuthSessionSchema, type AuthSession } from "@nexus/contracts";
 
-export type AuthUser = AuthUserSummary;
+export interface AuthUser {
+  id: string;
+  email: string;
+  displayName?: string;
+}
 
 export class AuthClient {
   constructor(private readonly client: Pick<ApiClient, "request">) {}

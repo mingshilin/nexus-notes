@@ -181,19 +181,21 @@ export class KnowledgeClient {
     }).then(({ attachment }) => attachment);
   }
 
-  retryAttachmentOcr(attachmentId: string) {
+  retryAttachmentOcr(attachmentId: string, signal?: AbortSignal) {
     return this.command<{ queued: string[]; ineligible: string[]; duplicate: string[] }>(
       `/api/v2/attachments/${encodeURIComponent(attachmentId)}/ocr/retry`,
       "POST",
       { attachment_ids: [attachmentId] },
+      signal,
     );
   }
 
-  retryAttachmentOcrBatch(attachmentIds: string[]) {
+  retryAttachmentOcrBatch(attachmentIds: string[], signal?: AbortSignal) {
     return this.command<{ queued: string[]; ineligible: string[]; duplicate: string[] }>(
       "/api/v2/attachments/ocr/retry",
       "POST",
       { attachment_ids: attachmentIds },
+      signal,
     );
   }
 
@@ -235,14 +237,14 @@ export class KnowledgeClient {
     });
   }
 
-  private command<T>(path: string, method: "POST" | "PUT" | "PATCH", body: unknown) {
+  private command<T>(path: string, method: "POST" | "PUT" | "PATCH", body: unknown, signal?: AbortSignal) {
     return this.client.request<T>({
       path,
       method,
       headers: this.headers(),
       body,
       requestClass: "command",
-      policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId() },
+      policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId(), signal },
     });
   }
 

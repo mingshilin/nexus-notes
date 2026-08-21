@@ -457,3 +457,31 @@ Web-only active-workspace binding from the Task 5A server session contract. No W
 | npm run build --workspace=@nexus/web | PASS. |
 | npm run typecheck --workspace=@nexus/contracts | PASS. |
 | git diff --check | PASS. |
+
+## Task 5B Review Fix: Workspace Request Lifecycle And AuthUser Compatibility
+
+### TDD RED / GREEN
+
+| Finding | RED evidence | GREEN evidence |
+| --- | --- | --- |
+| Old attachment pagination could survive a workspace remount | Controlled deferred attachment page retained signal.aborted false after the ws-2 session remount. | The original request signal is aborted and the late ws-1 page never appears in the ws-2 UI. |
+| Old diagnostic pagination could survive a workspace remount | Controlled deferred diagnostic page retained signal.aborted false after the ws-2 session remount. | The original request signal is aborted and the late ws-1 diagnostic never appears in the ws-2 UI. |
+| OCR retry was neither cancellable nor lifecycle-guarded | The retry command policy had no signal after remount. | Retry receives an AbortSignal, it aborts on old workspace unmount, and a late resolution produces no stale feedback. |
+| AuthUser API compatibility regressed | Standalone strict TypeScript compilation rejected a legacy AuthUser without displayName. | The same compilation accepts the legacy public type while AuthClient.session() retains strict AuthSessionSchema parsing. |
+
+### Implemented
+
+- Recovery effect cleanup now aborts the shared initial/pagination controller set on every dependency transition and unmount.
+- OCR retry commands accept an optional signal. The workspace owns retry controllers, aborts them at lifecycle end, and checks cancellation before every success, error, or final state update.
+- AuthUser is again a public compatibility interface with optional displayName; the strict shared session contract remains internal to AuthClient.session().
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| npm run test --workspace=@nexus/web -- tests/auth-client.test.ts tests/auth-gate.test.tsx tests/auth-panel.test.tsx tests/auth-mobile-overflow.test.ts tests/app-auth-bootstrap.test.tsx tests/knowledge-client.test.ts tests/knowledge-recovery-panel.test.tsx tests/knowledge-recovery-live.test.tsx | PASS, 43 tests in 8 files. |
+| npx tsc --noEmit --strict --skipLibCheck --jsx react-jsx --module ESNext --moduleResolution Bundler --target ES2022 apps/web/tests/auth-client.test.ts | PASS. |
+| npm run typecheck --workspace=@nexus/web | PASS. |
+| npm run build --workspace=@nexus/web | PASS. |
+| npm run typecheck --workspace=@nexus/contracts | PASS. |
+| git diff --check | PASS. |

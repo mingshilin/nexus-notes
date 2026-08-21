@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { AuthUser } from "../src/auth/auth-client";
 
 type WebExports = Record<string, unknown>;
 
@@ -7,6 +8,12 @@ async function loadWeb() {
 }
 
 describe("AuthClient", () => {
+  it("keeps displayName optional for legacy AuthUser consumers", () => {
+    const user: AuthUser = { id: "user-1", email: "user@example.com" };
+
+    expect(user).toEqual({ id: "user-1", email: "user@example.com" });
+  });
+
   it("parses and returns the complete shared auth session", async () => {
     const web = await loadWeb();
     const request = vi.fn(async () => ({

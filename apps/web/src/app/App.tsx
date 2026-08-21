@@ -71,6 +71,7 @@ function AuthenticatedWorkspace({
   const [retryingIds, setRetryingIds] = useState<Set<string>>(new Set());
   const [refreshVersion, setRefreshVersion] = useState(0);
   const requestControllers = useRef(new Set<AbortController>());
+  const retryControllers = useRef(new Set<AbortController>());
   const attachmentQueryIdentity = useRef<string | null>(null);
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
 
@@ -99,12 +100,28 @@ function AuthenticatedWorkspace({
     return controller;
   };
 
+  const abortRetryRequests = () => {
+    retryControllers.current.forEach((controller) => controller.abort());
+    retryControllers.current.clear();
+  };
+
+  const createRetryRequest = () => {
+    const controller = new AbortController();
+    retryControllers.current.add(controller);
+    return controller;
+  };
+
   useEffect(() => {
     const handleUpdate = (event: Event) => {
       setServiceWorkerUpdate((event as CustomEvent<ServiceWorkerUpdate>).detail);
     };
     window.addEventListener("nexus:service-worker-update", handleUpdate);
     return () => window.removeEventListener("nexus:service-worker-update", handleUpdate);
+  }, []);
+
+  useEffect(() => () => {
+    abortRecoveryRequests();
+    abortRetryRequests();
   }, []);
 
   useEffect(() => {
@@ -164,7 +181,7 @@ function AuthenticatedWorkspace({
       }
     });
 
-    return () => controller.abort();
+    return () => abortRecoveryRequests();
   }, [apiClient, workspaceId, filters.mimeType, filters.ocrStatus, refreshVersion]);
 
   const loadMoreAttachments = () => {
@@ -215,14 +232,20 @@ function AuthenticatedWorkspace({
     setRetryingIds(new Set(ids));
     setRetryFeedback(null);
     const knowledge = new KnowledgeClient(apiClient, workspaceId);
+    const controller = createRetryRequest();
     const retry = ids.length === 1
-      ? knowledge.retryAttachmentOcr(ids[0])
-      : knowledge.retryAttachmentOcrBatch(ids);
+      ? knowledge.retryAttachmentOcr(ids[0], controller.signal)
+      : knowledge.retryAttachmentOcrBatch(ids, controller.signal);
     void retry.then((result) => {
+      if (controller.signal.aborted) return;
       setRetryFeedback(recoveryFeedback(result));
-    }).catch(() => {
-      setRetryFeedback("OCR 重试请求失败，请稍后重试。");
+    }).catch((retryError: unknown) => {
+      if (!isAborted(retryError, controller.signal)) {
+        setRetryFeedback("OCR 重试请求失败，请稍后重试。");
+      }
     }).finally(() => {
+      retryControllers.current.delete(controller);
+      if (controller.signal.aborted) return;
       setRetryingIds(new Set());
       setRefreshVersion((version) => version + 1);
     });

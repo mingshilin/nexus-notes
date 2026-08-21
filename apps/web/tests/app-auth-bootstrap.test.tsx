@@ -8,6 +8,14 @@ const authenticatedSession = (activeWorkspaceId: string | null) => ({
   active_workspace_id: activeWorkspaceId,
 });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  return {
+    promise: new Promise<T>((next) => { resolve = next; }),
+    resolve,
+  };
+}
+
 afterEach(() => vi.unstubAllEnvs());
 
 describe("App authentication bootstrap", () => {
@@ -102,6 +110,113 @@ describe("App authentication bootstrap", () => {
     await waitFor(() => expect(apiClient.request).toHaveBeenCalledTimes(4));
     expect(staleSignal.aborted).toBe(true);
     expect(apiClient.request.mock.calls.slice(2).every(([request]: [{ headers: Record<string, string> }]) => request.headers["x-workspace-id"] === "ws-2")).toBe(true);
+  });
+
+  it("aborts old attachment pagination and ignores its controlled late page after a workspace remount", async () => {
+    const oldPage = deferred<{ items: Array<{ id: string; filename: string; mime_type: string; ocr_status: string }>; next_cursor: null }>();
+    const authClient = { session: vi.fn(async () => authenticatedSession("ws-1")) };
+    const refreshedAuthClient = { session: vi.fn(async () => authenticatedSession("ws-2")) };
+    const apiClient = { request: vi.fn((request: { path: string; headers: Record<string, string>; policy: { signal?: AbortSignal } }) => {
+      const workspaceId = request.headers["x-workspace-id"];
+      if (request.path.startsWith("/api/v2/attachments")) {
+        if (workspaceId === "ws-1" && request.path.includes("cursor=old-attachment-cursor")) return oldPage.promise;
+        return Promise.resolve({
+          items: [{ id: workspaceId + "-attachment", filename: workspaceId + ".pdf", mime_type: "application/pdf", ocr_status: "failed" }],
+          next_cursor: workspaceId === "ws-1" ? "old-attachment-cursor" : null,
+        });
+      }
+      return Promise.resolve({ items: [], next_cursor: null });
+    }) };
+    const { rerender } = render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+
+    await screen.findByRole("button", { name: "加载更多附件" });
+    fireEvent.click(screen.getByRole("button", { name: "加载更多附件" }));
+    const oldRequest = await waitFor(() => {
+      const request = apiClient.request.mock.calls.map(([value]) => value)
+        .find((value) => value.path.includes("cursor=old-attachment-cursor"));
+      expect(request).toBeDefined();
+      return request as { policy: { signal?: AbortSignal } };
+    });
+
+    rerender(<App authClient={refreshedAuthClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+    await screen.findByRole("button", { name: "重试 ws-2.pdf" });
+    expect(oldRequest.policy.signal?.aborted).toBe(true);
+
+    await act(async () => oldPage.resolve({
+      items: [{ id: "old-page", filename: "old-page.pdf", mime_type: "application/pdf", ocr_status: "failed" }],
+      next_cursor: null,
+    }));
+    expect(screen.queryByRole("button", { name: "重试 old-page.pdf" })).not.toBeInTheDocument();
+  });
+
+  it("aborts old diagnostic pagination and ignores its controlled late page after a workspace remount", async () => {
+    const oldPage = deferred<{ items: Array<{ kind: "failed_ocr"; entity_id: string; title: string; count: number }>; next_cursor: null }>();
+    const authClient = { session: vi.fn(async () => authenticatedSession("ws-1")) };
+    const refreshedAuthClient = { session: vi.fn(async () => authenticatedSession("ws-2")) };
+    const apiClient = { request: vi.fn((request: { path: string; headers: Record<string, string>; policy: { signal?: AbortSignal } }) => {
+      const workspaceId = request.headers["x-workspace-id"];
+      if (request.path.startsWith("/api/v2/attachments")) {
+        return Promise.resolve({ items: [], next_cursor: null });
+      }
+      if (workspaceId === "ws-1" && request.path.includes("cursor=old-diagnostic-cursor")) return oldPage.promise;
+      return Promise.resolve({
+        items: [{ kind: "failed_ocr", entity_id: workspaceId + "-diagnostic", title: workspaceId + " diagnostic", count: 1 }],
+        next_cursor: workspaceId === "ws-1" ? "old-diagnostic-cursor" : null,
+      });
+    }) };
+    const { rerender } = render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+
+    await screen.findByRole("button", { name: "加载更多诊断" });
+    fireEvent.click(screen.getByRole("button", { name: "加载更多诊断" }));
+    const oldRequest = await waitFor(() => {
+      const request = apiClient.request.mock.calls.map(([value]) => value)
+        .find((value) => value.path.includes("cursor=old-diagnostic-cursor"));
+      expect(request).toBeDefined();
+      return request as { policy: { signal?: AbortSignal } };
+    });
+
+    rerender(<App authClient={refreshedAuthClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+    await screen.findByRole("button", { name: "处理诊断 ws-2 diagnostic" });
+    expect(oldRequest.policy.signal?.aborted).toBe(true);
+
+    await act(async () => oldPage.resolve({
+      items: [{ kind: "failed_ocr", entity_id: "old-diagnostic", title: "old diagnostic", count: 1 }],
+      next_cursor: null,
+    }));
+    expect(screen.queryByRole("button", { name: "处理诊断 old diagnostic" })).not.toBeInTheDocument();
+  });
+
+  it("aborts old OCR retry and ignores its controlled completion after a workspace remount", async () => {
+    const oldRetry = deferred<{ queued: string[]; ineligible: string[]; duplicate: string[] }>();
+    const authClient = { session: vi.fn(async () => authenticatedSession("ws-1")) };
+    const refreshedAuthClient = { session: vi.fn(async () => authenticatedSession("ws-2")) };
+    const apiClient = { request: vi.fn((request: { path: string; headers: Record<string, string>; policy: { signal?: AbortSignal } }) => {
+      const workspaceId = request.headers["x-workspace-id"];
+      if (request.path.includes("/ocr/retry")) return oldRetry.promise;
+      if (request.path.startsWith("/api/v2/attachments")) {
+        return Promise.resolve({
+          items: [{ id: workspaceId + "-attachment", filename: workspaceId + ".pdf", mime_type: "application/pdf", ocr_status: "failed" }],
+          next_cursor: null,
+        });
+      }
+      return Promise.resolve({ items: [], next_cursor: null });
+    }) };
+    const { rerender } = render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "重试 ws-1.pdf" }));
+    const oldRequest = await waitFor(() => {
+      const request = apiClient.request.mock.calls.map(([value]) => value)
+        .find((value) => value.path.includes("/ocr/retry"));
+      expect(request).toBeDefined();
+      return request as { policy: { signal?: AbortSignal } };
+    });
+
+    rerender(<App authClient={refreshedAuthClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+    await screen.findByRole("button", { name: "重试 ws-2.pdf" });
+    expect(oldRequest.policy.signal?.aborted).toBe(true);
+
+    await act(async () => oldRetry.resolve({ queued: ["ws-1-attachment"], ineligible: [], duplicate: [] }));
+    expect(screen.queryByText("已加入 1 项 OCR 重试。")).not.toBeInTheDocument();
   });
 
   it("deduplicates retry clicks, refreshes afterwards, and delegates diagnostic navigation", async () => {
