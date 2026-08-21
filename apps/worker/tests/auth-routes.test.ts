@@ -89,10 +89,18 @@ describe("v2 auth routes", () => {
     expect(service.resetPassword).toHaveBeenCalledWith({ token: "reset-token-long-enough", password: "replacement-123" });
   });
 
-  it("returns the active session and clears it on logout", async () => {
+  it("returns deterministic workspace summaries with the active workspace and clears logout", async () => {
     const worker = await loadWorker();
+    const sessionData = {
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+      workspaces: [
+        { id: "personal-1", name: "Personal workspace", slug: "personal-user-1", role: "owner", revision: 1 },
+        { id: "team-1", name: "Alpha", slug: "alpha", role: "viewer", revision: 2 },
+      ],
+      active_workspace_id: "personal-1",
+    };
     const service = {
-      getSessionUser: vi.fn(async () => ({ id: "user-1", email: "user@example.com" })),
+      getSession: vi.fn(async () => sessionData),
       logout: vi.fn(async () => undefined),
     };
     const registry = (worker.createRouteRegistry as any)({
@@ -104,8 +112,10 @@ describe("v2 auth routes", () => {
     const session = await registry.fetch(new Request("https://beta.test/api/v2/auth/session"), {});
     const logout = await registry.fetch(new Request("https://beta.test/api/v2/auth/logout", { method: "POST" }), {});
 
-    expect(await session.json()).toMatchObject({ success: true, data: { user: { id: "user-1" } } });
-    expect(service.getSessionUser).toHaveBeenCalledWith("user-1");
+    const sessionBody = await session.json() as { success: boolean; data: unknown };
+    expect(sessionBody.success).toBe(true);
+    expect(sessionBody.data).toEqual(sessionData);
+    expect(service.getSession).toHaveBeenCalledWith("user-1");
     expect(service.logout).toHaveBeenCalledWith("session-1");
     expect(logout.headers.get("set-cookie")).toBe("nexus_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
   });

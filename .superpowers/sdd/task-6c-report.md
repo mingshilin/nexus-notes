@@ -327,6 +327,47 @@ Web-only implementation on `codex/public-beta-rewrite` from baseline `4da0c54`. 
 
 - The Beta auth-session payload currently exposes no workspace selector. The Web surface therefore requires the active workspace id from its existing app/environment integration and deliberately renders a safe no-workspace state instead of querying a demo workspace.
 
+## Task 5A: Worker/Contracts Authenticated Active Workspace
+
+### Scope and Status
+
+`DONE` for Task 5A only. This slice changes contracts, Worker auth/session behavior, and the additive `0005_personal_workspace.sql` migration. AuthClient/AuthGate/App integration is intentionally deferred to Task 5B. No Web, deployment, invitation/member-management, Task 8, or legacy migration changes were made.
+
+### TDD RED Evidence
+
+| Command | Valid RED observed before production change |
+| --- | --- |
+| `npm test --workspace @nexus/contracts -- tests/auth-contracts.test.ts` | `AuthSessionSchema` and `WorkspaceMembershipSummarySchema` were undefined. |
+| `npm test --workspace @nexus/worker -- tests/personal-workspace-migration.test.ts` | Additive `0005_personal_workspace.sql` did not exist. |
+| `npm test --workspace @nexus/worker -- tests/personal-workspace-repository.test.ts` | Personal-workspace verification/reconciliation/list methods did not exist. |
+| `npm test --workspace @nexus/worker -- tests/auth-service.test.ts` | Verification still called the old user-only method and `getSession()` did not exist. |
+| `npm test --workspace @nexus/worker -- tests/auth-routes.test.ts` | Session route still called `getSessionUser`, so the full workspace session request failed. |
+| `npm test --workspace @nexus/worker -- tests/personal-workspace-repository.test.ts` | A legacy team workspace using `personal-user-1` caused a global slug uniqueness failure during reconciliation. |
+
+### Implemented Design
+
+- Shared strict contracts expose only safe user/workspace summaries: workspace `id`, `name`, `slug`, `role`, and positive `revision`, plus `active_workspace_id`. Capability data, member lists, and internal workspace kind are excluded.
+- `0005` adds `workspace_type = personal | team`, defaults all existing rows to `team`, and adds a partial unique owner index for personal workspaces. Existing `0001-0004` remain unchanged.
+- The migration's Beta quota trigger rejects a third explicit team workspace while allowing the required personal reconciliation to proceed for legacy users already at quota.
+- Verification updates the user and creates the personal workspace plus owner membership in one D1 batch. Session reconciliation uses the same idempotent batch. The partial unique index is the concurrent winner invariant; owner membership is inserted/repaired without repeat-write revision churn.
+- Personal slugs derive from the generated workspace ID, so legacy user-derived team slugs cannot block reconciliation.
+- Session workspace reads join only the authenticated user's memberships and sort personal first, then case-insensitive name, slug, and ID. The service chooses personal as active, otherwise the first authorized workspace, and the route returns the full data inside the existing API envelope.
+
+### GREEN / Verification
+
+| Command | Result |
+| --- | --- |
+| `npm test --workspace @nexus/worker -- tests/auth-service.test.ts tests/auth-routes.test.ts tests/d1-auth-repository.test.ts tests/personal-workspace-repository.test.ts tests/personal-workspace-migration.test.ts tests/schema.test.ts` | PASS, 23 tests in 6 files. |
+| `npm test --workspace @nexus/worker` | PASS, 117 tests in 30 files. |
+| `npm test --workspace @nexus/contracts` | PASS, 15 tests in 4 files. |
+| `npm run typecheck --workspace @nexus/worker` | PASS. |
+| `npm run typecheck --workspace @nexus/contracts` | PASS. |
+| `git diff --check` | PASS. |
+| `git diff --quiet 190ef48 -- apps/web` | PASS, Web unchanged. |
+| `git diff --quiet 190ef48 -- apps/worker/migrations/0001_beta_schema.sql apps/worker/migrations/0002_search_document_sync.sql apps/worker/migrations/0003_private_attachments_ocr.sql apps/worker/migrations/0004_attachment_consistency.sql` | PASS, published migrations unchanged. |
+
+Commit: the independent Task 5A commit containing this section; SHA is recorded in the final handoff.
+
 ## Task 6C A2.2 Web Review Fix
 
 ### Scope

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AuthSession } from "@nexus/contracts";
 import type { RouteDefinition } from "../http/route-registry";
 
 const registerSchema = z.object({
@@ -56,7 +57,7 @@ interface AuthRouteService {
     ip: string;
   }): Promise<{ accepted: boolean }>;
   resetPassword(input: { token: string; password: string }): Promise<void>;
-  getSessionUser(userId: string): Promise<unknown>;
+  getSession(userId: string): Promise<AuthSession>;
   logout(sessionId: string): Promise<void>;
 }
 
@@ -177,7 +178,7 @@ export function registerAuthRoutes<TEnv>(
     path: "/api/v2/auth/session",
     auth: "session",
     handler: async ({ env, principal }) => ({
-      data: { user: await createService(env).getSessionUser(principal!.userId) },
+      data: await createService(env).getSession(principal!.userId),
     }),
   });
 

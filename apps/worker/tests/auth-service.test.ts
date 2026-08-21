@@ -10,10 +10,13 @@ function createDependencies(overrides: Record<string, unknown> = {}) {
   return {
     repository: {
       findUserByEmail: vi.fn(),
+      getUserById: vi.fn(),
       createPendingUser: vi.fn(async (input) => ({ id: "user-1", ...input })),
       createEmailCode: vi.fn(),
       consumeEmailCode: vi.fn(),
-      markEmailVerified: vi.fn(),
+      markEmailVerifiedAndEnsurePersonalWorkspace: vi.fn(),
+      ensurePersonalWorkspace: vi.fn(),
+      listWorkspaceMemberships: vi.fn(async () => []),
       createSession: vi.fn(),
       createPasswordReset: vi.fn(),
       consumePasswordReset: vi.fn(),
@@ -87,7 +90,7 @@ describe("AuthService", () => {
     expect(dependencies.repository.updatePasswordAndRevokeSessions).toHaveBeenCalledWith("user-1", "password-hash", "2026-08-21T00:00:00.000Z");
   });
 
-  it("atomically verifies email codes", async () => {
+  it("atomically verifies email and ensures the personal workspace", async () => {
     const worker = await loadWorker();
     const dependencies = createDependencies();
     dependencies.repository.consumeEmailCode.mockResolvedValue({ userId: "user-1" });
@@ -102,7 +105,65 @@ describe("AuthService", () => {
       "hash:verify_email:user@example.com:123456",
       "2026-08-21T00:00:00.000Z",
     );
-    expect(dependencies.repository.markEmailVerified).toHaveBeenCalledWith("user-1", "2026-08-21T00:00:00.000Z");
+    expect(dependencies.repository.markEmailVerifiedAndEnsurePersonalWorkspace).toHaveBeenCalledWith(
+      "user-1",
+      "2026-08-21T00:00:00.000Z",
+    );
+  });
+
+  it("reconciles an old active user and selects the personal workspace for the session", async () => {
+    const worker = await loadWorker();
+    const dependencies = createDependencies();
+    dependencies.repository.getUserById.mockResolvedValue({
+      id: "user-1",
+      email: "user@example.com",
+      display_name: "User",
+      email_verified_at: "2026-08-20T00:00:00.000Z",
+      status: "active",
+    });
+    dependencies.repository.listWorkspaceMemberships.mockResolvedValue([
+      { id: "personal-1", name: "Personal workspace", slug: "personal-user-1", role: "owner", revision: 1, workspaceType: "personal" },
+      { id: "team-1", name: "Alpha", slug: "alpha", role: "editor", revision: 2, workspaceType: "team" },
+    ]);
+    const AuthService = worker.AuthService as new (dependencies: Record<string, unknown>) => {
+      getSession(userId: string): Promise<Record<string, unknown>>;
+    };
+
+    await expect(new AuthService(dependencies).getSession("user-1")).resolves.toEqual({
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+      workspaces: [
+        { id: "personal-1", name: "Personal workspace", slug: "personal-user-1", role: "owner", revision: 1 },
+        { id: "team-1", name: "Alpha", slug: "alpha", role: "editor", revision: 2 },
+      ],
+      active_workspace_id: "personal-1",
+    });
+    expect(dependencies.repository.ensurePersonalWorkspace).toHaveBeenCalledWith(
+      "user-1",
+      "2026-08-21T00:00:00.000Z",
+    );
+  });
+
+  it("falls back to the first authorized workspace when no personal membership is returned", async () => {
+    const worker = await loadWorker();
+    const dependencies = createDependencies();
+    dependencies.repository.getUserById.mockResolvedValue({
+      id: "user-1",
+      email: "user@example.com",
+      display_name: "User",
+      email_verified_at: "2026-08-20T00:00:00.000Z",
+      status: "active",
+    });
+    dependencies.repository.listWorkspaceMemberships.mockResolvedValue([
+      { id: "team-1", name: "Alpha", slug: "alpha", role: "viewer", revision: 1, workspaceType: "team" },
+      { id: "team-2", name: "Zulu", slug: "zulu", role: "editor", revision: 3, workspaceType: "team" },
+    ]);
+    const AuthService = worker.AuthService as new (dependencies: Record<string, unknown>) => {
+      getSession(userId: string): Promise<{ active_workspace_id: string | null }>;
+    };
+
+    await expect(new AuthService(dependencies).getSession("user-1")).resolves.toMatchObject({
+      active_workspace_id: "team-1",
+    });
   });
 
   it("requires Turnstile for password reset requests without exposing unknown emails", async () => {

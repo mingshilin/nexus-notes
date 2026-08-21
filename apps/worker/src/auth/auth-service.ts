@@ -1,4 +1,5 @@
 import { assertPasswordPolicy, normalizeEmail } from "@nexus/domain";
+import type { AuthSession, WorkspaceMembershipSummary } from "@nexus/contracts";
 
 export interface AuthUser {
   id: string;
@@ -9,13 +10,19 @@ export interface AuthUser {
   status: "active" | "suspended" | "deleted";
 }
 
+export interface AuthWorkspaceMembership extends WorkspaceMembershipSummary {
+  workspaceType: "personal" | "team";
+}
+
 export interface AuthRepository {
   findUserByEmail(email: string): Promise<AuthUser | null | undefined>;
   getUserById(userId: string): Promise<AuthUser | null | undefined>;
   createPendingUser(input: { email: string; passwordHash: string; displayName: string; now: string }): Promise<{ id: string; email: string }>;
   createEmailCode(input: { userId: string; codeHash: string; purpose: "verify_email"; expiresAt: string; now: string }): Promise<void>;
   consumeEmailCode(codeHash: string, now: string): Promise<{ userId: string } | null | undefined>;
-  markEmailVerified(userId: string, now: string): Promise<void>;
+  markEmailVerifiedAndEnsurePersonalWorkspace(userId: string, now: string): Promise<void>;
+  ensurePersonalWorkspace(userId: string, now: string): Promise<void>;
+  listWorkspaceMemberships(userId: string): Promise<AuthWorkspaceMembership[]>;
   createSession(input: { userId: string; tokenHash: string; expiresAt: string; now: string }): Promise<void>;
   createPasswordReset(input: { userId: string; tokenHash: string; expiresAt: string; now: string }): Promise<void>;
   consumePasswordReset(tokenHash: string, now: string): Promise<{ userId: string } | null | undefined>;
@@ -162,7 +169,7 @@ export class AuthService {
     const codeHash = await this.dependencies.tokens.hash(`verify_email:${email}:${input.code}`);
     const verification = await this.dependencies.repository.consumeEmailCode(codeHash, now);
     if (!verification) throw new AuthServiceError("EMAIL_CODE_INVALID", "Email verification code is invalid or expired");
-    await this.dependencies.repository.markEmailVerified(verification.userId, now);
+    await this.dependencies.repository.markEmailVerifiedAndEnsurePersonalWorkspace(verification.userId, now);
   }
 
   async resendVerification(input: { email: string; turnstileToken: string; ip: string }) {
@@ -220,12 +227,25 @@ export class AuthService {
     return { accepted: true };
   }
 
-  async getSessionUser(userId: string) {
+  async getSession(userId: string): Promise<AuthSession> {
     const user = await this.dependencies.repository.getUserById(userId);
     if (!user || user.status !== "active") {
       throw new AuthServiceError("SESSION_INVALID", "Session user is unavailable");
     }
-    return { id: user.id, email: user.email, displayName: user.display_name ?? "" };
+
+    await this.dependencies.repository.ensurePersonalWorkspace(
+      userId,
+      this.dependencies.clock().toISOString(),
+    );
+    const memberships = await this.dependencies.repository.listWorkspaceMemberships(userId);
+    const workspaces = memberships.map(({ workspaceType: _workspaceType, ...workspace }) => workspace);
+    const activeWorkspace = memberships.find((workspace) => workspace.workspaceType === "personal")
+      ?? memberships[0];
+    return {
+      user: { id: user.id, email: user.email, displayName: user.display_name ?? "" },
+      workspaces,
+      active_workspace_id: activeWorkspace?.id ?? null,
+    };
   }
 
   async logout(sessionId: string) {

@@ -1,4 +1,4 @@
-import type { AuthRepository, AuthUser } from "./auth-service";
+import type { AuthRepository, AuthUser, AuthWorkspaceMembership } from "./auth-service";
 
 interface UserRow {
   id: string;
@@ -7,6 +7,23 @@ interface UserRow {
   display_name: string;
   email_verified_at: string | null;
   status: AuthUser["status"];
+}
+
+interface WorkspaceMembershipRow {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
+  revision: number;
+  workspace_type: string;
+}
+
+function isWorkspaceRole(role: string): role is AuthWorkspaceMembership["role"] {
+  return role === "owner" || role === "editor" || role === "viewer";
+}
+
+function isWorkspaceType(type: string): type is AuthWorkspaceMembership["workspaceType"] {
+  return type === "personal" || type === "team";
 }
 
 export class D1AuthRepository implements AuthRepository {
@@ -55,10 +72,69 @@ export class D1AuthRepository implements AuthRepository {
     return row ? { userId: row.user_id } : null;
   }
 
-  async markEmailVerified(userId: string, now: string) {
-    await this.db.prepare(
-      `UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?), updated_at = ? WHERE id = ?`,
-    ).bind(now, now, userId).run();
+  private personalWorkspaceStatements(userId: string, now: string) {
+    const workspaceId = this.createId();
+    const createWorkspace = this.db.prepare(
+      `INSERT INTO workspaces (
+         id, owner_user_id, slug, name, workspace_type, revision, created_at, updated_at
+       ) VALUES (?, ?, ?, 'Personal workspace', 'personal', 1, ?, ?)
+       ON CONFLICT(owner_user_id) WHERE workspace_type = 'personal' DO NOTHING`,
+    ).bind(workspaceId, userId, `personal-${workspaceId}`, now, now);
+    const ensureOwnerMembership = this.db.prepare(
+      `INSERT INTO workspace_members (
+         workspace_id, user_id, role, revision, joined_at, updated_at
+       )
+       SELECT id, owner_user_id, 'owner', 1, ?, ?
+       FROM workspaces
+       WHERE owner_user_id = ? AND workspace_type = 'personal'
+       ON CONFLICT(workspace_id, user_id) DO UPDATE SET
+         role = 'owner',
+         revision = workspace_members.revision + 1,
+         updated_at = excluded.updated_at
+       WHERE workspace_members.role <> 'owner'`,
+    ).bind(now, now, userId);
+    return [createWorkspace, ensureOwnerMembership];
+  }
+
+  async ensurePersonalWorkspace(userId: string, now: string) {
+    await this.db.batch(this.personalWorkspaceStatements(userId, now));
+  }
+
+  async markEmailVerifiedAndEnsurePersonalWorkspace(userId: string, now: string) {
+    const markVerified = this.db.prepare(
+      `UPDATE users
+       SET email_verified_at = COALESCE(email_verified_at, ?), updated_at = ?
+       WHERE id = ?`,
+    ).bind(now, now, userId);
+    await this.db.batch([markVerified, ...this.personalWorkspaceStatements(userId, now)]);
+  }
+
+  async listWorkspaceMemberships(userId: string): Promise<AuthWorkspaceMembership[]> {
+    const rows = await this.db.prepare(
+      `SELECT w.id, w.name, w.slug, wm.role, w.revision, w.workspace_type
+       FROM workspace_members wm
+       JOIN workspaces w ON w.id = wm.workspace_id
+       WHERE wm.user_id = ?
+       ORDER BY
+         CASE WHEN w.workspace_type = 'personal' THEN 0 ELSE 1 END,
+         lower(w.name),
+         w.slug,
+         w.id`,
+    ).bind(userId).all<WorkspaceMembershipRow>();
+
+    return rows.results.map((row) => {
+      if (!isWorkspaceRole(row.role) || !isWorkspaceType(row.workspace_type)) {
+        throw new Error("Invalid workspace membership data");
+      }
+      return {
+        id: row.id,
+        name: row.name,
+        slug: row.slug,
+        role: row.role,
+        revision: row.revision,
+        workspaceType: row.workspace_type,
+      };
+    });
   }
 
   async createSession(input: { userId: string; tokenHash: string; expiresAt: string; now: string }) {
