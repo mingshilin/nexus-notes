@@ -1,6 +1,7 @@
 @import "@nexus/ui/tokens.css";
 
 * { box-sizing: border-box; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; margin: -1px; padding: 0; border: 0; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 html, body, #root { width: 100%; min-height: 100%; margin: 0; }
 body {
   min-width: 320px;
@@ -45,6 +46,8 @@ button { color: inherit; }
 .product-navigation-item { display: flex; width: 56px; min-height: 52px; flex: 0 0 auto; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border: 0; border-radius: 14px; color: hsl(var(--muted-foreground)); background: transparent; font-size: 10px; cursor: pointer; }
 .product-navigation-item:hover { background: rgba(0, 0, 0, 0.04); }
 .product-navigation-item.active { color: white; background: var(--nexus-accent); box-shadow: 0 9px 22px rgba(0, 122, 255, 0.24); }
+.product-navigation-item.unavailable:not(.active) { box-shadow: inset 0 0 0 1px rgba(120, 120, 128, .18); }
+.product-navigation-status { border-radius: 99px; padding: 1px 4px; color: #8a5a00; background: #fff0c2; font-size: 8px; font-weight: 700; line-height: 1.2; }
 .product-navigation-item:disabled { cursor: not-allowed; opacity: .42; }
 .product-navigation-item:focus-visible, .account-trigger:focus-visible, .account-menu button:focus-visible, .logout-error-banner button:focus-visible { outline: 3px solid rgba(0,122,255,.27); outline-offset: 2px; }
 .account-menu-root { position: relative; width: 100%; }
@@ -56,6 +59,7 @@ button { color: inherit; }
 .account-menu-identity strong, .account-menu-identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-menu-identity strong { font-size: 13px; }
 .account-menu-identity span { color: hsl(var(--muted-foreground)); font-size: 10px; }
+.account-menu-items { display: grid; }
 .account-menu button[role="menuitem"] { display: flex; min-height: 39px; align-items: center; gap: 10px; border: 0; border-radius: 11px; padding: 8px 10px; text-align: left; background: transparent; cursor: pointer; font-size: 12px; }
 .account-menu button[role="menuitem"]:hover, .account-menu button[role="menuitem"]:focus-visible { background: rgba(0,122,255,.075); }
 .account-menu button[role="menuitem"]:disabled { cursor: default; opacity: .48; }

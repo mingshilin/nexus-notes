@@ -1,5 +1,6 @@
 import type { AuthUserSummary } from "@nexus/contracts";
 import { Bot, Database, Library, List, NotebookPen, Settings, Users } from "lucide-react";
+import { Fragment, useId } from "react";
 import { AccountMenu } from "../account/AccountMenu";
 import { useWorkbenchModalOpen } from "../layout/AdaptiveWorkbench";
 
@@ -50,6 +51,7 @@ export function ProductNavigation({
   onLogout,
 }: ProductNavigationProps) {
   const workbenchModalOpen = useWorkbenchModalOpen();
+  const collaborationDescriptionId = useId();
   const menuSuppressed = Boolean(modalOpen || workbenchModalOpen);
   const navigate = (domain: ProductDomain) => {
     onChange(domain);
@@ -59,19 +61,21 @@ export function ProductNavigation({
     const activeDestination = active === domain;
     const unavailable = domain === "collaboration" && !collaborationEnabled;
     return (
-      <button
-        key={domain}
-        className={activeDestination ? "product-navigation-item active" : "product-navigation-item"}
-        type="button"
-        aria-current={activeDestination ? "page" : undefined}
-        aria-pressed={activeDestination}
-        aria-disabled={unavailable || undefined}
-        title={unavailable ? "协作功能当前不可用" : undefined}
-        onClick={() => navigate(domain)}
-      >
-        <Icon aria-hidden="true" size={19} />
-        <span>{label}</span>
-      </button>
+      <Fragment key={domain}>
+        <button
+          className={["product-navigation-item", activeDestination ? "active" : "", unavailable ? "unavailable" : ""].filter(Boolean).join(" ")}
+          type="button"
+          aria-current={activeDestination ? "page" : undefined}
+          aria-pressed={activeDestination}
+          aria-describedby={unavailable ? collaborationDescriptionId : undefined}
+          onClick={() => navigate(domain)}
+        >
+          <Icon aria-hidden="true" size={19} />
+          <span>{label}</span>
+          {unavailable ? <span className="product-navigation-status" aria-hidden="true">未开启</span> : null}
+        </button>
+        {unavailable ? <span id={collaborationDescriptionId} className="sr-only">协作功能当前未开启</span> : null}
+      </Fragment>
     );
   };
 

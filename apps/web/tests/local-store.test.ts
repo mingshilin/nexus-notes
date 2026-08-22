@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 type WebExports = Record<string, unknown>;
 
@@ -11,6 +11,7 @@ const stores: Array<{ destroy(): Promise<void> }> = [];
 
 afterEach(async () => {
   await Promise.all(stores.splice(0).map((store) => store.destroy()));
+  vi.restoreAllMocks();
 });
 
 describe("BetaLocalStore", () => {
@@ -101,5 +102,70 @@ describe("BetaLocalStore", () => {
       ? { ...current, title: "Old response" }
       : undefined)).resolves.toMatchObject({ title: "Newer", pending_patch: { idempotency_key: "key-b" } });
     expect(await store.getDraft("ws-1", "draft-1")).toMatchObject({ title: "Newer", pending_patch: { idempotency_key: "key-b" } });
+  });
+
+  it("destroys the IndexedDB database and reopens without user-scoped records", async () => {
+    const web = await loadWeb();
+    const Store = web.BetaLocalStore as new (options: Record<string, unknown>) => {
+      saveDraft(draft: Record<string, unknown>): Promise<void>;
+      listDrafts(workspaceId: string): Promise<Array<Record<string, unknown>>>;
+      destroy(): Promise<void>;
+    };
+    const databaseName = `nexus-test-${crypto.randomUUID()}`;
+    const store = new Store({ databaseName });
+    await store.saveDraft({ workspace_id: "ws-1", entity_id: "draft-1", title: "Private", content: "Local", updated_at: "2026-08-23T00:00:00.000Z" });
+
+    await expect(store.destroy()).resolves.toBeUndefined();
+
+    const reopened = new Store({ databaseName });
+    stores.push(reopened);
+    await expect(reopened.listDrafts("ws-1")).resolves.toEqual([]);
+  });
+
+  it("reports a fake-indexeddb blocked delete while another connection remains open", async () => {
+    const web = await loadWeb();
+    const Store = web.BetaLocalStore as new (options: Record<string, unknown>) => {
+      saveDraft(draft: Record<string, unknown>): Promise<void>;
+      listDrafts(workspaceId: string): Promise<Array<Record<string, unknown>>>;
+      destroy(): Promise<void>;
+    };
+    const databaseName = `nexus-test-${crypto.randomUUID()}`;
+    const store = new Store({ databaseName });
+    await store.saveDraft({ workspace_id: "ws-1", entity_id: "draft-1", title: "Private", content: "Local", updated_at: "2026-08-23T00:00:00.000Z" });
+    const blocker = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(databaseName, 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+
+    await expect(store.destroy()).rejects.toThrow("IndexedDB database deletion was blocked");
+    blocker.close();
+
+    const reopened = new Store({ databaseName });
+    stores.push(reopened);
+    await expect(reopened.listDrafts("ws-1")).resolves.toEqual([]);
+  });
+
+  it("reports an IndexedDB delete request failure", async () => {
+    const web = await loadWeb();
+    const Store = web.BetaLocalStore as new (options: Record<string, unknown>) => {
+      saveDraft(draft: Record<string, unknown>): Promise<void>;
+      destroy(): Promise<void>;
+    };
+    const store = new Store({ databaseName: `nexus-test-${crypto.randomUUID()}` });
+    stores.push(store);
+    await store.saveDraft({ workspace_id: "ws-1", entity_id: "draft-1", title: "Private", content: "Local", updated_at: "2026-08-23T00:00:00.000Z" });
+    vi.spyOn(indexedDB, "deleteDatabase").mockImplementationOnce(() => {
+      const request = {
+        error: new Error("controlled delete failure"),
+        onsuccess: null,
+        onerror: null,
+        onblocked: null,
+      } as unknown as IDBOpenDBRequest;
+      queueMicrotask(() => request.onerror?.(new Event("error")));
+      return request;
+    });
+
+    await expect(store.destroy()).rejects.toThrow("controlled delete failure");
   });
 });

@@ -1,12 +1,18 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 import type { LocalDraft } from "../src/data/local-store";
 import { AdaptiveWorkbench } from "../src/layout/AdaptiveWorkbench";
 import { ProductNavigation, type ProductDomain } from "../src/navigation/ProductNavigation";
 
 const user = { id: "u1", email: "u@example.test", displayName: "用户" };
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  localStorage.clear();
+  sessionStorage.clear();
+});
 
 function navigationProps(overrides: Partial<Parameters<typeof ProductNavigation>[0]> = {}) {
   return {
@@ -147,7 +153,13 @@ describe("ProductNavigation", () => {
     expect(screen.getByRole("button", { name: "笔记" })).toHaveAttribute("aria-pressed", "false");
     const collaboration = screen.getByRole("button", { name: "协作" });
     expect(collaboration).not.toBeDisabled();
-    expect(collaboration).toHaveAttribute("aria-disabled", "true");
+    expect(collaboration).not.toHaveAttribute("aria-disabled");
+    expect(collaboration).toHaveClass("unavailable");
+    expect(collaboration).toHaveAccessibleDescription("协作功能当前未开启");
+    const descriptionId = collaboration.getAttribute("aria-describedby");
+    expect(descriptionId).toBeTruthy();
+    expect(document.getElementById(descriptionId!)).toHaveTextContent("协作功能当前未开启");
+    expect(screen.getByText("未开启")).toBeVisible();
     fireEvent.click(collaboration);
     expect(props.onChange).toHaveBeenCalledWith("collaboration");
   });
@@ -180,6 +192,7 @@ describe("ProductNavigation", () => {
     fireEvent.click(trigger);
     const menu = screen.getByRole("menu");
     const items = screen.getAllByRole("menuitem");
+    expect(menu).not.toContainElement(screen.getByText(user.email));
     expect(items.filter((item) => item.tabIndex === 0)).toHaveLength(1);
     expect(items[0]).toHaveFocus();
 
@@ -309,6 +322,9 @@ describe("App product navigation", () => {
     const localStore = durableDraftStore(order);
     const apiClient = noteFlowApi(serverCreate.promise);
     localStorage.setItem("nexus:database-pagination:ws-1", "user-state");
+    sessionStorage.setItem("nexus:active-pane:ws-1", "canvas");
+    localStorage.setItem("other:local-preference", "keep-local");
+    sessionStorage.setItem("other:session-preference", "keep-session");
     render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={localStore as any} turnstileSiteKey="test" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
@@ -336,6 +352,9 @@ describe("App product navigation", () => {
     expect(await screen.findByRole("main")).toHaveClass("auth-page");
     expect(order).toEqual(["write", "logout", "destroy-hidden", "authgate"]);
     expect(localStorage.getItem("nexus:database-pagination:ws-1")).toBeNull();
+    expect(sessionStorage.getItem("nexus:active-pane:ws-1")).toBeNull();
+    expect(localStorage.getItem("other:local-preference")).toBe("keep-local");
+    expect(sessionStorage.getItem("other:session-preference")).toBe("keep-session");
   });
 
   it("resumes authenticated editing and exposes a recoverable error when server logout fails", async () => {
@@ -387,6 +406,67 @@ describe("App product navigation", () => {
     await waitFor(() => expect(localStore.destroy).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(authClient.session).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole("main")).toHaveClass("auth-page");
+    expect(authClient.logout).toHaveBeenCalledOnce();
+  });
+
+  it("waits for every cleanup branch to settle before exposing one non-overlapping local retry", async () => {
+    const signedOut = Object.assign(new Error("Not authenticated"), { code: "UNAUTHENTICATED", status: 401 });
+    const authClient = {
+      session: vi.fn().mockResolvedValueOnce(authenticatedSession()).mockRejectedValueOnce(signedOut),
+      logout: vi.fn(async () => ({ logged_out: true })),
+      login: vi.fn(),
+    };
+    const firstDestroy = deferred<void>();
+    const retryDestroy = deferred<void>();
+    const localStore = draftStore();
+    localStore.destroy.mockImplementationOnce(() => firstDestroy.promise).mockImplementationOnce(() => retryDestroy.promise);
+    localStorage.setItem("nexus:cleanup-probe", "remove-me");
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementationOnce(() => {
+      throw new Error("browser storage blocked");
+    });
+    render(<App authClient={authClient as any} apiClient={appApiClient() as any} localStore={localStore as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "退出登录" }));
+    await waitFor(() => expect(localStore.destroy).toHaveBeenCalledOnce());
+    expect(screen.getByRole("heading", { name: "正在清理本地数据" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试清理本地数据" })).not.toBeInTheDocument();
+    expect(authClient.session).toHaveBeenCalledOnce();
+
+    firstDestroy.resolve();
+    const retry = await screen.findByRole("button", { name: "重试清理本地数据" });
+    act(() => {
+      retry.click();
+      retry.click();
+    });
+    await waitFor(() => expect(localStore.destroy).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("button", { name: "重试清理本地数据" })).not.toBeInTheDocument();
+    expect(authClient.logout).toHaveBeenCalledOnce();
+
+    retryDestroy.resolve();
+    await waitFor(() => expect(authClient.session).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("main")).toHaveClass("auth-page");
+    expect(localStorage.getItem("nexus:cleanup-probe")).toBeNull();
+    expect(localStore.destroy).toHaveBeenCalledTimes(2);
+    expect(authClient.logout).toHaveBeenCalledOnce();
+  });
+
+  it("treats a missing active local-store destroy capability as a blocking cleanup error", async () => {
+    const authClient = {
+      session: vi.fn(async () => authenticatedSession()),
+      logout: vi.fn(async () => ({ logged_out: true })),
+      login: vi.fn(),
+    };
+    const localStore = { ...draftStore(), destroy: undefined };
+    render(<App authClient={authClient as any} apiClient={appApiClient() as any} localStore={localStore as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "退出登录" }));
+
+    expect(await screen.findByRole("heading", { name: "本地数据清理失败" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "登录" })).not.toBeInTheDocument();
+    expect(authClient.session).toHaveBeenCalledOnce();
     expect(authClient.logout).toHaveBeenCalledOnce();
   });
 

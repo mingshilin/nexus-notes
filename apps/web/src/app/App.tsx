@@ -43,7 +43,7 @@ type AppRoute =
   | { kind: "workspace"; workspaceId?: string }
   | { kind: "invite"; token: string }
   | { kind: "share"; token: string };
-type UserScopedLocalStore = NoteDraftStore & { destroy?(): Promise<void> };
+type UserScopedLocalStore = NoteDraftStore & { destroy(): Promise<void> };
 type LogoutPhase = "idle" | "quiescing" | "cleanup" | "cleanup-error";
 
 function clearUserScopedBrowserState() {
@@ -1181,19 +1181,24 @@ export function App({
   useEffect(() => {
     if (logoutPhase !== "cleanup" || cleanupInFlight.current) return;
     cleanupInFlight.current = true;
-    void Promise.all([
-      Promise.resolve().then(clearUserScopedBrowserState),
-      Promise.resolve().then(() => activeLocalStore.destroy?.()),
-    ]).then(() => {
+    const browserStateCleanup = Promise.resolve().then(clearUserScopedBrowserState);
+    const localStoreCleanup = Promise.resolve().then(() => {
+      if (typeof activeLocalStore.destroy !== "function") {
+        throw new Error("Active local store cannot destroy user-scoped data");
+      }
+      return activeLocalStore.destroy();
+    });
+    void Promise.allSettled([browserStateCleanup, localStoreCleanup]).then((results) => {
       cleanupInFlight.current = false;
+      if (results.some((result) => result.status === "rejected")) {
+        setLogoutPhase("cleanup-error");
+        return;
+      }
       logoutAttempted.current = false;
       if (!localStore) setDefaultLocalStore(new BetaLocalStore());
       setLogoutError(null);
       setLogoutPhase("idle");
       setAuthGateVersion((version) => version + 1);
-    }, () => {
-      cleanupInFlight.current = false;
-      setLogoutPhase("cleanup-error");
     });
   }, [activeLocalStore, localStore, logoutPhase]);
   const logout = () => {

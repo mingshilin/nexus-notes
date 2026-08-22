@@ -109,15 +109,17 @@ export function AccountMenu({
         <span className="account-name">{user.displayName || user.email}</span>
       </button>
       {open && !modalOpen ? (
-        <div className="account-menu" ref={menuRef} role="menu" aria-label="账户菜单" onKeyDown={moveMenuFocus}>
+        <div className="account-menu">
           <div className="account-menu-identity">
             <strong>{user.displayName || "Nexus 用户"}</strong>
             <span>{user.email}</span>
           </div>
-          <button ref={(element) => { itemRefs.current[0] = element; }} type="button" role="menuitem" tabIndex={rovingIndex === 0 ? 0 : -1} onFocus={() => setActiveIndex(0)} onClick={() => runAction(onPersonalCenter)}><UserRound aria-hidden="true" size={16} />个人中心</button>
-          <button ref={(element) => { itemRefs.current[1] = element; }} type="button" role="menuitem" tabIndex={notificationsEnabled && rovingIndex === 1 ? 0 : -1} aria-label={notificationsEnabled ? `通知，${unreadCount} 条未读` : "通知，当前不可用"} aria-disabled={!notificationsEnabled || undefined} disabled={!notificationsEnabled} onFocus={() => setActiveIndex(1)} onClick={() => { if (notificationsEnabled) runAction(() => onNotifications(triggerRef.current!)); }}><Bell aria-hidden="true" size={16} />通知{notificationsEnabled ? unreadCount > 0 ? <span className="account-unread">{unreadCount}</span> : null : <span className="account-unavailable">暂不可用</span>}</button>
-          <button ref={(element) => { itemRefs.current[2] = element; }} type="button" role="menuitem" tabIndex={rovingIndex === 2 ? 0 : -1} onFocus={() => setActiveIndex(2)} onClick={() => runAction(onWorkspace)}><UsersRound aria-hidden="true" size={16} />工作区</button>
-          <button ref={(element) => { itemRefs.current[3] = element; }} className="account-menu-logout" type="button" role="menuitem" tabIndex={!logoutPending && rovingIndex === 3 ? 0 : -1} aria-disabled={logoutPending || undefined} disabled={logoutPending} onFocus={() => setActiveIndex(3)} onClick={() => runAction(onLogout)}><LogOut aria-hidden="true" size={16} />{logoutPending ? "正在退出…" : "退出登录"}</button>
+          <div className="account-menu-items" ref={menuRef} role="menu" aria-label="账户菜单" onKeyDown={moveMenuFocus}>
+            <button ref={(element) => { itemRefs.current[0] = element; }} type="button" role="menuitem" tabIndex={rovingIndex === 0 ? 0 : -1} onFocus={() => setActiveIndex(0)} onClick={() => runAction(onPersonalCenter)}><UserRound aria-hidden="true" size={16} />个人中心</button>
+            <button ref={(element) => { itemRefs.current[1] = element; }} type="button" role="menuitem" tabIndex={notificationsEnabled && rovingIndex === 1 ? 0 : -1} aria-label={notificationsEnabled ? `通知，${unreadCount} 条未读` : "通知，当前不可用"} aria-disabled={!notificationsEnabled || undefined} disabled={!notificationsEnabled} onFocus={() => setActiveIndex(1)} onClick={() => { if (notificationsEnabled) runAction(() => onNotifications(triggerRef.current!)); }}><Bell aria-hidden="true" size={16} />通知{notificationsEnabled ? unreadCount > 0 ? <span className="account-unread">{unreadCount}</span> : null : <span className="account-unavailable">暂不可用</span>}</button>
+            <button ref={(element) => { itemRefs.current[2] = element; }} type="button" role="menuitem" tabIndex={rovingIndex === 2 ? 0 : -1} onFocus={() => setActiveIndex(2)} onClick={() => runAction(onWorkspace)}><UsersRound aria-hidden="true" size={16} />工作区</button>
+            <button ref={(element) => { itemRefs.current[3] = element; }} className="account-menu-logout" type="button" role="menuitem" tabIndex={!logoutPending && rovingIndex === 3 ? 0 : -1} aria-disabled={logoutPending || undefined} disabled={logoutPending} onFocus={() => setActiveIndex(3)} onClick={() => runAction(onLogout)}><LogOut aria-hidden="true" size={16} />{logoutPending ? "正在退出…" : "退出登录"}</button>
+          </div>
         </div>
       ) : null}
     </div>
