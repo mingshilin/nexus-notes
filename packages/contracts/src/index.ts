@@ -8,6 +8,7 @@ export * from "./operations";
 export * from "./knowledge";
 export * from "./notes";
 export * from "./pagination";
+export * from "./profile";
 export * from "./request-policy";
 export * from "./sync";
 export * from "./tenancy";
