@@ -94,8 +94,46 @@ button { color: inherit; }
 .product-domain-page > h1 { margin: 10px 0 14px; font-size: clamp(38px, 5vw, 62px); letter-spacing: -.045em; }
 .product-domain-lead { max-width: 620px; margin: 0 0 38px; color: hsl(var(--muted-foreground)); font-size: 16px; line-height: 1.7; }
 .product-status-page { display: grid; align-content: center; padding-top: 50px; }
-.account-center-slot { display: grid; min-height: 180px; align-content: center; gap: 8px; border: 1px dashed color-mix(in srgb, var(--nexus-accent) 28%, var(--border-subtle)); border-radius: 22px; padding: 28px; color: hsl(var(--muted-foreground)); background: rgba(0,122,255,.035); }
+.account-center-slot { display: grid; min-height: 120px; align-content: center; gap: 8px; border: 1px dashed color-mix(in srgb, var(--nexus-accent) 28%, var(--border-subtle)); border-radius: 22px; padding: 28px; color: hsl(var(--muted-foreground)); background: rgba(0,122,255,.035); }
 .account-center-slot strong { color: hsl(var(--foreground)); font-size: 18px; }
+.account-tabs { display: flex; gap: 6px; overflow-x: auto; margin: 0 0 28px; padding: 5px; border: 1px solid var(--border-subtle); border-radius: 15px; background: color-mix(in srgb, var(--surface-elevated) 86%, transparent); }
+.account-tabs button { min-height: 38px; flex: 1 0 auto; border: 0; border-radius: 10px; padding: 7px 15px; color: hsl(var(--muted-foreground)); background: transparent; cursor: pointer; font-weight: 700; }
+.account-tabs button[aria-selected="true"] { color: white; background: var(--nexus-accent); box-shadow: 0 6px 15px rgba(0,122,255,.18); }
+.account-tabs button:focus-visible, .account-panel button:focus-visible, .account-panel input:focus-visible, .account-panel textarea:focus-visible { outline: 3px solid rgba(0,122,255,.27); outline-offset: 2px; }
+.account-panel { display: grid; gap: 22px; }
+.account-panel-heading, .account-subpanel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.account-panel-heading h2, .account-subpanel-heading h3 { margin: 7px 0; }
+.account-panel-heading p:not(.eyebrow), .account-subpanel > p, .account-panel > p { color: hsl(var(--muted-foreground)); line-height: 1.65; }
+.profile-avatar-preview, .profile-avatar-fallback { width: 72px; height: 72px; flex: 0 0 auto; border-radius: 22px; object-fit: cover; }
+.profile-avatar-fallback { display: grid; place-items: center; color: white; background: #111827; font-size: 28px; font-weight: 750; }
+.account-form { display: grid; gap: 14px; }
+.account-form label { display: grid; gap: 7px; color: hsl(var(--muted-foreground)); font-size: 12px; font-weight: 700; }
+.account-form input, .account-form textarea, .account-subpanel input[type="file"] { width: 100%; border: 1px solid var(--border-subtle); border-radius: 11px; padding: 10px 12px; color: hsl(var(--foreground)); background: var(--surface-elevated); font: inherit; }
+.account-form textarea { min-height: 100px; resize: vertical; }
+.account-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.account-form button, .account-actions button, .account-error-row button, .account-subpanel-heading button { width: fit-content; min-height: 35px; border: 1px solid var(--border-subtle); border-radius: 10px; padding: 7px 13px; color: hsl(var(--foreground)); background: var(--surface-elevated); cursor: pointer; font-weight: 700; }
+.account-form button[type="submit"], .account-actions button:last-child { color: white; border-color: var(--nexus-accent); background: var(--nexus-accent); }
+.account-panel button:disabled { cursor: not-allowed; opacity: .5; }
+.account-subpanel { display: grid; gap: 13px; padding: 20px; border: 1px solid var(--border-subtle); border-radius: 18px; background: color-mix(in srgb, var(--surface-elevated) 72%, transparent); }
+.account-subpanel h3 { margin: 0; }
+.account-subpanel-heading { align-items: center; }
+.account-subpanel-heading button { min-height: 29px; padding: 4px 9px; font-size: 11px; }
+.account-muted, .account-file-name, .account-session-row span, .account-session-row small { color: hsl(var(--muted-foreground)); font-size: 12px; }
+.account-error, .account-error-row p { margin: 0; color: hsl(var(--destructive)); line-height: 1.5; }
+.account-status, .account-inline-status { margin: 0; color: #14804a; line-height: 1.5; }
+.account-error-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.account-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+.account-session-list { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.account-session-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 13px 0; border-top: 1px solid var(--border-subtle); }
+.account-session-row > div { display: grid; min-width: 0; gap: 4px; }
+.account-session-row strong { font-size: 13px; }
+.account-session-row small { line-height: 1.45; }
+.account-session-row button { flex: 0 0 auto; border: 0; border-radius: 9px; padding: 7px 9px; color: hsl(var(--destructive)); background: color-mix(in srgb, hsl(var(--destructive)) 8%, transparent); cursor: pointer; }
+.account-session-badge { flex: 0 0 auto; border-radius: 99px; padding: 4px 8px; color: #14804a; background: rgba(20,128,74,.1); font-size: 11px; font-weight: 750; }
+.account-dialog-backdrop { position: fixed; inset: 0; z-index: 55; display: grid; place-items: center; padding: 20px; background: rgba(15,23,42,.22); }
+.account-confirm-dialog { width: min(430px, 100%); display: grid; gap: 14px; padding: 23px; border: 1px solid var(--border-subtle); border-radius: 18px; background: var(--surface-overlay); box-shadow: var(--shadow-lg); }
+.account-confirm-dialog h3, .account-confirm-dialog p { margin: 0; }
+.account-confirm-dialog > p:not(.account-error) { color: hsl(var(--muted-foreground)); line-height: 1.6; }
 .logout-error-banner { position: fixed; top: max(12px, env(safe-area-inset-top)); left: 50%; z-index: 60; display: flex; max-width: min(560px, calc(100% - 28px)); align-items: center; gap: 14px; padding: 11px 12px 11px 16px; transform: translateX(-50%); border: 1px solid color-mix(in srgb, hsl(var(--destructive)) 24%, var(--border-subtle)); border-radius: 14px; color: hsl(var(--destructive)); background: var(--surface-overlay); box-shadow: var(--shadow-md); backdrop-filter: blur(18px); font-size: 12px; }
 .logout-error-banner button { flex: 0 0 auto; border: 0; border-radius: 10px; padding: 7px 10px; color: white; background: hsl(var(--destructive)); cursor: pointer; }
 .editor-copy h1 { max-width: 700px; margin: 11px 0 16px; font-size: clamp(36px, 5vw, 64px); line-height: 1.06; letter-spacing: -0.045em; }

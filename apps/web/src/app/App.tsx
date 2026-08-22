@@ -6,9 +6,11 @@ import {
   Sparkles,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import type { Attachment, AuthUserSummary, Database, DatabaseRecord, KnowledgeDiagnostic, Note, WorkspaceRoleContract } from "@nexus/contracts";
+import type { Attachment, AuthUserSummary, Database, DatabaseRecord, KnowledgeDiagnostic, Note, Profile, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient } from "../data/api-client";
+import { ProfileClient } from "../data/profile-client";
+import { AccountCenter } from "../account";
 import { CollaborationClient } from "../data/collaboration-client";
 import { KnowledgeClient } from "../data/knowledge-client";
 import { NotesClient } from "../data/notes-client";
@@ -139,6 +141,8 @@ function routeFromLocation(): AppRoute {
 function AuthenticatedWorkspace({
   apiClient,
   workspaceId,
+  workspaces,
+  activeWorkspaceId,
   user,
   role,
   collaborationEnabled,
@@ -152,6 +156,8 @@ function AuthenticatedWorkspace({
 }: {
   apiClient: ApiClient;
   workspaceId?: string;
+  workspaces: WorkspaceMembershipSummary[];
+  activeWorkspaceId: string | null;
   user: AuthUserSummary;
   role: WorkspaceRoleContract;
   collaborationEnabled: boolean;
@@ -168,6 +174,8 @@ function AuthenticatedWorkspace({
   const [activeDomain, setActiveDomain] = useState<ProductDomain>("notes");
   const [accountSubsection, setAccountSubsection] = useState<AccountSubsection>("personal");
   const [collaborationClient] = useState(() => new CollaborationClient(apiClient, workspaceId ?? ""));
+  const [profileClient] = useState(() => new ProfileClient(apiClient));
+  const [navigationUser, setNavigationUser] = useState(user);
   const [unreadCount, setUnreadCount] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [notes, setNotes] = useState<Note[]>([]);
@@ -816,13 +824,19 @@ function AuthenticatedWorkspace({
     setActiveDomain(domain);
     setActivePane("canvas");
   };
+  useEffect(() => {
+    setNavigationUser((current) => current.id === user.id && current.email === user.email && current.displayName === user.displayName ? current : user);
+  }, [user.displayName, user.email, user.id]);
+  const handleProfileChange = (next: Profile) => {
+    setNavigationUser((current) => ({ ...current, email: next.email, displayName: next.display_name || next.email }));
+  };
   const openAccountSubsection = (subsection: AccountSubsection) => {
     setAccountSubsection(subsection);
     changeDomain("account");
   };
   const productNavigationProps = {
     active: activeDomain,
-    user,
+    user: navigationUser,
     unreadCount,
     collaborationEnabled,
     notificationsEnabled: Boolean(collaborationEnabled && workspaceId),
@@ -953,15 +967,15 @@ function AuthenticatedWorkspace({
     </section>
   );
   const accountCanvas = (
-    <section className="product-domain-page account-center-shell" data-account-subsection={accountSubsection}>
-      <p className="eyebrow">ACCOUNT CENTER</p>
-      <h1>账户中心</h1>
-      <p className="product-domain-lead">{accountSubsection === "workspace" ? "工作区设置将在后续任务中提供。" : "个人中心将在后续任务中提供。"}</p>
-      <div className="account-center-slot" aria-label={accountSubsection === "workspace" ? "工作区设置预留区域" : "个人中心预留区域"}>
-        <strong>{accountSubsection === "workspace" ? "工作区" : "个人中心"}</strong>
-        <span>此区域由 Product Completion Tasks 9-10 补充。</span>
-      </div>
-    </section>
+    <AccountCenter
+      client={profileClient}
+      workspaces={workspaces}
+      activeWorkspaceId={activeWorkspaceId}
+      initialTab={accountSubsection === "workspace" ? "workspace" : "profile"}
+      onWorkspaceChange={() => undefined}
+      onDeleted={() => undefined}
+      onProfileChange={handleProfileChange}
+    />
   );
   const collaborationUnavailableCanvas = (
     <section className="product-domain-page product-status-page">
@@ -1249,6 +1263,8 @@ export function App({
             key={activeWorkspaceId ?? "no-active-workspace"}
             apiClient={apiClient}
             workspaceId={activeWorkspaceId ?? undefined}
+            workspaces={memberships}
+            activeWorkspaceId={activeWorkspaceId}
             user={{ ...session.user, displayName: session.user.displayName || session.user.email }}
             role={activeWorkspace?.role ?? "viewer"}
             collaborationEnabled={Boolean(activeWorkspace)}

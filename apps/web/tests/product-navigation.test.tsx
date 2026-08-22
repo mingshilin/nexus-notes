@@ -291,8 +291,36 @@ describe("App product navigation", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
     expect(screen.getByRole("heading", { name: "账户中心" })).toBeInTheDocument();
-    expect(screen.getByText("个人中心将在后续任务中提供。" )).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "个人资料" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "个人中心" }));
+    expect(screen.getByRole("tab", { name: "个人资料" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    expect(screen.getByRole("tab", { name: "工作区" })).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByRole("heading", { name: "Public Beta 重写计划" })).not.toBeInTheDocument();
+  });
+
+  it("updates the navigation identity from the returned profile", async () => {
+    const profile = { id: "u1", email: "u@example.test", display_name: "用户", biography: "", locale: "zh-CN", timezone: "Asia/Shanghai", avatar_url: null, updated_at: "2026-08-22T00:00:00.000Z" };
+    const updated = { ...profile, display_name: "导航用户", updated_at: "2026-08-23T00:00:00.000Z" };
+    const apiClient = {
+      request: vi.fn(async (request: { path: string; method?: string }) => {
+        if (request.path === "/api/v2/profile" && request.method === "GET") return profile;
+        if (request.path === "/api/v2/profile" && request.method === "PATCH") return updated;
+        if (request.path === "/api/v2/profile/sessions") return { items: [] };
+        if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+        return { items: [], next_cursor: null };
+      }),
+    };
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
+    await waitFor(() => expect(screen.getByLabelText("昵称")).toHaveValue("用户"));
+    fireEvent.change(screen.getByLabelText("昵称"), { target: { value: "导航用户" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存个人资料" }));
+    await waitFor(() => expect(screen.getByText("导航用户")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    expect(screen.getAllByText("导航用户")).toHaveLength(2);
   });
 
   it("renders honest unavailable collaboration and real available database/collaboration domains", async () => {
