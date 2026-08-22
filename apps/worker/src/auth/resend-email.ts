@@ -33,6 +33,14 @@ export class ResendEmailSender {
     });
   }
 
+  sendEmailChange(email: string, code: string) {
+    return this.send({
+      to: email,
+      subject: "确认你的 Nexus Notes 新邮箱",
+      text: `你的邮箱变更验证码是 ${code}。验证码将在 15 分钟后失效。`,
+    });
+  }
+
   private async send(message: { to: string; subject: string; text: string }) {
     if (!this.apiKey) throw new Error("RESEND_API_KEY is not configured");
     let response: Response;

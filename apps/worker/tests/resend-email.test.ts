@@ -44,6 +44,30 @@ describe("ResendEmailSender", () => {
     expect(body.text).not.toContain("?token=");
   });
 
+  it("sends the email-change code without including other credentials", async () => {
+    const worker = (await import("../src/index")) as WorkerExports;
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 202 }));
+    const Sender = worker.ResendEmailSender as new (...args: any[]) => {
+      sendEmailChange(email: string, code: string): Promise<void>;
+    };
+    const sender = new Sender(
+      "resend-secret-that-must-not-be-delivered",
+      "Nexus Notes <noreply@example.com>",
+      "https://beta.example.com",
+      fetchImpl,
+    );
+
+    await sender.sendEmailChange("private@example.com", "654321");
+
+    const body = JSON.parse(fetchImpl.mock.calls[0][1]!.body as string) as { to: string; subject: string; text: string };
+    expect(body).toMatchObject({
+      to: "private@example.com",
+      subject: "确认你的 Nexus Notes 新邮箱",
+      text: "你的邮箱变更验证码是 654321。验证码将在 15 分钟后失效。",
+    });
+    expect(JSON.stringify(body)).not.toContain("resend-secret-that-must-not-be-delivered");
+  });
+
   it("emits only the provider status when delivery is rejected", async () => {
     const worker = (await import("../src/index")) as WorkerExports;
     const logs: string[] = [];
