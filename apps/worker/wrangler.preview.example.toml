@@ -19,6 +19,7 @@ APP_BASE_URL = "https://nexus-notes-public-beta-preview.example.workers.dev"
 AI_ENABLED = "false"
 CORS_ALLOWED_ORIGINS = "https://nexus-notes-public-beta-preview.example.workers.dev"
 DEPLOYMENT_VERSION = "development"
+EMAIL_FROM = "Nexus Notes <noreply@your-verified-domain.example>"
 
 [[d1_databases]]
 binding = "DB"

@@ -118,4 +118,96 @@ describe("AuthPanel", () => {
       delete window.turnstile;
     }
   });
+
+  it("resets a consumed verification token once after a resend success", async () => {
+    const web = await loadWeb();
+    const AuthPanel = web.AuthPanel as any;
+    let challengeCallback!: (token: string) => void;
+    const turnstile = {
+      render: vi.fn((_container: unknown, options: { callback(token: string): void }) => {
+        challengeCallback = options.callback;
+        return `widget-${turnstile.render.mock.calls.length + 1}`;
+      }),
+      remove: vi.fn(),
+    };
+    window.turnstile = turnstile as any;
+    const client = { resendVerification: vi.fn(async () => ({ accepted: true })) };
+    try {
+      render(<AuthPanel client={client} onAuthenticated={vi.fn()} turnstileSiteKey="test-site-key" />);
+      fireEvent.click(screen.getByRole("button", { name: "验证邮箱" }));
+      fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "user@example.com" } });
+      await waitFor(() => expect(turnstile.render).toHaveBeenCalledOnce());
+      act(() => challengeCallback("single-use-token"));
+      fireEvent.click(screen.getByRole("button", { name: "重新发送验证码" }));
+
+      await waitFor(() => expect(client.resendVerification).toHaveBeenCalledOnce());
+      await waitFor(() => expect(turnstile.render).toHaveBeenCalledTimes(2));
+    } finally {
+      delete window.turnstile;
+    }
+  });
+
+  it("resets a consumed verification token after a resend failure", async () => {
+    const web = await loadWeb();
+    const AuthPanel = web.AuthPanel as any;
+    let challengeCallback!: (token: string) => void;
+    const turnstile = {
+      render: vi.fn((_container: unknown, options: { callback(token: string): void }) => {
+        challengeCallback = options.callback;
+        return `widget-${turnstile.render.mock.calls.length + 1}`;
+      }),
+      remove: vi.fn(),
+    };
+    window.turnstile = turnstile as any;
+    const client = { resendVerification: vi.fn(async () => { throw new Error("temporary failure"); }) };
+    try {
+      render(<AuthPanel client={client} onAuthenticated={vi.fn()} turnstileSiteKey="test-site-key" />);
+      fireEvent.click(screen.getByRole("button", { name: "验证邮箱" }));
+      fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "user@example.com" } });
+      await waitFor(() => expect(turnstile.render).toHaveBeenCalledOnce());
+      act(() => challengeCallback("single-use-token"));
+      fireEvent.click(screen.getByRole("button", { name: "重新发送验证码" }));
+
+      await waitFor(() => expect(client.resendVerification).toHaveBeenCalledOnce());
+      await waitFor(() => expect(turnstile.render).toHaveBeenCalledTimes(2));
+    } finally {
+      delete window.turnstile;
+    }
+  });
+
+  it("does not send duplicate verification requests while the first resend is pending", async () => {
+    const web = await loadWeb();
+    const AuthPanel = web.AuthPanel as any;
+    let challengeCallback!: (token: string) => void;
+    let resolveResend!: () => void;
+    const resendPending = new Promise<{ accepted: true }>((resolve) => {
+      resolveResend = () => resolve({ accepted: true });
+    });
+    const turnstile = {
+      render: vi.fn((_container: unknown, options: { callback(token: string): void }) => {
+        challengeCallback = options.callback;
+        return "widget-1";
+      }),
+      remove: vi.fn(),
+    };
+    window.turnstile = turnstile as any;
+    const client = { resendVerification: vi.fn(() => resendPending) };
+    try {
+      render(<AuthPanel client={client} onAuthenticated={vi.fn()} turnstileSiteKey="test-site-key" />);
+      fireEvent.click(screen.getByRole("button", { name: "验证邮箱" }));
+      fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "user@example.com" } });
+      await waitFor(() => expect(turnstile.render).toHaveBeenCalledOnce());
+      act(() => challengeCallback("single-use-token"));
+
+      const resend = screen.getByRole("button", { name: "重新发送验证码" });
+      resend.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      resend.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+      expect(client.resendVerification).toHaveBeenCalledTimes(1);
+      resolveResend();
+      await waitFor(() => expect(screen.getByRole("button", { name: "重新发送验证码" })).toBeDisabled());
+    } finally {
+      delete window.turnstile;
+    }
+  });
 });

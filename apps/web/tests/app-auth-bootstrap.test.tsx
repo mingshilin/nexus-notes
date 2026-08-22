@@ -51,8 +51,11 @@ describe("App authentication bootstrap", () => {
 
     render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
 
-    await waitFor(() => expect(apiClient.request).toHaveBeenCalledTimes(2));
-    expect(apiClient.request.mock.calls.every(([request]: [{ headers: Record<string, string> }]) => request.headers["x-workspace-id"] === "server-workspace")).toBe(true);
+    const recoveryRequests = () => apiClient.request.mock.calls
+      .map(([request]) => request as { path: string; headers: Record<string, string> })
+      .filter((request) => request.path.startsWith("/api/v2/attachments") || request.path.startsWith("/api/v2/knowledge/diagnostics"));
+    await waitFor(() => expect(recoveryRequests()).toHaveLength(2));
+    expect(recoveryRequests().every((request) => request.headers["x-workspace-id"] === "server-workspace")).toBe(true);
   });
 
   it("mounts live attachment recovery for the active workspace", async () => {
@@ -103,13 +106,16 @@ describe("App authentication bootstrap", () => {
     const apiClient = { request: vi.fn(() => new Promise(() => undefined)) };
     const { rerender } = render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
 
-    await waitFor(() => expect(apiClient.request).toHaveBeenCalledTimes(2));
-    const staleSignal = apiClient.request.mock.calls[0]?.[0].policy.signal as AbortSignal;
+    const recoveryRequests = () => apiClient.request.mock.calls
+      .map(([request]) => request as { path: string; headers: Record<string, string>; policy: { signal?: AbortSignal } })
+      .filter((request) => request.path.startsWith("/api/v2/attachments") || request.path.startsWith("/api/v2/knowledge/diagnostics"));
+    await waitFor(() => expect(recoveryRequests()).toHaveLength(2));
+    const staleSignal = recoveryRequests()[0]?.policy.signal as AbortSignal;
     rerender(<App authClient={refreshedAuthClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
 
-    await waitFor(() => expect(apiClient.request).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(recoveryRequests()).toHaveLength(4));
     expect(staleSignal.aborted).toBe(true);
-    expect(apiClient.request.mock.calls.slice(2).every(([request]: [{ headers: Record<string, string> }]) => request.headers["x-workspace-id"] === "ws-2")).toBe(true);
+    expect(recoveryRequests().slice(2).every((request) => request.headers["x-workspace-id"] === "ws-2")).toBe(true);
   });
 
   it("aborts old attachment pagination and ignores its controlled late page after a workspace remount", async () => {

@@ -28,7 +28,7 @@ describe("online deploy readiness", () => {
         return new Response(new Uint8Array(10), { status: 200 });
       }
       if (url === `${baseUrl}/api/v2/health`) {
-        return new Response(JSON.stringify({ success: true, data: { status: "ok", version: "preview" } }), {
+        return new Response(JSON.stringify({ success: true, data: { status: "ok", version: "preview", ocr: "ready" } }), {
           status: 200,
           headers: { "content-type": "application/json", ...securityHeaders },
         });
@@ -40,7 +40,9 @@ describe("online deploy readiness", () => {
     const result = await checkRemoteDeploy(baseUrl);
 
     expect(result.healthPath).toBe("/api/v2/health");
-    expect(result.healthConfigured).toBe(false);
+    expect("healthConfigured" in result).toBe(false);
+    expect(result.healthStatus).toBe("ok");
+    expect(result.healthOcr).toBe("ready");
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain(`${baseUrl}/api/v2/health`);
   });
 });

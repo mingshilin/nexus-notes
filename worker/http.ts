@@ -8,6 +8,20 @@ export type ApiResponse<T> =
   | { success: true; data: T; meta?: Record<string, unknown> }
   | { success: false; error: ApiErrorBody };
 
+const contentSecurityPolicy = [
+  "default-src 'self'",
+  "script-src 'self' https://challenges.cloudflare.com",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: https:",
+  "connect-src 'self' https://challenges.cloudflare.com https://*.challenges.cloudflare.com",
+  "font-src 'self' data:",
+  "frame-src https://challenges.cloudflare.com https://*.challenges.cloudflare.com",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+].join("; ");
+
 export class HttpError extends Error {
   public readonly status: number;
   public readonly code: string;
@@ -104,5 +118,16 @@ export function corsHeaders() {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+  };
+}
+
+export function securityHeaders() {
+  return {
+    "Content-Security-Policy": contentSecurityPolicy,
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    "X-Frame-Options": "DENY",
   };
 }

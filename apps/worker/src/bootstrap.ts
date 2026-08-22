@@ -59,6 +59,22 @@ function clientIp(request: Request) {
     ?? "0.0.0.0";
 }
 
+function allowedTurnstileHostnames(env: BetaWorkerEnv) {
+  const hostnames = new Set<string>();
+  const origins = [env.APP_BASE_URL, ...(env.CORS_ALLOWED_ORIGINS?.split(",") ?? [])];
+  for (const origin of origins) {
+    try {
+      const url = new URL(origin.trim());
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        hostnames.add(url.hostname);
+      }
+    } catch {
+      // Ignore malformed optional CORS entries; the configured base URL still applies.
+    }
+  }
+  return [...hostnames];
+}
+
 async function rateLimitKey(
   policy: { bucket: "ip" | "account" | "workspace" },
   context: GatewayHookContext<BetaWorkerEnv>,
@@ -78,13 +94,14 @@ export interface BetaWorkerOptions {
   analytics?: ObservabilityAnalytics;
 }
 
-function createAuthService(env: BetaWorkerEnv) {
+function createAuthService(env: BetaWorkerEnv, logger?: ObservabilityLogger) {
   const authTokens = secureTokens(env.RATE_LIMIT_SECRET, "auth");
   return new AuthService({
     repository: new D1AuthRepository(env.DB),
-    turnstile: new TurnstileVerifier(env.TURNSTILE_SECRET_KEY),
+    logger,
+    turnstile: new TurnstileVerifier(env.TURNSTILE_SECRET_KEY, fetch, allowedTurnstileHostnames(env), logger),
     risk: new D1LoginRiskService(env.DB, secureTokens(env.RATE_LIMIT_SECRET, "login-risk")),
-    email: new ResendEmailSender(env.RESEND_API_KEY, env.EMAIL_FROM, env.APP_BASE_URL),
+    email: new ResendEmailSender(env.RESEND_API_KEY, env.EMAIL_FROM, env.APP_BASE_URL, fetch, logger),
     password: new WebCryptoPasswordHasher(),
     tokens: authTokens,
     clock: () => new Date(),
@@ -234,7 +251,7 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
     },
   });
   registry.register(healthRoute);
-  registerAuthRoutes(registry, createAuthService);
+  registerAuthRoutes(registry, (env) => createAuthService(env, options.logger));
   registerNoteRoutes(registry, createNoteService);
   registerKnowledgeRoutes(registry, createKnowledgeService);
   registerTaxonomyRoutes(registry, createKnowledgeService);

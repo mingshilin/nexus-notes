@@ -1,5 +1,5 @@
 import { ArrowRight, KeyRound, Mail, ShieldCheck, Sparkles } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import type { ApiClientError } from "../data/api-client";
 import type { AuthClient, AuthUser } from "./auth-client";
 import { TurnstileWidget } from "./TurnstileWidget";
@@ -32,6 +32,19 @@ export function AuthPanel({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const requestInFlightRef = useRef(false);
+
+  const beginRequest = () => {
+    if (requestInFlightRef.current) return false;
+    requestInFlightRef.current = true;
+    setBusy(true);
+    return true;
+  };
+
+  const finishRequest = () => {
+    requestInFlightRef.current = false;
+    setBusy(false);
+  };
 
   const selectMode = (next: AuthMode) => {
     setMode(next);
@@ -51,24 +64,24 @@ export function AuthPanel({
         : "register";
 
   const resendVerification = async () => {
-    setBusy(true);
+    if (!beginRequest()) return;
     setError("");
     setMessage("");
     try {
       await client.resendVerification({ email, turnstileToken });
       setMessage("如果该邮箱需要验证，新的验证码会很快送达。");
-      setTurnstileToken("");
-      setTurnstileVersion((version) => version + 1);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "验证码发送失败，请稍后重试。");
     } finally {
-      setBusy(false);
+      setTurnstileToken("");
+      setTurnstileVersion((version) => version + 1);
+      finishRequest();
     }
   };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    setBusy(true);
+    if (!beginRequest()) return;
     setError("");
     try {
       if (mode === "login") {
@@ -101,7 +114,11 @@ export function AuthPanel({
         setError(caught instanceof Error ? caught.message : "操作失败，请稍后重试。");
       }
     } finally {
-      setBusy(false);
+      if (needsTurnstile) {
+        setTurnstileToken("");
+        setTurnstileVersion((version) => version + 1);
+      }
+      finishRequest();
     }
   };
 

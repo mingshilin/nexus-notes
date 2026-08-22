@@ -64,6 +64,15 @@ button { color: inherit; }
 .editor-copy p { color: color-mix(in srgb, hsl(var(--foreground)) 76%, transparent); font-size: 17px; line-height: 1.85; }
 .editor-copy .lead { color: hsl(var(--muted-foreground)); font-size: 20px; }
 .editor-copy hr { margin: 46px 0; border: 0; border-top: 1px solid var(--border-subtle); }
+.note-editor-field { display: grid; gap: 7px; margin: 18px 0; color: hsl(var(--muted-foreground)); font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.note-editor-field input, .note-editor-field textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--border-subtle); border-radius: 13px; padding: 12px 14px; outline: 0; color: hsl(var(--foreground)); background: rgba(255,255,255,.62); font-size: 16px; letter-spacing: 0; }
+.note-editor-field textarea { min-height: 220px; resize: vertical; line-height: 1.7; }
+.note-editor-field input:focus, .note-editor-field textarea:focus { border-color: rgba(0,122,255,.45); box-shadow: 0 0 0 3px rgba(0,122,255,.12); }
+.note-editor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 20px 0; }
+.note-editor-actions button { border: 0; border-radius: 11px; padding: 10px 16px; color: white; background: var(--nexus-accent); cursor: pointer; font-weight: 700; }
+.note-editor-actions button:disabled { cursor: not-allowed; opacity: .48; }
+.note-editor-actions p { margin: 0; font-size: 12px; }
+.note-content-preview { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; border: 1px solid var(--border-subtle); border-radius: 15px; background: rgba(255,255,255,.35); }
 .callout { display: flex; gap: 13px; margin-top: 30px; padding: 18px; border: 1px solid rgba(0,122,255,.16); border-radius: 18px; color: var(--nexus-accent); background: rgba(0,122,255,.06); }
 .callout p { margin: 0; font-size: 14px; }
 .knowledge-recovery { display: grid; min-width: 0; gap: 10px; padding: 16px 0; }

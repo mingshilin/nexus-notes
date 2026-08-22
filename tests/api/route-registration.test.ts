@@ -6,6 +6,7 @@ import worker, { type Env } from "../../worker";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const workerIndex = readFileSync(resolve(testDir, "../../worker/index.ts"), "utf8");
+const wranglerConfig = readFileSync(resolve(testDir, "../../wrangler.toml"), "utf8");
 
 describe("worker route registration", () => {
   it("keeps core database API routes wired", () => {
@@ -87,5 +88,15 @@ describe("worker route registration", () => {
 
     expect(response.status).toBe(200);
     expect(await response.text()).toContain("root");
+    expect(response.headers.get("content-security-policy")).toContain("default-src 'self'");
+    expect(response.headers.get("strict-transport-security")).toContain("max-age=31536000");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
+    expect(response.headers.get("permissions-policy")).toContain("camera=()");
+    expect(response.headers.get("x-frame-options")).toBe("DENY");
+  });
+
+  it("runs the Worker before every static asset so security headers are applied", () => {
+    expect(wranglerConfig).toContain('run_worker_first = ["/*"]');
   });
 });

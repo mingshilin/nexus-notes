@@ -39,11 +39,16 @@ function equalBytes(left: Uint8Array, right: Uint8Array) {
   return difference === 0;
 }
 
+export const WORKERS_MAX_PBKDF2_ITERATIONS = 100_000;
+
 export class WebCryptoPasswordHasher {
   private readonly iterations: number;
 
   constructor(options: { iterations?: number } = {}) {
-    this.iterations = options.iterations ?? 210_000;
+    this.iterations = Math.min(
+      Math.max(1, Math.floor(options.iterations ?? WORKERS_MAX_PBKDF2_ITERATIONS)),
+      WORKERS_MAX_PBKDF2_ITERATIONS,
+    );
   }
 
   async hash(password: string) {

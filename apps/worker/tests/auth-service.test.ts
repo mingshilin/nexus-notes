@@ -57,6 +57,36 @@ describe("AuthService", () => {
     expect(dependencies.email.sendVerification).toHaveBeenCalledWith("user@example.com", "123456");
   });
 
+  it("reports only the failed registration stage when a dependency throws", async () => {
+    const worker = await loadWorker();
+    const logs: string[] = [];
+    const dependencies = createDependencies({
+      logger: { log: (message: string) => logs.push(message) },
+      password: { hash: vi.fn(async () => { throw new TypeError("crypto unavailable"); }), verify: vi.fn(async () => true) },
+    });
+    const AuthService = worker.AuthService as new (dependencies: Record<string, unknown>) => {
+      register(input: Record<string, unknown>): Promise<Record<string, unknown>>;
+    };
+
+    await expect(new AuthService(dependencies).register({
+      email: "private@example.com",
+      password: "password-that-must-not-be-logged",
+      displayName: "Private",
+      turnstileToken: "token-that-must-not-be-logged",
+      ip: "203.0.113.1",
+    })).rejects.toThrow("crypto unavailable");
+
+    expect(JSON.parse(logs[0]!)).toMatchObject({
+      type: "auth.stage_failure",
+      flow: "register",
+      stage: "password_hash",
+      error_name: "TypeError",
+    });
+    expect(logs[0]).not.toContain("private@example.com");
+    expect(logs[0]).not.toContain("password-that-must-not-be-logged");
+    expect(logs[0]).not.toContain("token-that-must-not-be-logged");
+  });
+
   it("does not require Turnstile for a low-risk normal login and stores only the session hash", async () => {
     const worker = await loadWorker();
     const dependencies = createDependencies();

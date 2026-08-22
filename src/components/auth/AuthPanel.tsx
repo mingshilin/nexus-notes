@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Eye, EyeOff, ShieldCheck, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -158,11 +158,15 @@ export function AuthPanel({
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const requestInFlightRef = useRef(false);
 
   const turnstileConfigured = TURNSTILE_SITE_KEY.trim().length > 0;
   const needsTurnstile = mode === "register" || Boolean(effectiveResetToken) || manualResetMode || forgotPasswordMode;
   async function submit() {
-    setError(null);
+    if (requestInFlightRef.current) return;
+    requestInFlightRef.current = true;
+    try {
+      setError(null);
 
     const tokenForReset = effectiveResetToken ?? (manualResetMode ? normalizeToken(manualTokenInput) : null);
     if (forgotPasswordMode) {
@@ -227,10 +231,13 @@ export function AuthPanel({
       return;
     }
 
-    const pending = await onRegister({ email, password, turnstile_token: turnstileToken });
-    setVerificationState(pending);
-    setVerificationCode("");
-    setTurnstileToken("");
+      const pending = await onRegister({ email, password, turnstile_token: turnstileToken });
+      setVerificationState(pending);
+      setVerificationCode("");
+      setTurnstileToken("");
+    } finally {
+      requestInFlightRef.current = false;
+    }
   }
 
   const introText = effectiveResetToken || manualResetMode
@@ -386,13 +393,20 @@ export function AuthPanel({
                 className="w-full rounded-xl"
                 disabled={loading}
                 onClick={() => {
-                  onResendVerificationCode(verificationState.email)
-                    .then((pending) => {
+                  if (requestInFlightRef.current) return;
+                  requestInFlightRef.current = true;
+                  void (async () => {
+                    try {
+                      const pending = await onResendVerificationCode(verificationState.email);
                       setVerificationState(pending);
                       setVerificationCode("");
                       setError(null);
-                    })
-                    .catch((err) => setError(mapAuthError(err)));
+                    } catch (err) {
+                      setError(mapAuthError(err));
+                    } finally {
+                      requestInFlightRef.current = false;
+                    }
+                  })();
                 }}
               >
                 重新发送验证码

@@ -1,5 +1,5 @@
 import { buildClearSessionCookie, buildClearWorkspaceCookie, requireAuth } from "./auth";
-import { corsHeaders, HttpError, jsonError, jsonSuccess } from "./http";
+import { corsHeaders, HttpError, jsonError, jsonSuccess, securityHeaders } from "./http";
 import {
   handleForgotPassword,
   handleLogin,
@@ -154,7 +154,19 @@ function assertWorkspaceOwner(role: "owner" | "editor" | "viewer") {
 
 function withCors(response: Response) {
   const headers = new Headers(response.headers);
-  for (const [k, v] of Object.entries(corsHeaders())) {
+  for (const [k, v] of Object.entries({ ...securityHeaders(), ...corsHeaders() })) {
+    headers.set(k, v);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function withSecurityHeaders(response: Response) {
+  const headers = new Headers(response.headers);
+  for (const [k, v] of Object.entries(securityHeaders())) {
     headers.set(k, v);
   }
   return new Response(response.body, {
@@ -176,7 +188,7 @@ function withCookies(response: Response, cookies: string[]) {
 }
 
 function optionsResponse() {
-  return new Response(null, { status: 204, headers: corsHeaders() });
+  return new Response(null, { status: 204, headers: { ...securityHeaders(), ...corsHeaders() } });
 }
 
 async function handleAuth(request: Request, env: Env): Promise<ResponseWithCookies> {
@@ -869,7 +881,7 @@ export default {
       }
       const assetResponse = await env.ASSETS.fetch(request);
       if (assetResponse.status !== 404) {
-        return assetResponse;
+        return withSecurityHeaders(assetResponse);
       }
 
       // SPA fallback: support direct-open links like /reset-password and /verify-email
@@ -878,10 +890,10 @@ export default {
         const indexUrl = new URL(request.url);
         indexUrl.pathname = "/index.html";
         indexUrl.search = "";
-        return env.ASSETS.fetch(new Request(indexUrl.toString(), request));
+        return withSecurityHeaders(await env.ASSETS.fetch(new Request(indexUrl.toString(), request)));
       }
 
-      return assetResponse;
+      return withSecurityHeaders(assetResponse);
     } catch (error) {
       if (error instanceof HttpError) {
         return withCors(
