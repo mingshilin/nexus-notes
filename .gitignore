@@ -5,6 +5,8 @@ dist/
 .env
 .env.*
 !.env.example
+!.env.production
+!apps/web/.env.production
 *.tsbuildinfo
 *.log
 migrations/_tmp*.sql
