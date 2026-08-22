@@ -1,4 +1,5 @@
 import { normalizeEmail } from "@nexus/domain";
+import { CreateJobInputSchema, FeedbackInputSchema, type OperationsStatus } from "@nexus/contracts";
 import { AuthService } from "./auth/auth-service";
 import { SecureTokenService, WebCryptoPasswordHasher } from "./auth/crypto";
 import { D1AuthRepository } from "./auth/d1-auth-repository";
@@ -35,7 +36,10 @@ import { registerDatabaseRoutes } from "./routes/databases";
 import { D1CollaborationRepository } from "./collaboration/d1-collaboration-repository";
 import { registerCollaborationRoutes } from "./routes/collaboration";
 import { registerPresenceRoute } from "./routes/presence";
+import { registerOperationsRoutes } from "./routes/operations";
 import { createPresenceNotifier } from "./presence/presence-dispatcher";
+import { D1OperationsRepository } from "./operations/d1-operations-repository";
+import { OperationsOutboxDispatcher } from "./operations/operations-outbox-dispatcher";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -144,6 +148,34 @@ function createAttachmentService(env: BetaWorkerEnv) {
   });
 }
 
+function operationsStatus(env: BetaWorkerEnv): OperationsStatus {
+  const filesReady = typeof env.FILES?.get === "function"
+    && typeof env.FILES.put === "function"
+    && typeof env.FILES.delete === "function";
+  const storage = !env.FILES ? "unconfigured" : filesReady ? "ready" : "degraded";
+  return {
+    queue: typeof env.JOBS?.send === "function" ? "ready" : "unconfigured",
+    storage,
+    ocr: storage === "unconfigured" ? "unconfigured" : storage === "degraded" || typeof env.AI?.toMarkdown !== "function" ? "degraded" : "ready",
+    version: env.DEPLOYMENT_VERSION ?? "development",
+  };
+}
+
+function createOperationsService(env: BetaWorkerEnv) {
+  const repository = new D1OperationsRepository(env.DB);
+  return {
+    createJob: (context: { workspaceId: string; userId: string }, input: unknown, now: string) =>
+      repository.createJob(context, CreateJobInputSchema.parse(input), now),
+    getJob: (workspaceId: string, jobId: string) => repository.getJob(workspaceId, jobId),
+    listJobs: (workspaceId: string, limit?: number) => repository.listJobs(workspaceId, limit),
+    createFeedback: (context: { workspaceId: string; userId: string }, input: unknown, requestId: string, now: string) =>
+      repository.createFeedback(context, FeedbackInputSchema.parse(input), requestId, now),
+    listFeedback: (workspaceId: string, limit?: number) => repository.listFeedback(workspaceId, limit),
+    getUsage: (workspaceId: string) => repository.getUsage(workspaceId),
+    getStatus: () => operationsStatus(env),
+  };
+}
+
 function createOcrExtractor(env: BetaWorkerEnv) {
   return new OcrExtractor({
     files: {
@@ -210,6 +242,7 @@ export function createBetaWorker() {
     consumePublicSharePasswordAttempt,
   });
   registerPresenceRoute(registry);
+  registerOperationsRoutes(registry, createOperationsService);
 
   return {
     fetch(request: Request, env: BetaWorkerEnv) {
@@ -225,7 +258,10 @@ export function createBetaWorker() {
     async scheduled(_controller: ScheduledController, env: BetaWorkerEnv) {
       const repository = new D1AttachmentRepository(env.DB);
       await repository.recoverStaleOcrJobs(new Date().toISOString(), 50);
-      if (env.JOBS) await new OcrOutboxDispatcher(repository, env.JOBS).dispatch();
+      if (env.JOBS) {
+        await new OcrOutboxDispatcher(repository, env.JOBS).dispatch();
+        await new OperationsOutboxDispatcher(new D1OperationsRepository(env.DB), env.JOBS).dispatch();
+      }
     },
   };
 }

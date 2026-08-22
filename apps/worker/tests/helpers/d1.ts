@@ -12,6 +12,7 @@ export const migrationPaths = [
   "../../migrations/0006_structured_databases.sql",
   "../../migrations/0007_collaboration.sql",
   "../../migrations/0008_task8_backend_closure.sql",
+  "../../migrations/0009_task9_operations.sql",
 ];
 
 export function splitMigration(sql: string) {

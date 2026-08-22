@@ -4,6 +4,7 @@ export * from "./collaboration";
 export * from "./attachments";
 export * from "./databases";
 export * from "./jobs";
+export * from "./operations";
 export * from "./knowledge";
 export * from "./notes";
 export * from "./pagination";

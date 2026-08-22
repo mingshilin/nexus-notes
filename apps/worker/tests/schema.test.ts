@@ -6,6 +6,7 @@ const migrationPath = resolve(import.meta.dirname, "../migrations/0001_beta_sche
 const searchMigrationPath = resolve(import.meta.dirname, "../migrations/0002_search_document_sync.sql");
 const attachmentMigrationPath = resolve(import.meta.dirname, "../migrations/0003_private_attachments_ocr.sql");
 const consistencyMigrationPath = resolve(import.meta.dirname, "../migrations/0004_attachment_consistency.sql");
+const operationsMigrationPath = resolve(import.meta.dirname, "../migrations/0009_task9_operations.sql");
 
 describe("Beta D1 schema", () => {
   it("creates all public Beta domain tables", () => {
@@ -60,5 +61,14 @@ describe("Beta D1 schema", () => {
     expect(upgradeSql).toMatch(/source_revision INTEGER NOT NULL/i);
     expect(upgradeSql).toMatch(/UNIQUE \(workspace_id, attachment_id, source_revision\)/i);
     expect(upgradeSql).toMatch(/CREATE TABLE IF NOT EXISTS queue_outbox/i);
+  });
+
+  it("adds tenant-scoped operational jobs without rewriting the published schema", () => {
+    expect(existsSync(operationsMigrationPath)).toBe(true);
+    const sql = readFileSync(operationsMigrationPath, "utf8");
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS beta_jobs/i);
+    expect(sql).toMatch(/workspace_id TEXT NOT NULL REFERENCES workspaces/i);
+    expect(sql).toMatch(/UNIQUE \(workspace_id, idempotency_key\)/i);
+    expect(sql).toMatch(/kind TEXT NOT NULL CHECK \(kind IN \('index', 'import', 'export', 'email'\)\)/i);
   });
 });

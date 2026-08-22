@@ -14,7 +14,7 @@ describe("Task 8 collaboration migration", () => {
   });
 
   it("is additive and installs tenant, inbox, token, revision, and idempotency fields", async () => {
-    expect(migrationPaths.at(-1)).toBe("../../migrations/0008_task8_backend_closure.sql");
+    expect(migrationPaths).toContain("../../migrations/0008_task8_backend_closure.sql");
     const testDb = await createTestD1();
     try {
       const expectedColumns: Record<string, string[]> = {
