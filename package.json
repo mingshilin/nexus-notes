@@ -20,6 +20,7 @@
     "test:watch": "vitest --config vite.config.ts",
     "lint": "tsc --noEmit",
     "verify:deploy": "node scripts/verify-deploy-readiness.mjs",
+    "verify:preview": "node scripts/verify-preview-readiness.mjs",
     "verify:deploy:online": "node scripts/verify-deploy-readiness.mjs --online",
     "smoke:daily-visible": "node scripts/smoke-daily-log-visible.mjs",
     "test:e2e": "node scripts/smoke-beta-browser.mjs",

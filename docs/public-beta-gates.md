@@ -15,6 +15,7 @@ npm run test:perf
 npm run test:load
 npm audit --omit=dev
 npm run verify:deploy
+npm run verify:preview
 ```
 
 `test:e2e` and `test:a11y` use a real Chrome or Edge process through the Node CDP client. They do not create an authentication session and only validate the public shell, 390px layout, accessible names, horizontal overflow, and initial DOM timing. Run them against a local preview in a second terminal:
