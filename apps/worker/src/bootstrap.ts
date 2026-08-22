@@ -59,6 +59,22 @@ function clientIp(request: Request) {
     ?? "0.0.0.0";
 }
 
+function allowedTurnstileHostnames(env: BetaWorkerEnv) {
+  const hostnames = new Set<string>();
+  const origins = [env.APP_BASE_URL, ...(env.CORS_ALLOWED_ORIGINS?.split(",") ?? [])];
+  for (const origin of origins) {
+    try {
+      const url = new URL(origin.trim());
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        hostnames.add(url.hostname);
+      }
+    } catch {
+      // Ignore malformed optional CORS entries; the configured base URL still applies.
+    }
+  }
+  return [...hostnames];
+}
+
 async function rateLimitKey(
   policy: { bucket: "ip" | "account" | "workspace" },
   context: GatewayHookContext<BetaWorkerEnv>,
@@ -82,7 +98,7 @@ function createAuthService(env: BetaWorkerEnv) {
   const authTokens = secureTokens(env.RATE_LIMIT_SECRET, "auth");
   return new AuthService({
     repository: new D1AuthRepository(env.DB),
-    turnstile: new TurnstileVerifier(env.TURNSTILE_SECRET_KEY),
+    turnstile: new TurnstileVerifier(env.TURNSTILE_SECRET_KEY, fetch, allowedTurnstileHostnames(env)),
     risk: new D1LoginRiskService(env.DB, secureTokens(env.RATE_LIMIT_SECRET, "login-risk")),
     email: new ResendEmailSender(env.RESEND_API_KEY, env.EMAIL_FROM, env.APP_BASE_URL),
     password: new WebCryptoPasswordHasher(),

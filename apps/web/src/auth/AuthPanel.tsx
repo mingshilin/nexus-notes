@@ -57,11 +57,11 @@ export function AuthPanel({
     try {
       await client.resendVerification({ email, turnstileToken });
       setMessage("如果该邮箱需要验证，新的验证码会很快送达。");
-      setTurnstileToken("");
-      setTurnstileVersion((version) => version + 1);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "验证码发送失败，请稍后重试。");
     } finally {
+      setTurnstileToken("");
+      setTurnstileVersion((version) => version + 1);
       setBusy(false);
     }
   };
@@ -101,6 +101,10 @@ export function AuthPanel({
         setError(caught instanceof Error ? caught.message : "操作失败，请稍后重试。");
       }
     } finally {
+      if (needsTurnstile) {
+        setTurnstileToken("");
+        setTurnstileVersion((version) => version + 1);
+      }
       setBusy(false);
     }
   };
