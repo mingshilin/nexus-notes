@@ -22,7 +22,7 @@ import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
 import { DatabaseClient, type DatabaseBundle } from "../data/database-client";
 import { BetaLocalStore } from "../data/local-store";
-import { NoteDraftController, type NoteDraftStore } from "../notes/note-draft-controller";
+import { NoteDraftController, type DraftSyncResult, type NoteDraftStore } from "../notes/note-draft-controller";
 import { NormalizedCache } from "../data/normalized-cache";
 import {
   CollaborationCenter,
@@ -154,6 +154,7 @@ function AuthenticatedWorkspace({
   const [noteError, setNoteError] = useState<string | null>(null);
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
   const [serverRetryVersion, setServerRetryVersion] = useState(0);
+  const [pendingReconcile, setPendingReconcile] = useState<{ workspaceId: string; entityId: string; result: DraftSyncResult } | null>(null);
   const [selectedDatabaseRecordId, setSelectedDatabaseRecordId] = useState<string | null>(null);
   const [selectedCommentId, setSelectedCommentId] = useState<string | null>(null);
   const [collaborationInitialSection, setCollaborationInitialSection] = useState<"people" | "comments">("people");
@@ -317,23 +318,24 @@ function AuthenticatedWorkspace({
     }
   };
 
+  const installSyncedDraft = (syncedWorkspaceId: string, draftId: string, result: DraftSyncResult) => {
+    if (!mountedRef.current) return;
+    setNotes((current) => [result.note, ...current.filter((note) => note.id !== result.note.id)]);
+    setPendingReconcile({ workspaceId: syncedWorkspaceId, entityId: draftId, result });
+    if (activeDraftIdRef.current !== draftId) return;
+    setSelectedNoteId(result.note.id);
+    setCreatingNote(false);
+    setDraftTitle(result.note.title);
+    setDraftContent(result.note.content);
+    draftTitleRef.current = result.note.title;
+    draftContentRef.current = result.note.content;
+    setNoteMessage("已保存");
+  };
+
   useEffect(() => () => {
     mountedRef.current = false;
     void draftController.flush().catch(() => undefined);
   }, [draftController]);
-
-  useEffect(() => {
-    if (!workspaceId || !activeDraftId) return undefined;
-    const draftId = activeDraftId;
-    void draftController.save(workspaceId, draftId, draftTitle, draftContent).catch(() => {
-      if (mountedRef.current && activeDraftIdRef.current === draftId) {
-        setNoteError("本地草稿保存失败，当前内容仍保留在编辑器中。请重试。");
-      }
-    });
-    return () => {
-      void draftController.flush(workspaceId, draftId).catch(() => undefined);
-    };
-  }, [activeDraftId, draftContent, draftController, draftTitle, workspaceId]);
 
   useEffect(() => {
     if (!creatingNote) return;
@@ -355,18 +357,8 @@ function AuthenticatedWorkspace({
     let active = true;
     setNoteSaving(true);
     setNoteError(null);
-    void draftController.sync(workspaceId, draftId, new NotesClient(apiClient, workspaceId)).then((saved) => {
-      if (!active || !mountedRef.current || activeDraftIdRef.current !== draftId) return;
-      setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
-      setSelectedNoteId(saved.id);
-      setCreatingNote(false);
-      activeDraftIdRef.current = null;
-      setActiveDraftId(null);
-      setDraftTitle(saved.title);
-      setDraftContent(saved.content);
-      draftTitleRef.current = saved.title;
-      draftContentRef.current = saved.content;
-      setNoteMessage("已保存");
+    void draftController.sync(workspaceId, draftId, new NotesClient(apiClient, workspaceId)).then((result) => {
+      installSyncedDraft(workspaceId, draftId, result);
     }).catch(() => {
       if (active && mountedRef.current && activeDraftIdRef.current === draftId) {
         setNoteError("笔记同步失败，草稿仍保留在本地。请重试。");
@@ -379,6 +371,35 @@ function AuthenticatedWorkspace({
       void draftController.flush(workspaceId, draftId).catch(() => undefined);
     };
   }, [activeDraftId, apiClient, draftController, serverRetryVersion, workspaceId]);
+
+  useEffect(() => {
+    if (!pendingReconcile || !workspaceId || pendingReconcile.workspaceId !== workspaceId) return undefined;
+    if (!notes.some((note) => note.id === pendingReconcile.result.note.id)) return undefined;
+    const { entityId, result } = pendingReconcile;
+    let cancelled = false;
+    void draftController.reconcile(workspaceId, entityId, result).then((removed) => {
+      if (cancelled) return;
+      if (removed) {
+        setPendingReconcile(null);
+        if (activeDraftIdRef.current === entityId) {
+          activeDraftIdRef.current = null;
+          setActiveDraftId(null);
+        }
+        return;
+      }
+      setPendingReconcile(null);
+      void draftController.sync(workspaceId, entityId, new NotesClient(apiClient, workspaceId)).then((next) => {
+        installSyncedDraft(workspaceId, entityId, next);
+      }).catch(() => {
+        if (mountedRef.current && activeDraftIdRef.current === entityId) {
+          setNoteError("笔记同步失败，草稿仍保留在本地。请重试。");
+        }
+      });
+    }).catch(() => {
+      if (!cancelled) setNoteError("服务器已创建笔记，但本地草稿清理失败；内容仍已打开。请稍后重试。");
+    });
+    return () => { cancelled = true; };
+  }, [apiClient, draftController, notes, pendingReconcile, workspaceId]);
 
   const abortRecoveryRequests = () => {
     requestControllers.current.forEach((controller) => controller.abort());

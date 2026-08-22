@@ -1,4 +1,4 @@
-import { SyncOperationSchema, type SyncOperation } from "@nexus/contracts";
+import { SyncOperationSchema, type Note, type SyncOperation } from "@nexus/contracts";
 
 const DATABASE_VERSION = 1;
 
@@ -20,6 +20,19 @@ export interface LocalDraft {
   server_update_title?: string;
   server_update_content?: string;
   server_update_base_revision?: number;
+  server_note?: Note;
+  draft_generation?: number;
+  next_patch_generation?: number;
+  pending_patch?: PendingPatch;
+}
+
+export interface PendingPatch {
+  key: string;
+  generation: number;
+  base_revision: number;
+  title: string;
+  content: string;
+  source: "manual";
 }
 
 export interface QuerySnapshot {

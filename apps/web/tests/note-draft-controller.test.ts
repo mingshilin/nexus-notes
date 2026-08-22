@@ -38,6 +38,170 @@ const serverNote = (overrides: Partial<{ id: string; title: string; content: str
 });
 
 describe("NoteDraftController", () => {
+  it("serializes a three-save interleaving through one unconditional queue tail", async () => {
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let firstStarted!: () => void;
+    let secondStarted!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondBlocked = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const writes: string[] = [];
+    const store = createStore({
+      saveDraft: vi.fn(async (draft: LocalDraft) => {
+        writes.push(`start:${draft.title}`);
+        if (draft.title === "first") {
+          firstStarted();
+          await firstBlocked;
+        }
+        if (draft.title === "second") {
+          secondStarted();
+          await secondBlocked;
+        }
+        writes.push(`finish:${draft.title}`);
+      }),
+    });
+    const controller = new NoteDraftController(store);
+    const firstStartedPromise = new Promise<void>((resolve) => { firstStarted = resolve; });
+    const secondStartedPromise = new Promise<void>((resolve) => { secondStarted = resolve; });
+
+    const first = controller.save("ws-1", "local-1", "first", "1");
+    await firstStartedPromise;
+    const second = controller.save("ws-1", "local-1", "second", "2");
+    releaseFirst();
+    await secondStartedPromise;
+    const third = controller.save("ws-1", "local-1", "third", "3");
+
+    expect(writes).toEqual(["start:first", "finish:first", "start:second"]);
+    releaseSecond();
+    await Promise.all([first, second, third]);
+    expect(writes).toEqual([
+      "start:first", "finish:first", "start:second", "finish:second", "start:third", "finish:third",
+    ]);
+    expect(store.saveDraft.mock.calls.at(-1)?.[0]).toMatchObject({ title: "third", content: "3" });
+  });
+
+  it("returns the exact synchronized local version without deleting the draft", async () => {
+    const server = serverNote({ id: "server-1", title: "Server title", content: "Server body", revision: 4 });
+    const store = createStore();
+    await store.saveDraft({
+      workspace_id: "ws-1",
+      entity_id: "local-1",
+      title: "Server title",
+      content: "Server body",
+      updated_at: "2026-08-22T00:04:00.000Z",
+      draft_generation: 4,
+      server_note: server,
+      server_note_id: server.id,
+      server_revision: server.revision,
+      server_updated_at: server.updated_at,
+    });
+    const controller = new NoteDraftController(store);
+
+    const result = await controller.sync("ws-1", "local-1", {
+      create: vi.fn(),
+      update: vi.fn(),
+    });
+
+    expect(result.note).toEqual(server);
+    expect(result.draft).toMatchObject({ entity_id: "local-1", draft_generation: 4, server_note: server });
+    expect(result.generation).toBe(4);
+    expect(store.removeDraft).not.toHaveBeenCalled();
+  });
+
+  it("stages a PATCH from the persisted server snapshot after controller recreation", async () => {
+    const server = serverNote({ id: "server-1", title: "Before", content: "Before body", revision: 2 });
+    const store = createStore();
+    await store.saveDraft({
+      workspace_id: "ws-1", entity_id: "local-1", title: "After", content: "After body",
+      updated_at: "2026-08-22T00:05:00.000Z", draft_generation: 5,
+      server_note: server, server_note_id: server.id, server_revision: server.revision, server_updated_at: server.updated_at,
+      next_patch_generation: 1,
+    });
+    const update = vi.fn(async (_id: string, input: { title: string; content: string; base_revision: number }) => serverNote({
+      ...server, title: input.title, content: input.content, revision: 3,
+    }));
+    const controller = new NoteDraftController(store);
+
+    const result = await controller.sync("ws-1", "local-1", { create: vi.fn(), update });
+
+    expect(update).toHaveBeenCalledWith("server-1", expect.objectContaining({
+      base_revision: 2, title: "After", content: "After body",
+    }), expect.objectContaining({ idempotencyKey: expect.any(String) }));
+    expect(result.note).toMatchObject({ title: "After", content: "After body", revision: 3 });
+    expect(store.removeDraft).not.toHaveBeenCalled();
+  });
+
+  it("hydrates a legacy server-bound draft without POST before resuming reconciliation", async () => {
+    const server = serverNote({ id: "server-legacy", title: "Before", content: "Before body", revision: 2 });
+    const store = createStore();
+    await store.saveDraft({
+      workspace_id: "ws-1", entity_id: "local-legacy", title: "After", content: "After body",
+      updated_at: "2026-08-22T00:05:30.000Z", draft_generation: 5,
+      server_note_id: server.id, server_revision: server.revision, server_updated_at: server.updated_at,
+    });
+    const get = vi.fn(async () => server);
+    const update = vi.fn(async (_id: string, input: { title: string; content: string; base_revision: number }) => serverNote({
+      ...server, title: input.title, content: input.content, revision: 3,
+    }));
+    const controller = new NoteDraftController(store);
+
+    const result = await controller.sync("ws-1", "local-legacy", { create: vi.fn(), get, update });
+
+    expect(get).toHaveBeenCalledWith("server-legacy");
+    expect(update).toHaveBeenCalledWith("server-legacy", expect.objectContaining({ base_revision: 2, title: "After", content: "After body" }), expect.anything());
+    expect(result.note).toMatchObject({ id: "server-legacy", title: "After", content: "After body" });
+  });
+
+  it("replays a pending PATCH exactly after reload and gives the next edit a new key", async () => {
+    const server = serverNote({ id: "server-1", title: "Before", content: "Before body", revision: 2 });
+    const store = createStore();
+    await store.saveDraft({
+      workspace_id: "ws-1", entity_id: "local-1", title: "Latest", content: "Latest body",
+      updated_at: "2026-08-22T00:06:00.000Z", draft_generation: 8,
+      server_note: server, server_note_id: server.id, server_revision: server.revision,
+      next_patch_generation: 3,
+      pending_patch: {
+        key: "local-1:patch:2", generation: 2, base_revision: 2,
+        title: "Pending", content: "Pending body", source: "manual",
+      },
+    });
+    const update = vi.fn()
+      .mockImplementationOnce(async (_id: string, input: { title: string; content: string; base_revision: number }, options?: { idempotencyKey?: string }) => {
+        expect(options).toEqual({ idempotencyKey: "local-1:patch:2" });
+        expect(input).toMatchObject({ base_revision: 2, title: "Pending", content: "Pending body", source: "manual" });
+        return serverNote({ ...server, title: "Pending", content: "Pending body", revision: 3 });
+      })
+      .mockImplementationOnce(async (_id: string, input: { title: string; content: string; base_revision: number }, options?: { idempotencyKey?: string }) => {
+        expect(options).toEqual({ idempotencyKey: "local-1:patch:3" });
+        expect(input).toMatchObject({ base_revision: 3, title: "Latest", content: "Latest body", source: "manual" });
+        return serverNote({ ...server, title: "Latest", content: "Latest body", revision: 4 });
+      });
+    const controller = new NoteDraftController(store);
+
+    const result = await controller.sync("ws-1", "local-1", { create: vi.fn(), update });
+
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(result.note).toMatchObject({ title: "Latest", content: "Latest body", revision: 4 });
+    expect(store.removeDraft).not.toHaveBeenCalled();
+  });
+
+  it("clears the tombstone after delete failure so a later retry can save and reconcile", async () => {
+    const store = createStore();
+    await store.saveDraft({ workspace_id: "ws-1", entity_id: "local-1", title: "Saved", content: "Body", updated_at: "2026-08-22T00:07:00.000Z", draft_generation: 1 });
+    let attempts = 0;
+    store.removeDraft.mockImplementation(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("delete failed");
+      await createStore().removeDraft("ws-1", "local-1");
+    });
+    const controller = new NoteDraftController(store);
+
+    await expect(controller.reconcile("ws-1", "local-1", { generation: 1 })).rejects.toThrow("delete failed");
+    await expect(controller.save("ws-1", "local-1", "Recovered", "Body")).resolves.toMatchObject({ title: "Recovered" });
+    await expect(controller.reconcile("ws-1", "local-1", { generation: 2 })).resolves.toBe(true);
+    expect(attempts).toBe(2);
+  });
+
   it("awaits durable persistence before returning a new draft", async () => {
     let releaseSave!: () => void;
     const saveBlocked = new Promise<void>((resolve) => { releaseSave = resolve; });
@@ -96,9 +260,7 @@ describe("NoteDraftController", () => {
 
     const first = controller.save("ws-1", "local-1", "first", "old");
     const second = controller.save("ws-1", "local-1", "second", "latest");
-    await Promise.resolve();
-
-    expect(writes).toEqual(["start:first"]);
+    await vi.waitFor(() => expect(writes).toEqual(["start:first"]));
     releaseFirst();
     await Promise.all([first, second]);
 
@@ -121,8 +283,7 @@ describe("NoteDraftController", () => {
 
     void controller.save("ws-1", "local-1", "Latest", "Body");
     const reconciling = controller.reconcile("ws-1", "local-1");
-    await Promise.resolve();
-    expect(calls).toEqual(["save:start"]);
+    await vi.waitFor(() => expect(calls).toEqual(["save:start"]));
 
     releaseSave();
     await reconciling;
@@ -168,12 +329,14 @@ describe("NoteDraftController", () => {
     const client = { create, update };
 
     await expect(controller.sync("ws-1", "local-1", client)).rejects.toThrow("response lost");
-    await expect(controller.sync("ws-1", "local-1", client)).resolves.toMatchObject({ id: "server-1" });
+    const result = await controller.sync("ws-1", "local-1", client);
 
     expect(create).toHaveBeenCalledTimes(2);
     expect(create.mock.calls[0]?.[1]).toEqual({ idempotencyKey: "local-1" });
     expect(create.mock.calls[1]?.[1]).toEqual({ idempotencyKey: "local-1" });
     expect(update).not.toHaveBeenCalled();
+    expect(await store.getDraft("ws-1", "local-1")).toMatchObject({ server_note: note });
+    await expect(controller.reconcile("ws-1", "local-1", result)).resolves.toBe(true);
     expect(await store.getDraft("ws-1", "local-1")).toBeNull();
   });
 
@@ -242,6 +405,7 @@ describe("NoteDraftController", () => {
 
   it("reuses a persisted PATCH idempotency key after reload", async () => {
     const store = createStore();
+    const server = serverNote({ id: "server-1", revision: 2 });
     await store.saveDraft({
       workspace_id: "ws-1",
       entity_id: "local-1",
@@ -251,20 +415,22 @@ describe("NoteDraftController", () => {
       server_note_id: "server-1",
       server_revision: 2,
       server_updated_at: "2026-08-22T00:02:00.000Z",
-      server_update_key: "local-1:update:7",
-      server_update_generation: 7,
+      server_note: server,
+      pending_patch: { key: "local-1:patch:7", generation: 7, base_revision: 2, title: "Latest", content: "Body", source: "manual" },
+      next_patch_generation: 8,
     });
     const controller = new NoteDraftController(store);
     const update = vi.fn(async (_id: string, input: { title: string; content: string }, options?: { idempotencyKey?: string }) => {
-      expect(options).toEqual({ idempotencyKey: "local-1:update:7" });
+      expect(options).toEqual({ idempotencyKey: "local-1:patch:7" });
       return serverNote({ id: "server-1", revision: 3, ...input });
     });
 
-    await expect(controller.sync("ws-1", "local-1", {
+    const result = await controller.sync("ws-1", "local-1", {
       create: vi.fn(),
       update,
-    })).resolves.toMatchObject({ id: "server-1", revision: 3 });
+    });
     expect(update).toHaveBeenCalledOnce();
+    await expect(controller.reconcile("ws-1", "local-1", result)).resolves.toBe(true);
     expect(await store.getDraft("ws-1", "local-1")).toBeNull();
   });
 
@@ -279,27 +445,26 @@ describe("NoteDraftController", () => {
       server_note_id: "server-1",
       server_revision: 1,
       server_updated_at: "2026-08-22T00:01:00.000Z",
-      server_update_key: "local-1:update:1",
-      server_update_generation: 1,
-      server_update_title: "Initial",
-      server_update_content: "Initial body",
-      server_update_base_revision: 1,
+      server_note: serverNote({ id: "server-1", revision: 1 }),
+      pending_patch: { key: "local-1:patch:1", generation: 1, base_revision: 1, title: "Initial", content: "Initial body", source: "manual" },
+      next_patch_generation: 2,
     });
     const controller = new NoteDraftController(store);
     const update = vi.fn()
       .mockImplementationOnce(async (_id: string, input: { title: string; content: string }, options?: { idempotencyKey?: string }) => {
         expect(input).toEqual(expect.objectContaining({ title: "Initial", content: "Initial body", base_revision: 1 }));
-        expect(options).toEqual({ idempotencyKey: "local-1:update:1" });
+        expect(options).toEqual({ idempotencyKey: "local-1:patch:1" });
         return serverNote({ id: "server-1", title: "Initial", content: "Initial body", revision: 2 });
       })
       .mockImplementationOnce(async (_id: string, input: { title: string; content: string }, options?: { idempotencyKey?: string }) => {
         expect(input).toEqual(expect.objectContaining({ title: "Latest", content: "Latest body", base_revision: 2 }));
-        expect(options).toEqual({ idempotencyKey: "local-1:update:0" });
+        expect(options).toEqual({ idempotencyKey: "local-1:patch:2" });
         return serverNote({ id: "server-1", title: "Latest", content: "Latest body", revision: 3 });
       });
 
-    await expect(controller.sync("ws-1", "local-1", { create: vi.fn(), update })).resolves.toMatchObject({ title: "Latest", content: "Latest body", revision: 3 });
+    const result = await controller.sync("ws-1", "local-1", { create: vi.fn(), update });
     expect(update).toHaveBeenCalledTimes(2);
+    await expect(controller.reconcile("ws-1", "local-1", result)).resolves.toBe(true);
     expect(await store.getDraft("ws-1", "local-1")).toBeNull();
   });
 
@@ -322,8 +487,9 @@ describe("NoteDraftController", () => {
     await controller.save("ws-1", "local-1", "latest", "content");
     releasePatch();
 
-    await expect(syncing).resolves.toMatchObject({ revision: 3, title: "latest", content: "content" });
+    const result = await syncing;
     expect(update.mock.calls[1]?.[1]).toMatchObject({ title: "latest", content: "content" });
+    await expect(controller.reconcile("ws-1", "local-1", result)).resolves.toBe(true);
     expect(await store.getDraft("ws-1", "local-1")).toBeNull();
   });
 
@@ -364,9 +530,11 @@ describe("NoteDraftController", () => {
     const create = vi.fn(async () => serverNote());
     const update = vi.fn(async (_id: string, input: { title: string; content: string }) => serverNote(input));
 
-    await expect(controller.sync("ws-1", "local-1", { create, update })).rejects.toThrow("delete failed");
+    const result = await controller.sync("ws-1", "local-1", { create, update });
+    await expect(controller.reconcile("ws-1", "local-1", result)).rejects.toThrow("delete failed");
     const resumed = new NoteDraftController(baseStore);
-    await expect(resumed.sync("ws-1", "local-1", { create, update })).resolves.toMatchObject({ id: "server-1" });
+    const resumedResult = await resumed.sync("ws-1", "local-1", { create, update });
+    await expect(resumed.reconcile("ws-1", "local-1", resumedResult)).resolves.toBe(true);
     expect(create).toHaveBeenCalledOnce();
   });
 });

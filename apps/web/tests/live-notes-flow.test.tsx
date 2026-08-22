@@ -129,13 +129,16 @@ describe("live note workspace flow", () => {
   });
 
   it("creates and opens one durable draft from one click, focusing its title", async () => {
-    const apiClient = createApiClient();
+    let resolveCreate!: (value: unknown) => void;
+    const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });
+    const apiClient = createApiClient({ createNote: async () => createBlocked });
     renderWorkspace(apiClient);
 
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]);
 
     expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveFocus();
+    resolveCreate({ note: serverNoteForFlow() });
     await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/notes", method: "POST" })));
   });
 
@@ -175,6 +178,26 @@ describe("live note workspace flow", () => {
     expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveFocus();
     await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalledWith("ws-1", expect.any(String)));
     expect(await screen.findByRole("heading", { name: "未命名笔记", level: 1 })).toBeInTheDocument();
+  });
+
+  it("installs the server note before the post-commit reconcile removes the draft", async () => {
+    const localStore = createDraftStore();
+    let removalSawInstalledNote = false;
+    let resolveCreate!: (value: unknown) => void;
+    const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });
+    localStore.removeDraft.mockImplementation(async (workspaceId: string, entityId: string) => {
+      removalSawInstalledNote = Boolean(screen.queryByRole("heading", { name: "未命名笔记", level: 1 }));
+      localStore.getDraft(workspaceId, entityId);
+    });
+    const apiClient = createApiClient({ createNote: async () => createBlocked });
+    renderWorkspaceWithStore(apiClient, localStore);
+
+    await screen.findByRole("button", { name: "打开笔记列表" });
+    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    await screen.findByRole("textbox", { name: "笔记标题" });
+    resolveCreate({ note: serverNoteForFlow() });
+    await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalled());
+    expect(removalSawInstalledNote).toBe(true);
   });
 
   it("reconciles the latest title and content when they change during server creation", async () => {
@@ -245,8 +268,74 @@ describe("live note workspace flow", () => {
     expect(screen.queryByRole("textbox", { name: "笔记标题" })).not.toBeInTheDocument();
     resolveCreate({ note: { ...serverNoteForFlow(), id: "old-server" } });
 
-    await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalledWith("ws-1", expect.any(String)));
+    await waitFor(() => expect(localStore.listDrafts("ws-1")).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ server_note: expect.objectContaining({ id: "old-server" }) }),
+    ])));
+    expect(localStore.removeDraft).not.toHaveBeenCalledWith("ws-1", expect.any(String));
     expect(second.container.querySelector("input[aria-label='笔记标题']")).toBeNull();
+  });
+
+  it("keeps a server-bound draft after unmount before installation", async () => {
+    let resolveCreate!: (value: unknown) => void;
+    const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });
+    const apiClient = createApiClient({ createNote: async () => createBlocked });
+    const localStore = createDraftStore();
+    const first = renderWorkspaceWithStore(apiClient, localStore, "ws-1");
+    await screen.findByRole("button", { name: "打开笔记列表" });
+    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    const title = await screen.findByRole("textbox", { name: "笔记标题" });
+    fireEvent.change(title, { target: { value: "Keep me" } });
+    const draftId = [...localStore.listDrafts.mock.results].length;
+    first.unmount();
+    renderWorkspaceWithStore(apiClient, localStore, "ws-2");
+    resolveCreate({ note: { ...serverNoteForFlow(), id: "old-server", title: "Keep me" } });
+
+    await waitFor(() => expect(localStore.listDrafts("ws-1")).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: "Keep me", server_note: expect.objectContaining({ id: "old-server" }) }),
+    ])));
+    expect(localStore.removeDraft).not.toHaveBeenCalledWith("ws-1", expect.any(String));
+    expect(draftId).toBeGreaterThanOrEqual(0);
+  });
+
+  it("adds a completed server note without stealing a same-workspace selection", async () => {
+    const existingNote = {
+      id: "existing-1", workspace_id: "ws-1", folder_id: null, database_id: null, created_by: "user-1", updated_by: "user-1",
+      title: "Existing note", content: "Existing content", status: "active", is_favorite: false, is_pinned: false, daily_date: null,
+      revision: 1, created_at: "2026-08-22T00:00:00.000Z", updated_at: "2026-08-22T00:00:00.000Z",
+    };
+    let resolveCreate!: (value: unknown) => void;
+    const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });
+    const apiClient = createApiClient({ listNotes: async () => ({ items: [existingNote], next_cursor: null }), createNote: async () => createBlocked });
+    const localStore = createDraftStore();
+    renderWorkspaceWithStore(apiClient, localStore);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建笔记" }));
+    await screen.findByRole("textbox", { name: "笔记标题" });
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: /Existing note/ }));
+    resolveCreate({ note: { ...existingNote, id: "created-old", title: "", content: "" } });
+
+    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveValue("Existing note");
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    expect(await screen.findByRole("button", { name: /未命名笔记/ })).toBeInTheDocument();
+  });
+
+  it("does not duplicate the initial empty draft write from an effect", async () => {
+    let resolveCreate!: (value: unknown) => void;
+    const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });
+    const apiClient = createApiClient({ createNote: async () => createBlocked });
+    const localStore = createDraftStore();
+    renderWorkspaceWithStore(apiClient, localStore);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]);
+    await screen.findByRole("textbox", { name: "笔记标题" });
+    await waitFor(() => expect(localStore.saveDraft.mock.calls.filter(([draft]) => (
+      draft.title === "" && draft.content === "" && draft.server_note === undefined && draft.pending_patch === undefined
+      && draft.server_create_title === undefined
+    ))).toHaveLength(1));
+    resolveCreate({ note: serverNoteForFlow() });
   });
 
   it("retains the latest input locally after server failure and recovers it after remount", async () => {
