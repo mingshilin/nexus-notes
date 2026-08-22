@@ -29,10 +29,10 @@ async function readAvatar(request: Request, maximum = avatarMaximumBytes) {
   const contentLength = request.headers.get("content-length");
   if (contentLength !== null) {
     const normalized = contentLength.trim();
-    if (!/^(0|[1-9]\d*)$/u.test(normalized) || !Number.isSafeInteger(Number(normalized))) {
+    if (!/^\d+$/u.test(normalized)) {
       throw new ProfileServiceError("AVATAR_CONTENT_LENGTH_INVALID", "Content-Length must be a non-negative integer", 400);
     }
-    if (Number(normalized) > maximum) {
+    if (BigInt(normalized) > BigInt(maximum)) {
       throw new ProfileServiceError("AVATAR_SIZE_INVALID", "Avatar exceeds 2 MiB", 413);
     }
   }

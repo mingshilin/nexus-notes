@@ -51,6 +51,33 @@ function jsonRequest(path: string, method: string, body: unknown) {
   });
 }
 
+const unauthenticatedRoutes = [
+  ["GET", "/api/v2/profile"],
+  ["PATCH", "/api/v2/profile", { display_name: "Updated" }],
+  ["GET", "/api/v2/profile/avatar"],
+  ["POST", "/api/v2/profile/avatar", new Uint8Array([1]), "image/png"],
+  ["DELETE", "/api/v2/profile/avatar"],
+  ["POST", "/api/v2/profile/email/change", { new_email: "next@example.test", current_password: "old-password" }],
+  ["POST", "/api/v2/profile/email/confirm", { new_email: "next@example.test", code: "123456" }],
+  ["POST", "/api/v2/profile/password/change", { current_password: "old-password", new_password: "new-password-123" }],
+  ["GET", "/api/v2/profile/sessions"],
+  ["DELETE", "/api/v2/profile/sessions/s2"],
+  ["DELETE", "/api/v2/profile", { current_password: "old-password", confirmation: "永久删除我的账户" }],
+] as const;
+
+function routeRequest([method, path, body, contentType]: typeof unauthenticatedRoutes[number]) {
+  if (contentType) {
+    return new Request(`https://beta.test${path}`, { method, headers: { "content-type": contentType }, body });
+  }
+  return body === undefined
+    ? new Request(`https://beta.test${path}`, { method })
+    : jsonRequest(path, method, body);
+}
+
+function assertNoServiceCalls(profileService: ReturnType<typeof service>) {
+  for (const method of Object.values(profileService)) expect(method).not.toHaveBeenCalled();
+}
+
 describe("profile routes", () => {
   it("registers each approved session route with principal-scoped service calls", async () => {
     const worker = await loadWorker();
@@ -85,16 +112,25 @@ describe("profile routes", () => {
     expect(profileService.deleteAccount).toHaveBeenCalledWith("u1", expect.anything(), "req-profile");
   });
 
-  it("rejects unauthenticated profile access before calling the service", async () => {
+  it.each(unauthenticatedRoutes)("rejects unauthenticated %s %s before calling ProfileService", async (...route) => {
     const worker = await loadWorker();
     const profileService = service();
     const { value } = registry(worker, profileService, { authenticate: vi.fn(async () => null) });
 
-    const response = await value.fetch(new Request("https://beta.test/api/v2/profile"), {});
+    const response = await value.fetch(routeRequest(route), {});
 
     expect(response.status).toBe(401);
-    expect(await response.json()).toMatchObject({ success: false, error: { code: "UNAUTHENTICATED" } });
-    expect(profileService.getProfile).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({
+      success: false,
+      error: {
+        code: "UNAUTHENTICATED",
+        message: "Authentication is required",
+        retryable: false,
+        request_id: "req-profile",
+      },
+      request_id: "req-profile",
+    });
+    assertNoServiceCalls(profileService);
   });
 
   it("uses the exact IP rate-limit policies for profile routes", async () => {
@@ -165,6 +201,45 @@ describe("profile routes", () => {
     }), {});
 
     expect(response.status).toBe(413);
+    expect(profileService.uploadAvatar).not.toHaveBeenCalled();
+  });
+
+  it("accepts a leading-zero avatar Content-Length", async () => {
+    const worker = await loadWorker();
+    const { value, profileService } = registry(worker);
+
+    const response = await value.fetch(new Request("https://beta.test/api/v2/profile/avatar", {
+      method: "POST", headers: { "content-type": "image/png", "content-length": "0001" }, body: new Uint8Array([1]),
+    }), {});
+
+    expect(response.status).toBe(200);
+    expect(profileService.uploadAvatar).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["9007199254740992", 413, "AVATAR_SIZE_INVALID"],
+    ["-1", 400, "AVATAR_CONTENT_LENGTH_INVALID"],
+    ["2.5", 400, "AVATAR_CONTENT_LENGTH_INVALID"],
+    ["not-a-number", 400, "AVATAR_CONTENT_LENGTH_INVALID"],
+  ])("rejects avatar Content-Length %s before touching the body", async (contentLength, status, code) => {
+    const worker = await loadWorker();
+    const { value, profileService } = registry(worker);
+    let bodyTouched = false;
+    const request = {
+      url: "https://beta.test/api/v2/profile/avatar",
+      method: "POST",
+      headers: new Headers({ "content-type": "image/png", "content-length": contentLength }),
+      get body() {
+        bodyTouched = true;
+        throw new Error("Avatar body must not be read");
+      },
+    } as unknown as Request;
+
+    const response = await value.fetch(request, {});
+
+    expect(response.status).toBe(status);
+    expect(await response.json()).toMatchObject({ success: false, error: { code } });
+    expect(bodyTouched).toBe(false);
     expect(profileService.uploadAvatar).not.toHaveBeenCalled();
   });
 
