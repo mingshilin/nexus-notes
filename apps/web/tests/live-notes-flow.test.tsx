@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 import type { LocalDraft } from "../src/data/local-store";
+import { NoteDraftController } from "../src/notes/note-draft-controller";
 
 const session = {
   user: { id: "user-1", email: "user@example.com", displayName: "User" },
@@ -19,6 +20,15 @@ function createDraftStore(initial: LocalDraft[] = []) {
   const drafts = new Map(initial.map((draft) => [`${draft.workspace_id}:${draft.entity_id}`, draft]));
   return {
     saveDraft: vi.fn(async (draft: LocalDraft) => { drafts.set(`${draft.workspace_id}:${draft.entity_id}`, { ...draft }); }),
+    mutateDraft: vi.fn(async (workspaceId: string, entityId: string, mutation: (current: LocalDraft | null) => LocalDraft | null | undefined) => {
+      const key = `${workspaceId}:${entityId}`;
+      const current = drafts.get(key) ?? null;
+      const next = mutation(current ? { ...current } : null);
+      if (next === undefined) return current ? { ...current } : null;
+      if (next === null) { drafts.delete(key); return null; }
+      drafts.set(key, { ...next });
+      return { ...next };
+    }),
     listDrafts: vi.fn(async (workspaceId: string) => [...drafts.values()].filter((draft) => draft.workspace_id === workspaceId).sort((left, right) => right.updated_at.localeCompare(left.updated_at))),
     removeDraft: vi.fn(async (workspaceId: string, entityId: string) => { drafts.delete(`${workspaceId}:${entityId}`); }),
     getDraft: (workspaceId: string, entityId: string) => drafts.get(`${workspaceId}:${entityId}`) ?? null,
@@ -198,6 +208,32 @@ describe("live note workspace flow", () => {
     resolveCreate({ note: serverNoteForFlow() });
     await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalled());
     expect(removalSawInstalledNote).toBe(true);
+  });
+
+  it("routes edits during installed-note reconciliation to the server note path", async () => {
+    const localStore = createDraftStore();
+    let releaseRemove!: () => void;
+    const removeBlocked = new Promise<void>((resolve) => { releaseRemove = resolve; });
+    localStore.removeDraft.mockImplementation(async () => removeBlocked);
+    const apiClient = createApiClient();
+    const draftSave = vi.spyOn(NoteDraftController.prototype, "save");
+    renderWorkspaceWithStore(apiClient, localStore);
+
+    await screen.findByRole("button", { name: "打开笔记列表" });
+    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    await screen.findByRole("textbox", { name: "笔记标题" });
+    await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalled());
+    const savesBeforeEdit = localStore.saveDraft.mock.calls.length;
+    const title = screen.getByRole("textbox", { name: "笔记标题" });
+    fireEvent.change(title, { target: { value: "编辑已绑定笔记" } });
+    expect(draftSave).not.toHaveBeenCalled();
+    expect(localStore.saveDraft.mock.calls.length).toBe(savesBeforeEdit);
+    fireEvent.click(screen.getByRole("button", { name: "保存笔记" }));
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/note-1", method: "PATCH", body: expect.objectContaining({ title: "编辑已绑定笔记" }),
+    })));
+    draftSave.mockRestore();
+    releaseRemove();
   });
 
   it("reconciles the latest title and content when they change during server creation", async () => {

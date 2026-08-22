@@ -26,6 +26,8 @@ export interface LocalDraft {
   pending_patch?: PendingPatch;
 }
 
+export type DraftMutation = (current: LocalDraft | null) => LocalDraft | null | undefined;
+
 export interface PendingPatch {
   key: string;
   generation: number;
@@ -77,6 +79,41 @@ export class BetaLocalStore {
 
   async saveDraft(draft: LocalDraft) {
     await this.put("drafts", { ...draft, key: this.entityKey(draft.workspace_id, draft.entity_id) });
+  }
+
+  async mutateDraft(workspaceId: string, entityId: string, mutation: DraftMutation): Promise<LocalDraft | null> {
+    const database = await this.getDatabase();
+    const transaction = database.transaction("drafts", "readwrite");
+    const objectStore = transaction.objectStore("drafts");
+    const done = transactionDone(transaction);
+    let result: LocalDraft | null = null;
+    let mutationError: unknown;
+    const request = objectStore.get(this.entityKey(workspaceId, entityId));
+    request.onsuccess = () => {
+      const current = (request.result as LocalDraft | undefined) ?? null;
+      try {
+        const next = mutation(current ? { ...current } : null);
+        if (next === undefined) {
+          result = current;
+          return;
+        }
+        if (next === null) {
+          objectStore.delete(this.entityKey(workspaceId, entityId));
+          result = null;
+          return;
+        }
+        objectStore.put({ ...next, key: this.entityKey(workspaceId, entityId) });
+        result = { ...next };
+      } catch (error) {
+        mutationError = error;
+        transaction.abort();
+      }
+    };
+    await done.catch((error) => {
+      if (mutationError !== undefined) throw mutationError;
+      throw error;
+    });
+    return result;
   }
 
   async getDraft(workspaceId: string, entityId: string): Promise<LocalDraft | null> {

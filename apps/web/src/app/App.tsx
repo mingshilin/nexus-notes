@@ -200,6 +200,8 @@ function AuthenticatedWorkspace({
   const draftTitleRef = useRef("");
   const draftContentRef = useRef("");
   const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const focusInstalledNoteRef = useRef(false);
+  const installedNotesRef = useRef(new Map<string, Note>());
   const mountedRef = useRef(true);
   const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
   const noteTargets = notes.map((note) => ({
@@ -320,9 +322,16 @@ function AuthenticatedWorkspace({
 
   const installSyncedDraft = (syncedWorkspaceId: string, draftId: string, result: DraftSyncResult) => {
     if (!mountedRef.current) return;
+    const wasActiveDraft = activeDraftIdRef.current === draftId;
+    if (wasActiveDraft) {
+      activeDraftIdRef.current = null;
+      setActiveDraftId(null);
+      focusInstalledNoteRef.current = true;
+    }
+    installedNotesRef.current.set(result.note.id, result.note);
     setNotes((current) => [result.note, ...current.filter((note) => note.id !== result.note.id)]);
     setPendingReconcile({ workspaceId: syncedWorkspaceId, entityId: draftId, result });
-    if (activeDraftIdRef.current !== draftId) return;
+    if (!wasActiveDraft) return;
     setSelectedNoteId(result.note.id);
     setCreatingNote(false);
     setDraftTitle(result.note.title);
@@ -338,9 +347,10 @@ function AuthenticatedWorkspace({
   }, [draftController]);
 
   useEffect(() => {
-    if (!creatingNote) return;
+    if (!creatingNote && !focusInstalledNoteRef.current) return;
     titleInputRef.current?.focus();
-  }, [activeDraftId, creatingNote]);
+    focusInstalledNoteRef.current = false;
+  }, [activeDraftId, creatingNote, selectedNoteId]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -349,7 +359,7 @@ function AuthenticatedWorkspace({
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  });
+  }, [workspaceId]);
 
   useEffect(() => {
     if (!workspaceId || !activeDraftId) return undefined;
@@ -381,10 +391,6 @@ function AuthenticatedWorkspace({
       if (cancelled) return;
       if (removed) {
         setPendingReconcile(null);
-        if (activeDraftIdRef.current === entityId) {
-          activeDraftIdRef.current = null;
-          setActiveDraftId(null);
-        }
         return;
       }
       setPendingReconcile(null);
@@ -457,11 +463,14 @@ function AuthenticatedWorkspace({
     void new NotesClient(apiClient, workspaceId).list({ limit: 50, signal: controller.signal }).then((page) => {
       if (controller.signal.aborted) return;
       const activeNotes = page.items.filter((note) => note.status === "active");
-      setNotes(activeNotes);
-      if (!activeDraftIdRef.current) {
-        setSelectedNoteId((current) => userSelectedNote.current && activeNotes.some((note) => note.id === current)
+      const installedNotes = [...installedNotesRef.current.values()]
+        .filter((note) => note.workspace_id === workspaceId && note.status === "active");
+      const byId = new Map([...activeNotes, ...installedNotes].map((note) => [note.id, note]));
+      setNotes([...byId.values()]);
+      if (!activeDraftIdRef.current && !activationInFlight.current && !userSelectedNote.current) {
+        setSelectedNoteId((current) => userSelectedNote.current && current && byId.has(current)
           ? current
-          : activeNotes[0]?.id ?? null);
+          : [...byId.values()][0]?.id ?? null);
         setCreatingNote(false);
       }
     }).catch((error: unknown) => {

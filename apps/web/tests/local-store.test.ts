@@ -34,6 +34,7 @@ describe("BetaLocalStore", () => {
     expect(web.BetaLocalStore).toBeTypeOf("function");
     const Store = web.BetaLocalStore as new (options: Record<string, unknown>) => {
       saveDraft(draft: Record<string, unknown>): Promise<void>;
+      mutateDraft(workspaceId: string, entityId: string, mutation: (current: Record<string, unknown> | null) => Record<string, unknown> | null | undefined): Promise<Record<string, unknown> | null>;
       getDraft(workspaceId: string, entityId: string): Promise<Record<string, unknown> | null>;
       listDrafts(workspaceId: string): Promise<Array<Record<string, unknown>>>;
       removeDraft(workspaceId: string, entityId: string): Promise<void>;
@@ -80,5 +81,25 @@ describe("BetaLocalStore", () => {
 
     expect(await store.getDraft("ws-1", "shared-id")).toBeNull();
     expect(await store.getDraft("ws-2", "shared-id")).toMatchObject({ title: "Other workspace" });
+  });
+
+  it("atomically applies conditional draft mutations without overwriting a newer intent", async () => {
+    const web = await loadWeb();
+    const Store = web.BetaLocalStore as new (options: Record<string, unknown>) => {
+      saveDraft(draft: Record<string, unknown>): Promise<void>;
+      mutateDraft(workspaceId: string, entityId: string, mutation: (current: Record<string, unknown> | null) => Record<string, unknown> | null | undefined): Promise<Record<string, unknown> | null>;
+      getDraft(workspaceId: string, entityId: string): Promise<Record<string, unknown> | null>;
+      destroy(): Promise<void>;
+    };
+    const store = new Store({ databaseName: `nexus-test-${crypto.randomUUID()}` });
+    stores.push(store);
+
+    await store.saveDraft({ workspace_id: "ws-1", entity_id: "draft-1", title: "Initial", content: "Body", updated_at: "2026-08-22T00:00:00.000Z" });
+    await expect(store.mutateDraft("ws-1", "draft-1", (current) => ({ ...current!, title: "Newer", pending_patch: { idempotency_key: "key-b" } }))).resolves.toMatchObject({ title: "Newer" });
+
+    await expect(store.mutateDraft("ws-1", "draft-1", (current) => current?.pending_patch?.idempotency_key === "key-a"
+      ? { ...current, title: "Old response" }
+      : undefined)).resolves.toMatchObject({ title: "Newer", pending_patch: { idempotency_key: "key-b" } });
+    expect(await store.getDraft("ws-1", "draft-1")).toMatchObject({ title: "Newer", pending_patch: { idempotency_key: "key-b" } });
   });
 });

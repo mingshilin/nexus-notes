@@ -1,8 +1,9 @@
 import type { Note, UpdateNoteInput } from "@nexus/contracts";
-import type { LocalDraft, PendingPatch } from "../data/local-store";
+import type { DraftMutation, LocalDraft, PendingPatch } from "../data/local-store";
 
 export interface NoteDraftStore {
   saveDraft(draft: LocalDraft): Promise<void>;
+  mutateDraft(workspaceId: string, entityId: string, mutation: DraftMutation): Promise<LocalDraft | null>;
   getDraft(workspaceId: string, entityId: string): Promise<LocalDraft | null>;
   listDrafts(workspaceId: string): Promise<LocalDraft[]>;
   removeDraft(workspaceId: string, entityId: string): Promise<void>;
@@ -76,24 +77,16 @@ export class NoteDraftController {
 
   save(workspaceId: string, entityId: string, title: string, content: string) {
     return this.enqueue(this.key(workspaceId, entityId), async () => {
-      const current = await this.store.getDraft(workspaceId, entityId);
-      const updatedAt = this.clock().toISOString();
-      const base = current ?? {
-        workspace_id: workspaceId,
-        entity_id: entityId,
-        title: "",
-        content: "",
-        updated_at: updatedAt,
-      };
-      const draft: LocalDraft = {
-        ...base,
-        title,
-        content,
-        updated_at: updatedAt,
-        draft_generation: (current?.draft_generation ?? 0) + 1,
-      };
-      await this.store.saveDraft(draft);
-      return draft;
+      return this.store.mutateDraft(workspaceId, entityId, (current) => {
+        if (!current) return undefined;
+        return {
+          ...current,
+          title,
+          content,
+          updated_at: this.clock().toISOString(),
+          draft_generation: (current.draft_generation ?? 0) + 1,
+        };
+      });
     });
   }
 
@@ -172,20 +165,17 @@ export class NoteDraftController {
       if (draft.server_note_id) {
         if (!client.get) throw new Error("Server snapshot is missing; local draft remains recoverable");
         serverNote = await client.get(draft.server_note_id);
-        const hydrated = await this.persistState(workspaceId, entityId, {
-          server_note: serverNote,
-          server_note_id: serverNote.id,
-          server_revision: serverNote.revision,
-          server_updated_at: serverNote.updated_at,
-        });
+        const hydrated = await this.bindServerNote(workspaceId, entityId, serverNote);
         if (!hydrated) throw new Error("Draft was tombstoned before server snapshot hydration");
         draft = hydrated;
+        if (!draft.server_note
+          && (draft.server_note_id !== serverNote.id || (draft.server_revision ?? 0) > serverNote.revision)) {
+          throw new Error("Draft has a newer server binding; local recovery remains available");
+        }
+        serverNote = draft.server_note ?? serverNote;
       } else {
         if (draft.server_create_title === undefined || draft.server_create_content === undefined) {
-          const persisted = await this.persistState(workspaceId, entityId, {
-            server_create_title: draft.title,
-            server_create_content: draft.content,
-          });
+          const persisted = await this.persistCreatePayload(workspaceId, entityId, draft.title, draft.content);
           if (!persisted) throw new Error("Draft was tombstoned before server creation");
           draft = persisted;
         }
@@ -193,16 +183,10 @@ export class NoteDraftController {
           { title: draft.server_create_title ?? draft.title, content: draft.server_create_content ?? draft.content },
           { idempotencyKey: entityId },
         );
-        const bound = await this.persistState(workspaceId, entityId, {
-          server_note: serverNote,
-          server_note_id: serverNote.id,
-          server_revision: serverNote.revision,
-          server_updated_at: serverNote.updated_at,
-          server_create_title: undefined,
-          server_create_content: undefined,
-        });
+        const bound = await this.bindServerNote(workspaceId, entityId, serverNote);
         if (!bound) throw new Error("Draft was tombstoned before server identity binding");
         draft = bound;
+        serverNote = draft.server_note ?? serverNote;
       }
     }
 
@@ -218,14 +202,10 @@ export class NoteDraftController {
           this.patchInput(pending),
           { idempotencyKey: pending.key },
         );
-        const saved = await this.persistState(workspaceId, entityId, {
-          server_note: serverNote,
-          server_note_id: serverNote.id,
-          server_revision: serverNote.revision,
-          server_updated_at: serverNote.updated_at,
-          pending_patch: undefined,
-        });
+        const saved = await this.mergePatchResponse(workspaceId, entityId, pending.key, serverNote);
         if (!saved) throw new Error("Draft was tombstoned before PATCH binding");
+        draft = saved;
+        serverNote = draft.server_note ?? serverNote;
         continue;
       }
 
@@ -243,31 +223,69 @@ export class NoteDraftController {
 
   private async stagePatch(workspaceId: string, entityId: string, serverNote: Note) {
     return this.enqueue(this.key(workspaceId, entityId), async () => {
-      const current = await this.store.getDraft(workspaceId, entityId);
-      if (!current) throw new Error("Draft was not found");
-      if (current.pending_patch) return current;
-      const generation = current.next_patch_generation ?? 1;
-      const pending: PendingPatch = {
-        key: `${entityId}:patch:${generation}`,
-        generation,
-        base_revision: serverNote.revision,
-        title: current.title,
-        content: current.content,
-        source: "manual",
-      };
-      const next = { ...current, pending_patch: pending, next_patch_generation: generation + 1 };
-      await this.store.saveDraft(next);
-      return next;
+      return this.store.mutateDraft(workspaceId, entityId, (current) => {
+        if (!current) return undefined;
+        if (current.pending_patch) return current;
+        const generation = current.next_patch_generation ?? 1;
+        const pending: PendingPatch = {
+          key: `${entityId}:patch:${generation}`,
+          generation,
+          base_revision: serverNote.revision,
+          title: current.title,
+          content: current.content,
+          source: "manual",
+        };
+        return { ...current, pending_patch: pending, next_patch_generation: generation + 1 };
+      });
     });
   }
 
-  private async persistState(workspaceId: string, entityId: string, patch: Partial<LocalDraft>) {
+  private async bindServerNote(workspaceId: string, entityId: string, serverNote: Note) {
     return this.enqueue(this.key(workspaceId, entityId), async () => {
-      const current = await this.store.getDraft(workspaceId, entityId);
-      if (!current) throw new Error("Draft was not found before server state persistence");
-      const next = { ...current, ...patch };
-      await this.store.saveDraft(next);
-      return next;
+      return this.store.mutateDraft(workspaceId, entityId, (current) => {
+        if (!current || current.pending_patch) return undefined;
+        if (current.server_note_id && current.server_note_id !== serverNote.id) return current;
+        if (!current.server_note && (current.server_revision ?? 0) > serverNote.revision) return current;
+        if (current.server_note) {
+          if (current.server_note.id !== serverNote.id || current.server_note.revision >= serverNote.revision) return current;
+        }
+        return {
+          ...current,
+          server_note: serverNote,
+          server_note_id: serverNote.id,
+          server_revision: serverNote.revision,
+          server_updated_at: serverNote.updated_at,
+          server_create_title: undefined,
+          server_create_content: undefined,
+        };
+      });
+    });
+  }
+
+  private async persistCreatePayload(workspaceId: string, entityId: string, title: string, content: string) {
+    return this.enqueue(this.key(workspaceId, entityId), async () => this.store.mutateDraft(workspaceId, entityId, (current) => (
+      current ? { ...current, server_create_title: title, server_create_content: content } : undefined
+    )));
+  }
+
+  private async mergePatchResponse(workspaceId: string, entityId: string, completedKey: string, serverNote: Note) {
+    return this.enqueue(this.key(workspaceId, entityId), async () => {
+      return this.store.mutateDraft(workspaceId, entityId, (current) => {
+        if (!current || current.pending_patch?.key !== completedKey) return undefined;
+        if (current.server_note && current.server_note.id !== serverNote.id) return current;
+        if (current.server_note && current.server_note.revision > serverNote.revision) return current;
+        if (current.server_note
+          && current.server_note.revision === serverNote.revision
+          && JSON.stringify(current.server_note) !== JSON.stringify(serverNote)) return current;
+        return {
+          ...current,
+          server_note: serverNote,
+          server_note_id: serverNote.id,
+          server_revision: serverNote.revision,
+          server_updated_at: serverNote.updated_at,
+          pending_patch: undefined,
+        };
+      });
     });
   }
 
