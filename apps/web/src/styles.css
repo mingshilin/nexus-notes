@@ -299,6 +299,9 @@ button { color: inherit; }
 .auth-security { display: flex; align-items: center; gap: 6px; margin: 20px 0 0; color: hsl(var(--muted-foreground)); font-size: 11px; }
 .turnstile-shell { min-height: 66px; padding: 8px; border: 1px solid var(--border-subtle); border-radius: 13px; background: rgba(255,255,255,.42); }
 .turnstile-shell p, .auth-error, .auth-message { margin: 0; font-size: 12px; line-height: 1.5; }
+.turnstile-error-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 8px; }
+.turnstile-error-row .auth-error { min-width: 0; flex: 1; }
+.turnstile-error-row .auth-secondary { flex: 0 0 auto; padding: 6px 10px; }
 .auth-error { color: hsl(var(--destructive)); }
 .auth-message { color: #18864b; }
 .auth-bootstrap { display: grid; width: min(420px, calc(100% - 32px)); min-height: 180px; padding: 32px; place-items: center; border: 1px solid var(--border-subtle); border-radius: 24px; color: hsl(var(--muted-foreground)); text-align: center; background: var(--surface-overlay); box-shadow: var(--shadow-md); backdrop-filter: blur(24px); }

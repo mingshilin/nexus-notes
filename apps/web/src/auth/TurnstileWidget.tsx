@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 interface TurnstileApi {
   render(container: string | HTMLElement, options: {
@@ -6,9 +6,10 @@ interface TurnstileApi {
     action: string;
     callback(token: string): void;
     "expired-callback"(): void;
-    "error-callback"(): void;
+    "error-callback"(errorCode?: string): void;
   }): string;
   remove(widgetId: string): void;
+  reset(widgetId?: string): void;
 }
 
 declare global {
@@ -52,25 +53,36 @@ export function TurnstileWidget({
   const reactId = useId();
   const containerId = `turnstile-${reactId.replace(/:/g, "")}`;
   const callbackRef = useRef(onToken);
+  const widgetIdRef = useRef<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState("");
   callbackRef.current = onToken;
 
   useEffect(() => {
     if (!siteKey) return;
     let disposed = false;
-    let widgetId: string | undefined;
     void loadTurnstile().then(() => {
       if (disposed || !window.turnstile) return;
-      widgetId = window.turnstile.render(`#${containerId}`, {
+      widgetIdRef.current = window.turnstile.render(`#${containerId}`, {
         sitekey: siteKey,
         action,
-        callback: (token) => callbackRef.current(token),
+        callback: (token) => {
+          setErrorMessage("");
+          callbackRef.current(token);
+        },
         "expired-callback": () => callbackRef.current(""),
-        "error-callback": () => callbackRef.current(""),
+        "error-callback": (errorCode) => {
+          const suffix = errorCode ? `（错误码：${errorCode}）` : "";
+          setErrorMessage(`人机验证失败${suffix}，请重新验证。`);
+          callbackRef.current("");
+        },
       });
     }).catch(() => callbackRef.current(""));
     return () => {
       disposed = true;
-      if (widgetId) window.turnstile?.remove(widgetId);
+      if (widgetIdRef.current) {
+        window.turnstile?.remove(widgetIdRef.current);
+        widgetIdRef.current = null;
+      }
     };
   }, [action, containerId, siteKey]);
 
@@ -78,6 +90,22 @@ export function TurnstileWidget({
     <div className="turnstile-shell" data-testid="turnstile-widget">
       <div id={containerId} />
       {!siteKey ? <p>人机验证尚未配置，请联系管理员。</p> : null}
+      {errorMessage ? (
+        <div className="turnstile-error-row">
+          <p className="auth-error" role="alert">{errorMessage}</p>
+          <button
+            className="auth-secondary"
+            type="button"
+            onClick={() => {
+              setErrorMessage("");
+              callbackRef.current("");
+              window.turnstile?.reset(widgetIdRef.current ?? undefined);
+            }}
+          >
+            重新验证
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
