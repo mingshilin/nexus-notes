@@ -907,6 +907,12 @@ function AuthenticatedWorkspace({
   };
   const navigation = <ProductNavigation {...productNavigationProps} mode="rail" />;
   const mobileNavigation = <ProductNavigation {...productNavigationProps} mode="mobile" />;
+  const mobileCreateAction = activeDomain === "notes" && activePane !== "context" ? (
+    <button className="mobile-create-note-button" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
+      <Plus aria-hidden="true" size={20} />
+      <span>新建笔记</span>
+    </button>
+  ) : null;
 
   const contextualList = (
     <div className="context-content">
@@ -923,7 +929,7 @@ function AuthenticatedWorkspace({
       {!notesLoading && notes.length === 0 ? (
         <div className="note-empty-state">
           <p className="database-empty">暂无笔记，开始记录你的想法。</p>
-          <button className="primary-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
+          <button className="primary-create-note note-empty-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
             <Plus aria-hidden="true" size={17} />
             <span>新建笔记</span>
           </button>
@@ -1159,6 +1165,7 @@ function AuthenticatedWorkspace({
       <AdaptiveWorkbench
         navigation={navigation}
         mobileNavigation={mobileNavigation}
+        mobileCreateAction={mobileCreateAction}
         contextualList={activeDomain === "databases" ? databaseContextualList : activeDomain === "notes" ? contextualList : undefined}
         inspector={<div className="inspector-content"><small>页面信息</small><h3>{inspectorTitle}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
         inspectorOpen={inspectorOpen}
@@ -1170,7 +1177,7 @@ function AuthenticatedWorkspace({
         <>
         {activeDomain === "collaboration" ? collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : collaborationUnavailableCanvas : activeDomain === "databases" ? databaseCanvas : activeDomain === "knowledge" ? knowledgeCanvas : activeDomain === "ai" ? aiCanvas : activeDomain === "account" ? accountCanvas : selectedNote || creatingNote ? <article className="editor-document">
           <header className="editor-toolbar">
-            <span className="saved-state"><span /> {noteSaving ? "保存中…" : noteMessage ?? "未保存更改"}</span>
+            <span className="saved-state" role="status" aria-live="polite"><span /> {noteSaving ? "保存中…" : noteMessage ?? "未保存更改"}</span>
             <div>
               <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}><Bell aria-hidden="true" size={17} /></button>
               <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>
@@ -1191,7 +1198,7 @@ function AuthenticatedWorkspace({
           </div>
         </article> : <article className="editor-document">
           <header className="editor-toolbar">
-            <span className="saved-state"><span /> 已保存</span>
+            <span className="saved-state" role="status" aria-live="polite"><span /> 已保存</span>
             <div>
               <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}><Bell aria-hidden="true" size={17} /></button>
               <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>

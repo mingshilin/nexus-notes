@@ -9,6 +9,7 @@ export interface AdaptiveWorkbenchProps {
   mode?: WorkbenchMode;
   navigation: ReactNode;
   mobileNavigation?: ReactNode;
+  mobileCreateAction?: ReactNode;
   contextualList?: ReactNode;
   inspector?: ReactNode;
   inspectorOpen: boolean;
@@ -42,6 +43,7 @@ export function AdaptiveWorkbench({
   mode,
   navigation,
   mobileNavigation,
+  mobileCreateAction,
   contextualList,
   inspector,
   inspectorOpen,
@@ -59,6 +61,7 @@ export function AdaptiveWorkbench({
   const [childModalOpen, setChildModalOpen] = useState(false);
   const inspectorModalOpen = inspectorOpen && Boolean(inspector);
   const modalOpen = childModalOpen || inspectorModalOpen;
+  const mobileChromeVisible = mobile && mobileChrome.visible && !modalOpen;
 
   useEffect(() => {
     if (inspectorModalOpen) closeButtonRef.current?.focus();
@@ -74,13 +77,13 @@ export function AdaptiveWorkbench({
   return (
     <WorkbenchModalContext.Provider value={setChildModalOpen}>
       <WorkbenchModalOpenContext.Provider value={modalOpen}>
-      <Surface variant="window" className="adaptive-workbench" data-mode={currentMode} data-has-context={Boolean(contextualList)}>
+      <Surface variant="window" className="adaptive-workbench" data-mode={currentMode} data-has-context={Boolean(contextualList)} data-mobile-chrome-visible={mobile ? mobileChromeVisible : undefined}>
       {!mobile ? (
         <nav className="workbench-rail" aria-label="主导航" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
           {navigation}
         </nav>
       ) : (
-        <header className="mobile-toolbar" data-visible={mobileChrome.visible} aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
+        <header className="mobile-toolbar" data-visible={mobileChromeVisible} aria-hidden={!mobileChromeVisible || undefined} inert={!mobileChromeVisible || undefined}>
           <strong>Nexus Notes</strong>
           {inspector && !inspectorOpen ? (
             <button type="button" onClick={(event) => onInspectorOpen?.(event.currentTarget)}>检查器</button>
@@ -102,7 +105,7 @@ export function AdaptiveWorkbench({
 
       {mobile ? (
         activePane === "context" && contextualList ? (
-          <main className="workbench-context-mobile" data-testid="task-pane" data-scroll-owner={modalOpen ? undefined : "page"} aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
+          <main className="workbench-context-mobile" data-testid="task-pane" data-scroll-owner={modalOpen ? undefined : "page"} aria-hidden={modalOpen || undefined} inert={modalOpen || undefined} style={modalOpen ? undefined : { overflowY: "auto" }}>
             {contextualList}
           </main>
         ) : (
@@ -134,7 +137,7 @@ export function AdaptiveWorkbench({
       ) : null}
 
       {mobile ? (
-        <nav className="mobile-bottom-nav" data-visible={mobileChrome.visible} aria-label="移动端主导航" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
+        <nav className="mobile-bottom-nav" data-visible={mobileChromeVisible} aria-label="移动端主导航" aria-hidden={!mobileChromeVisible || undefined} inert={!mobileChromeVisible || undefined} style={!mobileChromeVisible ? { visibility: "hidden", pointerEvents: "none" } : undefined}>
           {mobileNavigation ?? <>
             <button type="button" onClick={() => onActivePaneChange?.("canvas")}>首页</button>
             <button type="button">搜索</button>
@@ -143,6 +146,11 @@ export function AdaptiveWorkbench({
             <button type="button">账户</button>
           </>}
         </nav>
+      ) : null}
+      {mobile && mobileCreateAction ? (
+        <div className="mobile-create-note" data-visible={mobileChromeVisible} aria-hidden={!mobileChromeVisible || undefined} inert={!mobileChromeVisible || undefined} style={!mobileChromeVisible ? { visibility: "hidden", pointerEvents: "none" } : undefined}>
+          {mobileCreateAction}
+        </div>
       ) : null}
       </Surface>
       </WorkbenchModalOpenContext.Provider>

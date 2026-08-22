@@ -12,6 +12,7 @@ async function loadWeb() {
 interface WorkbenchProps {
   mode: "desktop" | "tablet" | "mobile";
   navigation: ReactNode;
+  mobileNavigation?: ReactNode;
   contextualList: ReactNode;
   inspector: ReactNode;
   inspectorOpen: boolean;
@@ -128,5 +129,53 @@ describe("adaptive workbench", () => {
     expect(screen.queryByRole("dialog", { name: "检查器" })).not.toBeInTheDocument();
     expect(container.querySelector(".workbench-canvas")).not.toHaveAttribute("aria-hidden");
     expect(container.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);
+  });
+
+  it("keeps one page scroll owner on the tablet canvas", async () => {
+    const web = await loadWeb();
+    const AdaptiveWorkbench = web.AdaptiveWorkbench as ComponentType<WorkbenchProps>;
+    const { container } = render(createElement(
+      AdaptiveWorkbench,
+      {
+        mode: "tablet",
+        navigation: "Navigation",
+        contextualList: "Notes",
+        inspector: "Inspector",
+        inspectorOpen: false,
+        onInspectorClose: vi.fn(),
+      },
+      "Editor",
+    ));
+    const pageScrollArea = container.querySelector<HTMLElement>(".page-scroll-area");
+    expect(pageScrollArea).toHaveStyle({ overflowY: "auto" });
+    expect(container.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);
+  });
+
+  it("suppresses mobile fixed chrome while a modal is open and restores the opener focus", async () => {
+    const web = await loadWeb();
+    const AdaptiveWorkbench = web.AdaptiveWorkbench as ComponentType<WorkbenchProps>;
+    const close = vi.fn();
+    const { rerender } = render(createElement(AdaptiveWorkbench, {
+      mode: "mobile",
+      navigation: "Navigation",
+      mobileNavigation: createElement("button", { type: "button" }, "账户"),
+      inspector: "Inspector",
+      inspectorOpen: false,
+      onInspectorClose: close,
+      onInspectorOpen: () => undefined,
+    }, createElement("div", null, "Editor")));
+    rerender(createElement(AdaptiveWorkbench, {
+      mode: "mobile",
+      navigation: "Navigation",
+      mobileNavigation: createElement("button", { type: "button" }, "账户"),
+      inspector: "Inspector",
+      inspectorOpen: true,
+      onInspectorClose: close,
+    }, createElement("div", null, "Editor")));
+    const mobileNav = document.querySelector<HTMLElement>('.mobile-bottom-nav[aria-label="移动端主导航"]');
+    expect(mobileNav).toHaveAttribute("aria-hidden", "true");
+    expect(mobileNav).toHaveAttribute("inert");
+    fireEvent.click(screen.getByRole("button", { name: "关闭检查器" }));
+    expect(close).toHaveBeenCalledOnce();
   });
 });
