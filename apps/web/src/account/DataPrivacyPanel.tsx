@@ -39,7 +39,7 @@ export function DataPrivacyPanel({ active = true, client, operations, activeWork
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [statusRetry, setStatusRetry] = useState(0);
-  const [exportKey, setExportKey] = useState<string | null>(null);
+  const [exportKey, setExportKey] = useState<{ workspaceId: string; key: string } | null>(null);
   const [exportPending, setExportPending] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportJob, setExportJob] = useState<Job | null>(null);
@@ -51,11 +51,15 @@ export function DataPrivacyPanel({ active = true, client, operations, activeWork
   const mountedRef = useRef(true);
   const usageVersionRef = useRef(0);
   const statusVersionRef = useRef(0);
+  const exportGenerationRef = useRef(0);
   const exportPendingRef = useRef(false);
   const deletePendingRef = useRef(false);
   const deleteOriginRef = useRef<HTMLButtonElement | null>(null);
   const deleteDialogRef = useRef<HTMLDivElement | null>(null);
   const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
+  const deleteHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const pendingFocusRef = useRef<HTMLElement | null>(null);
+  const focusFrameRef = useRef<number | null>(null);
   const setWorkbenchModalOpen = useWorkbenchModalState();
   exportPendingRef.current = exportPending;
   deletePendingRef.current = deletePending;
@@ -106,6 +110,15 @@ export function DataPrivacyPanel({ active = true, client, operations, activeWork
   }, [activeWorkspaceId, operations, statusRetry]);
 
   useLayoutEffect(() => {
+    exportGenerationRef.current += 1;
+    exportPendingRef.current = false;
+    setExportPending(false);
+    setExportError(null);
+    setExportJob(null);
+    setExportKey((current) => current?.workspaceId === activeWorkspaceId ? current : null);
+  }, [activeWorkspaceId, operations]);
+
+  useLayoutEffect(() => {
     if (!deleteDialogOpen) return undefined;
     setWorkbenchModalOpen(true);
     deleteCancelRef.current?.focus();
@@ -133,32 +146,57 @@ export function DataPrivacyPanel({ active = true, client, operations, activeWork
     };
   }, [deleteDialogOpen]);
 
+  useLayoutEffect(() => {
+    if (focusFrameRef.current !== null) {
+      cancelAnimationFrame(focusFrameRef.current);
+      focusFrameRef.current = null;
+    }
+    if (deleteDialogOpen) {
+      pendingFocusRef.current = null;
+      return undefined;
+    }
+    const target = pendingFocusRef.current;
+    pendingFocusRef.current = null;
+    if (!target) return undefined;
+    focusFrameRef.current = requestAnimationFrame(() => {
+      focusFrameRef.current = null;
+      if (!mountedRef.current || !target.isConnected || target.closest("[inert]")) return;
+      target.focus();
+    });
+    return () => {
+      if (focusFrameRef.current !== null) {
+        cancelAnimationFrame(focusFrameRef.current);
+        focusFrameRef.current = null;
+      }
+    };
+  }, [deleteDialogOpen]);
+
   const requestExport = () => {
     if (!operations || !activeWorkspaceId || exportPendingRef.current) return;
+    const generation = exportGenerationRef.current;
+    const workspaceId = activeWorkspaceId;
     exportPendingRef.current = true;
     setExportPending(true);
     setExportError(null);
-    const idempotencyKey = exportKey ?? crypto.randomUUID();
-    if (!exportKey) setExportKey(idempotencyKey);
+    const idempotencyKey = exportKey?.workspaceId === workspaceId ? exportKey.key : crypto.randomUUID();
+    if (exportKey?.workspaceId !== workspaceId) setExportKey({ workspaceId, key: idempotencyKey });
     void operations.createJob({ kind: "export", idempotency_key: idempotencyKey, payload: { format: "zip", scope: "workspace" } }).then((next) => {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || generation !== exportGenerationRef.current) return;
       setExportJob(next);
       setExportKey(null);
     }).catch(() => {
-      if (mountedRef.current) setExportError("导出请求失败，重试将安全复用同一次导出请求。");
+      if (mountedRef.current && generation === exportGenerationRef.current) setExportError("导出请求失败，重试将安全复用同一次导出请求。");
     }).finally(() => {
+      if (generation !== exportGenerationRef.current) return;
       exportPendingRef.current = false;
       if (mountedRef.current) setExportPending(false);
     });
   };
 
-  function closeDeleteDialog() {
-    if (deletePendingRef.current) return;
-    const origin = deleteOriginRef.current;
+  function closeDeleteDialog(focus: "origin" | "fallback" = "origin", preserveError = false) {
+    pendingFocusRef.current = focus === "origin" ? deleteOriginRef.current : deleteHeadingRef.current;
     setDeleteDialogOpen(false);
-    requestAnimationFrame(() => {
-      if (origin?.isConnected && !origin.closest("[inert]")) origin.focus();
-    });
+    if (!preserveError) setDeleteError(null);
   }
 
   const deleteAccount = () => {
@@ -173,11 +211,14 @@ export function DataPrivacyPanel({ active = true, client, operations, activeWork
       if (!mountedRef.current) return;
       setCurrentPassword("");
       setConfirmation("");
-      setDeleteDialogOpen(false);
+      closeDeleteDialog("fallback");
       onDeleted();
     }).catch((error: unknown) => {
       onDeleteFailed?.();
-      if (mountedRef.current) setDeleteError(deletionErrorMessage(error));
+      if (mountedRef.current) {
+        setDeleteError(deletionErrorMessage(error));
+        closeDeleteDialog("origin", true);
+      }
     }).finally(() => {
       deletePendingRef.current = false;
       if (mountedRef.current) setDeletePending(false);
@@ -186,12 +227,12 @@ export function DataPrivacyPanel({ active = true, client, operations, activeWork
 
   const canDelete = currentPassword.length > 0 && confirmation === confirmationPhrase;
   const deleteDialog = deleteDialogOpen ? createPortal(
-    <div className="account-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDeleteDialog(); }}>
+    <div className="account-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !deletePendingRef.current) closeDeleteDialog(); }}>
       <div ref={deleteDialogRef} className="account-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-account-heading">
         <h3 id="delete-account-heading">最后确认删除账户</h3>
         <p>此操作会永久删除账户。离线数据清理完成前，你将无法重新登录。</p>
         {deleteError ? <p className="account-error" role="alert">{deleteError}</p> : null}
-        <div className="account-actions"><button ref={deleteCancelRef} type="button" disabled={deletePending} onClick={closeDeleteDialog}>取消删除</button><button type="button" className="account-danger-button" disabled={deletePending} onClick={deleteAccount}>{deletePending ? "正在删除…" : "确认永久删除"}</button></div>
+        <div className="account-actions"><button ref={deleteCancelRef} type="button" disabled={deletePending} onClick={() => closeDeleteDialog()}>取消删除</button><button type="button" className="account-danger-button" disabled={deletePending} onClick={deleteAccount}>{deletePending ? "正在删除…" : "确认永久删除"}</button></div>
       </div>
     </div>,
     document.body,
@@ -221,7 +262,7 @@ export function DataPrivacyPanel({ active = true, client, operations, activeWork
         {exportJob ? <p className="account-status" role="status">导出任务 {exportJob.id}：{exportJob.status}</p> : null}
       </section>
       <section className="account-subpanel account-danger-zone" aria-labelledby="delete-heading">
-        <h3 id="delete-heading">删除账户</h3>
+        <h3 id="delete-heading" ref={deleteHeadingRef} tabIndex={-1}>删除账户</h3>
         <p>删除不可撤销。若你仍是团队工作区所有者，必须先移交所有权。</p>
         <form className="account-form" onSubmit={(event) => { event.preventDefault(); if (canDelete) { setDeleteError(null); setDeleteDialogOpen(true); } }}>
           <label>{active ? "当前密码" : "删除账户当前密码"}<input type="password" autoComplete="current-password" value={currentPassword} disabled={deletePending} onChange={(event) => setCurrentPassword(event.target.value)} /></label>

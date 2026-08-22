@@ -46,6 +46,8 @@ export function WorkspacePanel({ workspaces, activeWorkspaceId, client, currentU
   const removeDialogRef = useRef<HTMLDivElement | null>(null);
   const removeCancelRef = useRef<HTMLButtonElement | null>(null);
   const membersHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const pendingFocusRef = useRef<HTMLElement | null>(null);
+  const focusFrameRef = useRef<number | null>(null);
   const setWorkbenchModalOpen = useWorkbenchModalState();
   removePendingRef.current = memberPending?.startsWith("remove:") ?? false;
 
@@ -123,6 +125,31 @@ export function WorkspacePanel({ workspaces, activeWorkspaceId, client, currentU
     };
   }, [removeTarget]);
 
+  useLayoutEffect(() => {
+    if (focusFrameRef.current !== null) {
+      cancelAnimationFrame(focusFrameRef.current);
+      focusFrameRef.current = null;
+    }
+    if (removeTarget) {
+      pendingFocusRef.current = null;
+      return undefined;
+    }
+    const target = pendingFocusRef.current;
+    pendingFocusRef.current = null;
+    if (!target) return undefined;
+    focusFrameRef.current = requestAnimationFrame(() => {
+      focusFrameRef.current = null;
+      if (!mountedRef.current || !target.isConnected || target.closest("[inert]")) return;
+      target.focus();
+    });
+    return () => {
+      if (focusFrameRef.current !== null) {
+        cancelAnimationFrame(focusFrameRef.current);
+        focusFrameRef.current = null;
+      }
+    };
+  }, [removeTarget]);
+
   const switchWorkspace = (workspaceId: string) => {
     if (workspaceId === activeWorkspaceId || switchPendingRef.current) return;
     switchPendingRef.current = true;
@@ -170,13 +197,10 @@ export function WorkspacePanel({ workspaces, activeWorkspaceId, client, currentU
     });
   };
 
-  function closeRemoveDialog() {
-    if (removePendingRef.current) return;
-    const origin = removeOriginRef.current;
+  function closeRemoveDialog(focus: "origin" | "fallback" = "origin", preserveError = false) {
+    pendingFocusRef.current = focus === "origin" ? removeOriginRef.current : membersHeadingRef.current;
     setRemoveTarget(null);
-    requestAnimationFrame(() => {
-      if (origin?.isConnected && !origin.closest("[inert]")) origin.focus();
-    });
+    if (!preserveError) setMemberError(null);
   }
 
   const removeMember = () => {
@@ -188,10 +212,12 @@ export function WorkspacePanel({ workspaces, activeWorkspaceId, client, currentU
       if (mutation.version !== mutationVersionRef.current || mutation.controller.signal.aborted) return;
       setMembers((current) => current.filter((member) => member.user_id !== target.user_id));
       setMemberStatus(`${target.display_name} 已移除。`);
-      setRemoveTarget(null);
-      requestAnimationFrame(() => membersHeadingRef.current?.focus());
+      closeRemoveDialog("fallback");
     }).catch((error: unknown) => {
-      if (mutation.version === mutationVersionRef.current && !isAbort(error, mutation.controller.signal)) setMemberError("移除成员失败，成员仍保留在工作区。请重试。");
+      if (mutation.version === mutationVersionRef.current && !isAbort(error, mutation.controller.signal)) {
+        setMemberError("移除成员失败，成员仍保留在工作区。请重试。");
+        closeRemoveDialog("origin", true);
+      }
     }).finally(() => {
       if (mutation.version === mutationVersionRef.current && !mutation.controller.signal.aborted) {
         mutationPendingRef.current = false;
@@ -222,12 +248,12 @@ export function WorkspacePanel({ workspaces, activeWorkspaceId, client, currentU
   };
 
   const removeDialog = removeTarget ? createPortal(
-    <div className="account-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeRemoveDialog(); }}>
+    <div className="account-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !removePendingRef.current) closeRemoveDialog(); }}>
       <div ref={removeDialogRef} className="account-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="remove-member-heading">
         <h3 id="remove-member-heading">确认移除成员</h3>
         <p>移除后，{removeTarget.display_name} 将无法再访问 {activeWorkspace?.name ?? "此工作区"}。</p>
         {memberError ? <p className="account-error" role="alert">{memberError}</p> : null}
-        <div className="account-actions"><button ref={removeCancelRef} type="button" disabled={removePendingRef.current} onClick={closeRemoveDialog}>取消移除</button><button type="button" disabled={removePendingRef.current} onClick={removeMember}>{removePendingRef.current ? "正在移除…" : "确认移除"}</button></div>
+        <div className="account-actions"><button ref={removeCancelRef} type="button" disabled={removePendingRef.current} onClick={() => closeRemoveDialog()}>取消移除</button><button type="button" disabled={removePendingRef.current} onClick={removeMember}>{removePendingRef.current ? "正在移除…" : "确认移除"}</button></div>
       </div>
     </div>,
     document.body,

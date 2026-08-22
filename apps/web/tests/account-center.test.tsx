@@ -635,7 +635,8 @@ describe("AccountCenter", () => {
     expect(api.updateMemberRole).toHaveBeenCalledWith("u2", { role: "viewer", base_revision: 2 }, expect.any(AbortSignal));
     expect(role).toHaveValue("editor");
 
-    fireEvent.click(screen.getByRole("button", { name: "移除 协作者" }));
+    const removeOrigin = screen.getByRole("button", { name: "移除 协作者" });
+    fireEvent.click(removeOrigin);
     expect(await screen.findByRole("dialog", { name: "确认移除成员" })).toBeInTheDocument();
     const confirmRemoval = screen.getByRole("button", { name: "确认移除" });
     act(() => { confirmRemoval.click(); confirmRemoval.click(); });
@@ -643,6 +644,24 @@ describe("AccountCenter", () => {
     expect(api.removeMember).toHaveBeenCalledOnce();
     expect(api.removeMember).toHaveBeenCalledWith("u2", 2, expect.any(AbortSignal));
     expect(screen.getByText("协作者")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "确认移除成员" })).not.toBeInTheDocument();
+    await waitFor(() => expect(removeOrigin).toHaveFocus());
+  });
+
+  it("restores member removal focus to the origin on cancel and to the list heading on success", async () => {
+    const api = collaboration();
+    renderCenter({ workspaces, activeWorkspaceId: "ws-1", collaboration: api, currentUserId: "u1" });
+    fireEvent.click(await screen.findByRole("tab", { name: "工作区" }));
+    const removeOrigin = await screen.findByRole("button", { name: "移除 协作者" });
+
+    fireEvent.click(removeOrigin);
+    fireEvent.click(await screen.findByRole("button", { name: "取消移除" }));
+    await waitFor(() => expect(removeOrigin).toHaveFocus());
+
+    fireEvent.click(removeOrigin);
+    fireEvent.click(await screen.findByRole("button", { name: "确认移除" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("协作者 已移除");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "成员管理" })).toHaveFocus());
   });
 
   it("loads usage and service status independently and retries only the failed resource", async () => {
@@ -686,6 +705,55 @@ describe("AccountCenter", () => {
     third.resolve(job);
   });
 
+  it("ignores an old workspace export success and uses a new client and key after workspace change", async () => {
+    vi.spyOn(crypto, "randomUUID")
+      .mockReturnValueOnce("00000000-0000-4000-8000-000000000011")
+      .mockReturnValueOnce("00000000-0000-4000-8000-000000000012");
+    const oldExport = deferred<typeof job>();
+    const newJob = { ...job, id: "job-2", workspace_id: "ws-2" };
+    const oldCreateJob = vi.fn(() => oldExport.promise);
+    const newCreateJob = vi.fn(async () => newJob);
+    const profileApi = client();
+    const view = renderCenter({ client: profileApi, workspaces, activeWorkspaceId: "ws-1", operations: operations({ createJob: oldCreateJob }) });
+    fireEvent.click(await screen.findByRole("tab", { name: "数据与隐私" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出全部数据" }));
+
+    view.rerender(<AccountCenter client={profileApi} workspaces={workspaces} activeWorkspaceId="ws-2" onWorkspaceChange={vi.fn()} onDeleted={vi.fn()} operations={operations({ createJob: newCreateJob })} initialTab="privacy" />);
+    expect(await screen.findByRole("button", { name: "导出全部数据" })).toBeEnabled();
+    oldExport.resolve(job);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByText("导出任务 job-1：queued")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "导出全部数据" }));
+    expect(newCreateJob).toHaveBeenCalledWith({ kind: "export", idempotency_key: "00000000-0000-4000-8000-000000000012", payload: { format: "zip", scope: "workspace" } });
+    expect(await screen.findByText("导出任务 job-2：queued")).toBeInTheDocument();
+    expect(oldCreateJob).toHaveBeenCalledWith({ kind: "export", idempotency_key: "00000000-0000-4000-8000-000000000011", payload: { format: "zip", scope: "workspace" } });
+  });
+
+  it("ignores an old workspace export rejection and finally while a new export is pending", async () => {
+    vi.spyOn(crypto, "randomUUID")
+      .mockReturnValueOnce("00000000-0000-4000-8000-000000000021")
+      .mockReturnValueOnce("00000000-0000-4000-8000-000000000022");
+    const oldExport = deferred<typeof job>();
+    const newExport = deferred<typeof job>();
+    const profileApi = client();
+    const view = renderCenter({ client: profileApi, workspaces, activeWorkspaceId: "ws-1", operations: operations({ createJob: vi.fn(() => oldExport.promise) }) });
+    fireEvent.click(await screen.findByRole("tab", { name: "数据与隐私" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出全部数据" }));
+
+    const newCreateJob = vi.fn(() => newExport.promise);
+    view.rerender(<AccountCenter client={profileApi} workspaces={workspaces} activeWorkspaceId="ws-2" onWorkspaceChange={vi.fn()} onDeleted={vi.fn()} operations={operations({ createJob: newCreateJob })} initialTab="privacy" />);
+    fireEvent.click(await screen.findByRole("button", { name: "导出全部数据" }));
+    expect(screen.getByRole("button", { name: "正在创建导出…" })).toBeDisabled();
+    oldExport.reject(new Error("old workspace response lost"));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole("alert", { name: /导出/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "正在创建导出…" })).toBeDisabled();
+    expect(newCreateJob).toHaveBeenCalledWith({ kind: "export", idempotency_key: "00000000-0000-4000-8000-000000000022", payload: { format: "zip", scope: "workspace" } });
+    newExport.resolve({ ...job, id: "job-2", workspace_id: "ws-2" });
+    expect(await screen.findByText("导出任务 job-2：queued")).toBeInTheDocument();
+  });
+
   it("requires the exact phrase and uses a portal focus-trapped second deletion confirmation", async () => {
     const api = client();
     renderCenterInWorkbench(api, { workspaces, activeWorkspaceId: "ws-1", operations: operations() });
@@ -710,6 +778,10 @@ describe("AccountCenter", () => {
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "最后确认删除账户" })).not.toBeInTheDocument();
     expect(document.querySelector(".workbench-canvas")).not.toHaveAttribute("inert");
+    await waitFor(() => expect(deleteButton).toHaveFocus());
+    fireEvent.click(deleteButton);
+    fireEvent.click(await screen.findByRole("button", { name: "取消删除" }));
+    await waitFor(() => expect(deleteButton).toHaveFocus());
   });
 
   it("orders deletion preparation, request, and completion while deduplicating submit", async () => {
@@ -733,6 +805,7 @@ describe("AccountCenter", () => {
     await waitFor(() => expect(onDeleted).toHaveBeenCalledOnce());
     expect(order).toEqual(["quiesce", "delete", "deleted"]);
     expect(api.deleteAccount).toHaveBeenCalledWith({ current_password: "current-password", confirmation: "永久删除我的账户" });
+    await waitFor(() => expect(screen.getByRole("heading", { name: "删除账户" })).toHaveFocus());
   });
 
   it("resumes drafts and preserves secrets plus ownership recovery details after deletion failure", async () => {
@@ -747,12 +820,15 @@ describe("AccountCenter", () => {
     fireEvent.click(await screen.findByRole("tab", { name: "数据与隐私" }));
     fireEvent.change(screen.getByLabelText("当前密码"), { target: { value: "current-password" } });
     fireEvent.change(screen.getByLabelText("删除确认文字"), { target: { value: "永久删除我的账户" } });
-    fireEvent.click(screen.getByRole("button", { name: "永久删除账户" }));
+    const deleteOrigin = screen.getByRole("button", { name: "永久删除账户" });
+    fireEvent.click(deleteOrigin);
     fireEvent.click(await screen.findByRole("button", { name: "确认永久删除" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("研究团队, 发布空间");
     expect(onDeleteFailed).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("dialog", { name: "最后确认删除账户" })).not.toBeInTheDocument();
+    await waitFor(() => expect(deleteOrigin).toHaveFocus());
     expect(screen.getByLabelText("当前密码")).toHaveValue("current-password");
     expect(screen.getByLabelText("删除确认文字")).toHaveValue("永久删除我的账户");
-    expect(screen.getByRole("button", { name: "确认永久删除" })).toBeEnabled();
+    expect(deleteOrigin).toBeEnabled();
   });
 });

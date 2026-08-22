@@ -5,6 +5,7 @@ import { App } from "../src/app/App";
 import type { LocalDraft } from "../src/data/local-store";
 import { AdaptiveWorkbench } from "../src/layout/AdaptiveWorkbench";
 import { ProductNavigation, type ProductDomain } from "../src/navigation/ProductNavigation";
+import { NoteDraftController } from "../src/notes/note-draft-controller";
 
 const user = { id: "u1", email: "u@example.test", displayName: "用户" };
 
@@ -44,6 +45,17 @@ function authenticatedSession() {
   return {
     user,
     workspaces: [{ id: "ws-1", name: "Personal", slug: "personal", role: "owner" as const, revision: 1 }],
+    active_workspace_id: "ws-1",
+  };
+}
+
+function twoWorkspaceSession() {
+  return {
+    user,
+    workspaces: [
+      { id: "ws-1", name: "Personal", slug: "personal", role: "owner" as const, revision: 1 },
+      { id: "ws-2", name: "Team", slug: "team", role: "owner" as const, revision: 1 },
+    ],
     active_workspace_id: "ws-1",
   };
 }
@@ -583,5 +595,107 @@ describe("App product navigation", () => {
     expect(await screen.findByRole("main")).toHaveClass("auth-page");
     expect(order).toEqual(["write", "delete", "destroy-hidden", "authgate"]);
     expect(authClient.logout).not.toHaveBeenCalled();
+  });
+
+  it("resumes current-workspace drafts when quiesce rejects during a workspace switch", async () => {
+    const serverCreate = deferred<ReturnType<typeof note>>();
+    const localStore = durableDraftStore();
+    const apiClient = noteFlowApi(serverCreate.promise);
+    const quiesce = NoteDraftController.prototype.quiesce;
+    const quiesceSpy = vi.spyOn(NoteDraftController.prototype, "quiesce").mockImplementation(async function (this: NoteDraftController) {
+      void quiesce.call(this);
+      throw new Error("draft drain failed");
+    });
+    render(<App
+      authClient={{ session: vi.fn(async () => twoWorkspaceSession()) } as any}
+      apiClient={apiClient as any}
+      localStore={localStore as any}
+      turnstileSiteKey="test"
+    />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    await screen.findByRole("textbox", { name: "笔记标题" });
+
+    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 Team" }));
+    await waitFor(() => expect(quiesceSpy).toHaveBeenCalled());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("切换工作区失败");
+    expect(screen.getByRole("listitem", { name: "Personal 所有者 当前工作区" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "笔记" }));
+    const mutationsBeforeResumeCheck = localStore.mutateDraft.mock.calls.length;
+    fireEvent.change(await screen.findByRole("textbox", { name: "笔记标题" }), { target: { value: "恢复后写入" } });
+    await waitFor(() => expect(localStore.mutateDraft).toHaveBeenCalledTimes(mutationsBeforeResumeCheck + 1));
+    serverCreate.resolve(note());
+  });
+
+  it("lets an interactive route switch override the initial workspace prop and rebuilds scoped clients", async () => {
+    const member = {
+      user_id: "u1", email: "u@example.test", display_name: "用户", role: "owner" as const, revision: 1,
+      joined_at: "2026-08-20T00:00:00.000Z", updated_at: "2026-08-20T00:00:00.000Z",
+    };
+    const apiClient = {
+      request: vi.fn(async (request: { path: string; method?: string; headers?: Record<string, string>; body?: Record<string, unknown> }) => {
+        if (request.path === "/api/v2/profile") return { id: "u1", email: "u@example.test", display_name: "用户", biography: "", locale: "zh-CN", timezone: "Asia/Shanghai", avatar_url: null, updated_at: "2026-08-23T00:00:00.000Z" };
+        if (request.path === "/api/v2/profile/sessions") return { items: [] };
+        if (request.path === "/api/v2/members") return { items: [member] };
+        if (request.path === "/api/v2/operations/usage") return { notes: 2, databases: 1, attachment_bytes: 0, queued_jobs: 0 };
+        if (request.path === "/api/v2/operations/status") return { queue: "ready", storage: "ready", ocr: "ready", version: "test" };
+        if (request.path === "/api/v2/operations/jobs") return { job: { id: "job-ws-2", workspace_id: "ws-2", kind: "export", status: "queued", revision: 1, error_code: null, created_at: "2026-08-23T00:00:00.000Z", updated_at: "2026-08-23T00:00:00.000Z" } };
+        if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+        return { items: [], next_cursor: null };
+      }),
+    };
+    const authClient = { session: vi.fn(async () => twoWorkspaceSession()) };
+    const localStore = draftStore();
+    const view = render(<App
+      authClient={authClient as any}
+      apiClient={apiClient as any}
+      localStore={localStore as any}
+      workspaceId="ws-1"
+      turnstileSiteKey="test"
+    />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 Team" }));
+
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "账户中心" })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    expect(await screen.findByRole("listitem", { name: "Team 所有者 当前工作区" })).toBeInTheDocument();
+    view.rerender(<App authClient={authClient as any} apiClient={apiClient as any} localStore={localStore as any} workspaceId={undefined} turnstileSiteKey="test" />);
+    expect(await screen.findByRole("listitem", { name: "Team 所有者 当前工作区" })).toBeInTheDocument();
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/members",
+      headers: { "x-workspace-id": "ws-2" },
+    })));
+
+    fireEvent.click(screen.getByRole("tab", { name: "数据与隐私" }));
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/operations/usage",
+      headers: { "x-workspace-id": "ws-2" },
+    })));
+    fireEvent.click(screen.getByRole("button", { name: "导出全部数据" }));
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/operations/jobs",
+      headers: { "x-workspace-id": "ws-2" },
+      body: expect.objectContaining({ kind: "export" }),
+    })));
+    expect(await screen.findByText("导出任务 job-ws-2：queued")).toBeInTheDocument();
+  });
+
+  it("continues to accept workspace prop initialization changes before an interactive route selection", async () => {
+    const authClient = { session: vi.fn(async () => twoWorkspaceSession()) };
+    const apiClient = appApiClient();
+    const localStore = draftStore();
+    const view = render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={localStore as any} workspaceId="ws-1" turnstileSiteKey="test" />);
+
+    view.rerender(<App authClient={authClient as any} apiClient={apiClient as any} localStore={localStore as any} workspaceId="ws-2" turnstileSiteKey="test" />);
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    expect(await screen.findByRole("listitem", { name: "Team 所有者 当前工作区" })).toBeInTheDocument();
   });
 });

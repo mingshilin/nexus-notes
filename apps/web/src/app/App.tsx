@@ -170,7 +170,7 @@ function AuthenticatedWorkspace({
   logoutError: string | null;
   onLogout(): void;
   onRetryLogout(): void;
-  onWorkspaceChange(workspaceId: string): void;
+  onWorkspaceChange(workspaceId: string): void | Promise<void>;
   onDeleted(): void;
   onDiagnosticNavigate?: (diagnostic: KnowledgeDiagnostic) => void;
 }) {
@@ -842,9 +842,9 @@ function AuthenticatedWorkspace({
   };
   const changeWorkspace = async (nextWorkspaceId: string) => {
     if (!workspaceId || nextWorkspaceId === workspaceId) return;
-    await draftController.quiesce();
     try {
-      onWorkspaceChange(nextWorkspaceId);
+      await draftController.quiesce();
+      await onWorkspaceChange(nextWorkspaceId);
       abortRecoveryRequests();
       abortRetryRequests();
       abortDatabaseRequests();
@@ -1204,7 +1204,13 @@ export function App({
   resetToken?: string;
   onDiagnosticNavigate?: (diagnostic: KnowledgeDiagnostic) => void;
 } = {}) {
-  const [route, setRoute] = useState<AppRoute>(() => routeFromLocation());
+  const [route, setRoute] = useState<AppRoute>(() => {
+    const initialRoute = routeFromLocation();
+    return initialRoute.kind === "workspace" && !initialRoute.workspaceId && workspaceId
+      ? { kind: "workspace", workspaceId }
+      : initialRoute;
+  });
+  const workspaceRouteSelectedRef = useRef(false);
   const [authGateVersion, setAuthGateVersion] = useState(0);
   const [defaultLocalStore, setDefaultLocalStore] = useState<UserScopedLocalStore>(() => new BetaLocalStore());
   const [logoutPhase, setLogoutPhase] = useState<LogoutPhase>("idle");
@@ -1215,6 +1221,13 @@ export function App({
   const draftControllerRef = useRef<NoteDraftController | null>(null);
   const activeLocalStore = localStore ?? defaultLocalStore;
   const logoutPending = logoutPhase === "quiescing";
+  useEffect(() => {
+    if (workspaceRouteSelectedRef.current) return;
+    setRoute((current) => {
+      if (current.kind !== "workspace" || current.workspaceId === workspaceId) return current;
+      return { kind: "workspace", workspaceId };
+    });
+  }, [workspaceId]);
   const requestCleanup = () => {
     if (!cleanupInFlight.current) setLogoutPhase("cleanup");
   };
@@ -1280,6 +1293,7 @@ export function App({
       turnstileSiteKey={turnstileSiteKey}
       onAccepted={(acceptedWorkspaceId) => {
         window.history.replaceState(null, "", "/");
+        workspaceRouteSelectedRef.current = true;
         setRoute({ kind: "workspace", workspaceId: acceptedWorkspaceId });
       }}
     />;
@@ -1290,7 +1304,7 @@ export function App({
   return (
     <AuthGate key={authGateVersion} client={authClient} turnstileSiteKey={turnstileSiteKey} resetToken={resetToken}>
       {(session) => {
-        const activeWorkspaceId = workspaceId ?? route.workspaceId ?? session.active_workspace_id;
+        const activeWorkspaceId = route.workspaceId ?? session.active_workspace_id ?? workspaceId ?? null;
         const memberships = Array.isArray(session.workspaces) ? session.workspaces : [];
         const activeWorkspace = memberships.find((candidate) => candidate.id === activeWorkspaceId);
         return (
@@ -1309,7 +1323,10 @@ export function App({
             logoutError={logoutError}
             onLogout={logout}
             onRetryLogout={logout}
-            onWorkspaceChange={(nextWorkspaceId) => setRoute({ kind: "workspace", workspaceId: nextWorkspaceId })}
+            onWorkspaceChange={(nextWorkspaceId) => {
+              workspaceRouteSelectedRef.current = true;
+              setRoute({ kind: "workspace", workspaceId: nextWorkspaceId });
+            }}
             onDeleted={accountDeleted}
             onDiagnosticNavigate={onDiagnosticNavigate}
           />
