@@ -8,10 +8,15 @@ const database = { id: "db-1", workspace_id: "ws-1", name: "Projects", descripti
 const property = { id: "name", workspace_id: "ws-1", database_id: "db-1", name: "Name", type: "text", config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now };
 const view = { id: "table", workspace_id: "ws-1", database_id: "db-1", name: "All", type: "table", config: { filters: [], sorts: [], grouping: null, visible_columns: ["name"], page_size: 50, settings: {} }, position: 0, revision: 1, created_at: now, updated_at: now };
 const record = { id: "record-1", workspace_id: "ws-1", database_id: "db-1", note_id: null, values: { name: "Launch" }, created_by: "user-1", updated_by: "user-1", revision: 1, created_at: now, updated_at: now };
+const authenticatedSession = {
+  user: { id: "user-1", email: "user@example.com" },
+  workspaces: [{ id: "ws-1", name: "Personal", slug: "personal", role: "owner" as const, revision: 1 }],
+  active_workspace_id: "ws-1",
+};
 
 describe("live database workspace", () => {
   it("loads databases only after navigation and renders the workspace-bound first page", async () => {
-    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" }, active_workspace_id: "ws-1" })) };
+    const authClient = { session: vi.fn(async () => authenticatedSession) };
     const apiClient = { request: vi.fn(async ({ path }: { path: string }) => {
       if (path === "/api/v2/databases") return { items: [database] };
       if (path === "/api/v2/databases/db-1") return { database, role: "owner", properties: [property], views: [view], templates: [] };
@@ -36,7 +41,7 @@ describe("live database workspace", () => {
   });
 
   it("creates the first database from the top-level empty workspace state", async () => {
-    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" }, active_workspace_id: "ws-1" })) };
+    const authClient = { session: vi.fn(async () => authenticatedSession) };
     const created = { ...database, id: "db-new", name: "Roadmap" };
     const apiClient = { request: vi.fn(async ({ path, method }: { path: string; method?: string }) => {
       if (path === "/api/v2/databases" && method === "POST") return { database: created };
@@ -55,7 +60,7 @@ describe("live database workspace", () => {
   });
 
   it("keeps child collection cursors local and propagates drawer modal state through App", async () => {
-    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" }, active_workspace_id: "ws-1" })) };
+    const authClient = { session: vi.fn(async () => authenticatedSession) };
     const status = { ...property, id: "status", name: "Status", type: "select", position: 1, config: { options: [{ id: "todo", name: "Todo" }, { id: "done", name: "Done" }] } };
     const board = { ...view, id: "board", name: "Board", type: "board", config: { ...view.config, visible_columns: ["name", "status"], grouping: { property_id: "status" }, page_size: 1, settings: { segment_size: 10 } } };
     const first = { ...record, values: { name: "First", status: "todo" } };

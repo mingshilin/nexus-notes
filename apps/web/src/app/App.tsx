@@ -5,8 +5,8 @@ import {
   Search,
   Sparkles,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import type { Attachment, AuthUserSummary, Database, DatabaseRecord, KnowledgeDiagnostic, Note, Profile, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, KnowledgeDiagnostic, Note, Profile, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient } from "../data/api-client";
 import { ProfileClient } from "../data/profile-client";
@@ -46,6 +46,7 @@ type AppRoute =
   | { kind: "workspace"; workspaceId?: string }
   | { kind: "invite"; token: string }
   | { kind: "share"; token: string };
+type WorkspaceRouteAuthority = { userId: string; workspaceId: string };
 type UserScopedLocalStore = NoteDraftStore & { destroy(): Promise<void> };
 type LogoutPhase = "idle" | "quiescing" | "cleanup" | "cleanup-error";
 
@@ -137,6 +138,41 @@ function routeFromLocation(): AppRoute {
   const invite = window.location.pathname.match(/^\/invite\/([A-Za-z0-9_-]{43,256})\/?$/u)?.[1];
   if (invite) return { kind: "invite", token: invite };
   return { kind: "workspace" };
+}
+
+function WorkspaceSessionBoundary({ session, routeWorkspaceId, routeAuthority, initialWorkspaceId, onStaleRoute, children }: {
+  session: AuthSession;
+  routeWorkspaceId?: string;
+  routeAuthority: WorkspaceRouteAuthority | null;
+  initialWorkspaceId?: string;
+  onStaleRoute(workspaceId: string, authority: WorkspaceRouteAuthority | null): void;
+  children(selection: {
+    activeWorkspace: WorkspaceMembershipSummary | undefined;
+    activeWorkspaceId: string | null;
+    memberships: WorkspaceMembershipSummary[];
+  }): ReactNode;
+}) {
+  const memberships = Array.isArray(session.workspaces) ? session.workspaces : [];
+  const routeWorkspace = routeWorkspaceId
+    ? memberships.find((workspace) => workspace.id === routeWorkspaceId)
+    : undefined;
+  const routeAuthorized = Boolean(
+    routeWorkspace
+    && routeAuthority?.userId === session.user.id
+    && routeAuthority.workspaceId === routeWorkspaceId,
+  );
+  const sessionWorkspace = memberships.find((workspace) => workspace.id === session.active_workspace_id);
+  const initialWorkspace = initialWorkspaceId
+    ? memberships.find((workspace) => workspace.id === initialWorkspaceId)
+    : undefined;
+  const activeWorkspace = routeAuthorized ? routeWorkspace : sessionWorkspace ?? initialWorkspace;
+  const staleRoute = Boolean(routeWorkspaceId && !routeAuthorized);
+
+  useEffect(() => {
+    if (staleRoute && routeWorkspaceId) onStaleRoute(routeWorkspaceId, routeAuthority);
+  }, [onStaleRoute, routeAuthority, routeWorkspaceId, staleRoute]);
+
+  return <>{children({ activeWorkspace, activeWorkspaceId: activeWorkspace?.id ?? null, memberships })}</>;
 }
 
 function AuthenticatedWorkspace({
@@ -1204,13 +1240,8 @@ export function App({
   resetToken?: string;
   onDiagnosticNavigate?: (diagnostic: KnowledgeDiagnostic) => void;
 } = {}) {
-  const [route, setRoute] = useState<AppRoute>(() => {
-    const initialRoute = routeFromLocation();
-    return initialRoute.kind === "workspace" && !initialRoute.workspaceId && workspaceId
-      ? { kind: "workspace", workspaceId }
-      : initialRoute;
-  });
-  const workspaceRouteSelectedRef = useRef(false);
+  const [route, setRoute] = useState<AppRoute>(() => routeFromLocation());
+  const workspaceRouteSelectedRef = useRef<WorkspaceRouteAuthority | null>(null);
   const [authGateVersion, setAuthGateVersion] = useState(0);
   const [defaultLocalStore, setDefaultLocalStore] = useState<UserScopedLocalStore>(() => new BetaLocalStore());
   const [logoutPhase, setLogoutPhase] = useState<LogoutPhase>("idle");
@@ -1221,13 +1252,6 @@ export function App({
   const draftControllerRef = useRef<NoteDraftController | null>(null);
   const activeLocalStore = localStore ?? defaultLocalStore;
   const logoutPending = logoutPhase === "quiescing";
-  useEffect(() => {
-    if (workspaceRouteSelectedRef.current) return;
-    setRoute((current) => {
-      if (current.kind !== "workspace" || current.workspaceId === workspaceId) return current;
-      return { kind: "workspace", workspaceId };
-    });
-  }, [workspaceId]);
   const requestCleanup = () => {
     if (!cleanupInFlight.current) setLogoutPhase("cleanup");
   };
@@ -1248,6 +1272,8 @@ export function App({
         return;
       }
       logoutAttempted.current = false;
+      workspaceRouteSelectedRef.current = null;
+      setRoute({ kind: "workspace" });
       if (!localStore) setDefaultLocalStore(new BetaLocalStore());
       setLogoutError(null);
       setCleanupAfterDelete(false);
@@ -1291,9 +1317,9 @@ export function App({
       client={new CollaborationClient(apiClient, "invite-redemption")}
       token={route.token}
       turnstileSiteKey={turnstileSiteKey}
-      onAccepted={(acceptedWorkspaceId) => {
+      onAccepted={(acceptedWorkspaceId, userId) => {
         window.history.replaceState(null, "", "/");
-        workspaceRouteSelectedRef.current = true;
+        workspaceRouteSelectedRef.current = { userId, workspaceId: acceptedWorkspaceId };
         setRoute({ kind: "workspace", workspaceId: acceptedWorkspaceId });
       }}
     />;
@@ -1304,33 +1330,46 @@ export function App({
   return (
     <AuthGate key={authGateVersion} client={authClient} turnstileSiteKey={turnstileSiteKey} resetToken={resetToken}>
       {(session) => {
-        const activeWorkspaceId = route.workspaceId ?? session.active_workspace_id ?? workspaceId ?? null;
-        const memberships = Array.isArray(session.workspaces) ? session.workspaces : [];
-        const activeWorkspace = memberships.find((candidate) => candidate.id === activeWorkspaceId);
-        return (
-          <AuthenticatedWorkspace
-            key={activeWorkspaceId ?? "no-active-workspace"}
-            apiClient={apiClient}
-            workspaceId={activeWorkspaceId ?? undefined}
-            workspaces={memberships}
-            activeWorkspaceId={activeWorkspaceId}
-            user={{ ...session.user, displayName: session.user.displayName || session.user.email }}
-            role={activeWorkspace?.role ?? "viewer"}
-            collaborationEnabled={Boolean(activeWorkspace)}
-            localStore={activeLocalStore}
-            draftControllerRef={draftControllerRef}
-            logoutPending={logoutPending}
-            logoutError={logoutError}
-            onLogout={logout}
-            onRetryLogout={logout}
-            onWorkspaceChange={(nextWorkspaceId) => {
-              workspaceRouteSelectedRef.current = true;
-              setRoute({ kind: "workspace", workspaceId: nextWorkspaceId });
-            }}
-            onDeleted={accountDeleted}
-            onDiagnosticNavigate={onDiagnosticNavigate}
-          />
-        );
+        const routeWorkspaceId = route.kind === "workspace" ? route.workspaceId : undefined;
+        const routeAuthority = workspaceRouteSelectedRef.current;
+        return <WorkspaceSessionBoundary
+          session={session}
+          routeWorkspaceId={routeWorkspaceId}
+          routeAuthority={routeAuthority}
+          initialWorkspaceId={workspaceId}
+          onStaleRoute={(staleWorkspaceId, staleAuthority) => {
+            if (workspaceRouteSelectedRef.current !== staleAuthority) return;
+            workspaceRouteSelectedRef.current = null;
+            setRoute((current) => current.kind === "workspace" && current.workspaceId === staleWorkspaceId
+              ? { kind: "workspace" }
+              : current);
+          }}
+        >
+          {({ activeWorkspace, activeWorkspaceId, memberships }) => (
+            <AuthenticatedWorkspace
+              key={activeWorkspaceId ?? "no-active-workspace"}
+              apiClient={apiClient}
+              workspaceId={activeWorkspaceId ?? undefined}
+              workspaces={memberships}
+              activeWorkspaceId={activeWorkspaceId}
+              user={{ ...session.user, displayName: session.user.displayName || session.user.email }}
+              role={activeWorkspace?.role ?? "viewer"}
+              collaborationEnabled={Boolean(activeWorkspace)}
+              localStore={activeLocalStore}
+              draftControllerRef={draftControllerRef}
+              logoutPending={logoutPending}
+              logoutError={logoutError}
+              onLogout={logout}
+              onRetryLogout={logout}
+              onWorkspaceChange={(nextWorkspaceId) => {
+                workspaceRouteSelectedRef.current = { userId: session.user.id, workspaceId: nextWorkspaceId };
+                setRoute({ kind: "workspace", workspaceId: nextWorkspaceId });
+              }}
+              onDeleted={accountDeleted}
+              onDiagnosticNavigate={onDiagnosticNavigate}
+            />
+          )}
+        </WorkspaceSessionBoundary>;
       }}
     </AuthGate>
   );

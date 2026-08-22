@@ -59,7 +59,7 @@ describe("App authentication bootstrap", () => {
   });
 
   it("mounts live attachment recovery for the active workspace", async () => {
-    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" } })) };
+    const authClient = { session: vi.fn(async () => authenticatedSession("ws-1")) };
     const apiClient = { request: vi.fn(async (request: { path: string }) => request.path.startsWith("/api/v2/attachments") ? { items: [{ id: "attachment-1", filename: "scan.pdf", mime_type: "application/pdf", ocr_status: "failed" }], next_cursor: null } : { items: [], next_cursor: null }) };
     render(<App authClient={authClient as any} apiClient={apiClient as any} workspaceId="ws-1" turnstileSiteKey="test" />);
     expect(await screen.findByRole("button", { name: "重试 scan.pdf" })).toBeInTheDocument();
@@ -67,7 +67,7 @@ describe("App authentication bootstrap", () => {
   });
 
   it("uses controlled MIME and OCR filters in the active workspace query", async () => {
-    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" } })) };
+    const authClient = { session: vi.fn(async () => authenticatedSession("ws-1")) };
     const apiClient = { request: vi.fn(async () => ({ items: [], next_cursor: null })) };
     render(<App authClient={authClient as any} apiClient={apiClient as any} workspaceId="ws-1" turnstileSiteKey="test" />);
 
@@ -81,7 +81,7 @@ describe("App authentication bootstrap", () => {
   });
 
   it("does not invent a workspace when the authenticated shell has none", async () => {
-    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" } })) };
+    const authClient = { session: vi.fn(async () => authenticatedSession(null)) };
     const apiClient = { request: vi.fn() };
     render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
 
@@ -226,7 +226,7 @@ describe("App authentication bootstrap", () => {
   });
 
   it("deduplicates retry clicks, refreshes afterwards, and delegates diagnostic navigation", async () => {
-    const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" } })) };
+    const authClient = { session: vi.fn(async () => authenticatedSession("ws-1")) };
     let resolveRetry: ((value: { queued: string[]; ineligible: string[]; duplicate: string[] }) => void) | undefined;
     const apiClient = { request: vi.fn((request: { path: string }) => {
       if (request.path.includes("/ocr/retry")) return new Promise((resolve) => { resolveRetry = resolve; });

@@ -33,7 +33,7 @@ function AcceptInvitation({
   preview: InvitationPreview;
   session: AuthSession;
   token: string;
-  onAccepted(workspaceId: string): void;
+  onAccepted(workspaceId: string, userId: string): void;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,7 +51,7 @@ function AcceptInvitation({
       const acceptedWorkspace = refreshed.workspaces.find((workspace) => !existing.has(workspace.id))
         ?? refreshed.workspaces.find((workspace) => workspace.name === preview.workspace_name && workspace.role === preview.role);
       if (!acceptedWorkspace) throw Object.assign(new Error("Accepted workspace missing from refreshed session"), { code: "INVITATION_SESSION_STALE" });
-      onAccepted(acceptedWorkspace.id);
+      onAccepted(acceptedWorkspace.id, refreshed.user.id);
     } catch (reason) {
       setError(inviteErrorMessage(reason));
     } finally {
@@ -79,7 +79,7 @@ export function InviteRedemptionPage({
   client: CollaborationClient;
   token: string;
   turnstileSiteKey: string;
-  onAccepted(workspaceId: string): void;
+  onAccepted(workspaceId: string, userId: string): void;
 }) {
   const [preview, setPreview] = useState<InvitationPreview | null>(null);
   const [error, setError] = useState<string | null>(null);

@@ -3,7 +3,11 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 
-const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" } })) };
+const authClient = { session: vi.fn(async () => ({
+  user: { id: "user-1", email: "user@example.com" },
+  workspaces: [{ id: "ws-1", name: "Personal", slug: "personal", role: "owner" as const, revision: 1 }],
+  active_workspace_id: "ws-1",
+})) };
 
 function attachment(id: string, next_cursor: string | null = null) {
   return { items: [{ id, filename: `${id}.pdf`, mime_type: "application/pdf", ocr_status: "failed" }], next_cursor };

@@ -120,9 +120,17 @@ function renderWorkspaceWithStore(
   workspaceId = "ws-1",
 ) {
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 929 });
+  const workspaceSession = {
+    ...session,
+    workspaces: [
+      ...session.workspaces,
+      { id: "ws-2", name: "Workspace two", slug: "workspace-two", role: "owner" as const, revision: 1 },
+    ],
+    active_workspace_id: workspaceId,
+  };
   return render(
     <App
-      authClient={{ session: vi.fn(async () => session) } as any}
+      authClient={{ session: vi.fn(async () => workspaceSession) } as any}
       apiClient={apiClient as any}
       localStore={localStore as any}
       workspaceId={workspaceId}

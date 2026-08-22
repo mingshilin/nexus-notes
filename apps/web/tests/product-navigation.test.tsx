@@ -60,6 +60,34 @@ function twoWorkspaceSession() {
   };
 }
 
+function tenantSession(userId: string, workspaceIds: string[], activeWorkspaceId: string) {
+  return {
+    user: { id: userId, email: `${userId}@example.test`, displayName: userId },
+    workspaces: workspaceIds.map((id) => ({ id, name: id, slug: id.toLowerCase(), role: "owner" as const, revision: 1 })),
+    active_workspace_id: activeWorkspaceId,
+  };
+}
+
+function tenantApi(currentUserId: () => string | null, scopedRequests: Array<{ userId: string | null; workspaceId: string; path: string }>) {
+  return {
+    request: vi.fn(async (request: { path: string; method?: string; headers?: Record<string, string> }) => {
+      const workspaceId = request.headers?.["x-workspace-id"];
+      if (workspaceId) scopedRequests.push({ userId: currentUserId(), workspaceId, path: request.path });
+      if (request.path === "/api/v2/profile" && request.method === "DELETE") return { deleted: true };
+      if (request.path === "/api/v2/profile") {
+        const id = currentUserId() ?? "unknown";
+        return { id, email: `${id}@example.test`, display_name: id, biography: "", locale: "zh-CN", timezone: "Asia/Shanghai", avatar_url: null, updated_at: "2026-08-23T00:00:00.000Z" };
+      }
+      if (request.path === "/api/v2/profile/sessions") return { items: [] };
+      if (request.path === "/api/v2/members") return { items: [] };
+      if (request.path === "/api/v2/operations/usage") return { notes: 0, databases: 0, attachment_bytes: 0, queued_jobs: 0 };
+      if (request.path === "/api/v2/operations/status") return { queue: "ready", storage: "ready", ocr: "ready", version: "test" };
+      if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+      return { items: [], next_cursor: null };
+    }),
+  };
+}
+
 function appApiClient() {
   return {
     request: vi.fn(async (request: { path: string }) => {
@@ -688,7 +716,8 @@ describe("App product navigation", () => {
   });
 
   it("continues to accept workspace prop initialization changes before an interactive route selection", async () => {
-    const authClient = { session: vi.fn(async () => twoWorkspaceSession()) };
+    const sessionWithoutActiveWorkspace = { ...twoWorkspaceSession(), active_workspace_id: null };
+    const authClient = { session: vi.fn(async () => sessionWithoutActiveWorkspace) };
     const apiClient = appApiClient();
     const localStore = draftStore();
     const view = render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={localStore as any} workspaceId="ws-1" turnstileSiteKey="test" />);
@@ -697,5 +726,120 @@ describe("App product navigation", () => {
     fireEvent.click(await screen.findByRole("button", { name: "账户" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
     expect(await screen.findByRole("listitem", { name: "Team 所有者 当前工作区" })).toBeInTheDocument();
+  });
+
+  it("resets user-bound workspace authority before a different user session after logout cleanup", async () => {
+    const userA = tenantSession("user-A", ["ws-A1", "ws-A2"], "ws-A1");
+    const userB = tenantSession("user-B", ["ws-B1"], "ws-B1");
+    let currentUserId: string | null = null;
+    const authClient = {
+      session: vi.fn()
+        .mockImplementationOnce(async () => { currentUserId = userA.user.id; return userA; })
+        .mockImplementationOnce(async () => { currentUserId = userB.user.id; return userB; }),
+      logout: vi.fn(async () => ({ logged_out: true as const })),
+    };
+    const scopedRequests: Array<{ userId: string | null; workspaceId: string; path: string }> = [];
+    const apiClient = tenantApi(() => currentUserId, scopedRequests);
+    render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={draftStore() as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 ws-A2" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "账户中心" })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "退出登录" }));
+
+    await waitFor(() => expect(authClient.session).toHaveBeenCalledTimes(2));
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    expect(await screen.findByRole("listitem", { name: "ws-B1 所有者 当前工作区" })).toBeInTheDocument();
+    const userBRequests = scopedRequests.filter((request) => request.userId === "user-B");
+    expect(userBRequests.length).toBeGreaterThan(0);
+    expect(userBRequests[0]?.workspaceId).toBe("ws-B1");
+    expect(userBRequests.every((request) => request.workspaceId === "ws-B1")).toBe(true);
+    expect(userBRequests.some((request) => request.workspaceId === "ws-A2")).toBe(false);
+  });
+
+  it("ignores an initial workspace ID absent from the authenticated session membership", async () => {
+    const userB = tenantSession("user-B", ["ws-B1"], "ws-B1");
+    let currentUserId: string | null = null;
+    const authClient = { session: vi.fn(async () => { currentUserId = userB.user.id; return userB; }) };
+    const scopedRequests: Array<{ userId: string | null; workspaceId: string; path: string }> = [];
+    const apiClient = tenantApi(() => currentUserId, scopedRequests);
+    render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={draftStore() as any} workspaceId="ws-stale" turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    expect(await screen.findByRole("listitem", { name: "ws-B1 所有者 当前工作区" })).toBeInTheDocument();
+    expect(scopedRequests.length).toBeGreaterThan(0);
+    expect(scopedRequests.every((request) => request.workspaceId === "ws-B1")).toBe(true);
+    expect(scopedRequests.some((request) => request.workspaceId === "ws-stale")).toBe(false);
+  });
+
+  it("clears a same-user route when membership is removed so it cannot revive later", async () => {
+    const fullSession = tenantSession("user-A", ["ws-A1", "ws-A2"], "ws-A1");
+    const reducedSession = tenantSession("user-A", ["ws-A1"], "ws-A1");
+    let phase: string | null = null;
+    const firstAuthClient = { session: vi.fn(async () => { phase = "full"; return fullSession; }) };
+    const reducedAuthClient = { session: vi.fn(async () => { phase = "reduced"; return reducedSession; }) };
+    const restoredAuthClient = { session: vi.fn(async () => { phase = "restored"; return fullSession; }) };
+    const scopedRequests: Array<{ userId: string | null; workspaceId: string; path: string }> = [];
+    const apiClient = tenantApi(() => phase, scopedRequests);
+    const localStore = draftStore();
+    const view = render(<App authClient={firstAuthClient as any} apiClient={apiClient as any} localStore={localStore as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 ws-A2" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "账户中心" })).not.toBeInTheDocument());
+
+    view.rerender(<App authClient={reducedAuthClient as any} apiClient={apiClient as any} localStore={localStore as any} turnstileSiteKey="test" />);
+    await waitFor(() => expect(reducedAuthClient.session).toHaveBeenCalledOnce());
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    expect(await screen.findByRole("listitem", { name: "ws-A1 所有者 当前工作区" })).toBeInTheDocument();
+    expect(scopedRequests.filter((request) => request.userId === "reduced").every((request) => request.workspaceId === "ws-A1")).toBe(true);
+
+    view.rerender(<App authClient={restoredAuthClient as any} apiClient={apiClient as any} localStore={localStore as any} turnstileSiteKey="test" />);
+    await waitFor(() => expect(restoredAuthClient.session).toHaveBeenCalledOnce());
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    expect(await screen.findByRole("listitem", { name: "ws-A1 所有者 当前工作区" })).toBeInTheDocument();
+    expect(scopedRequests.filter((request) => request.userId === "restored").every((request) => request.workspaceId === "ws-A1")).toBe(true);
+  });
+
+  it("uses the same tenant reset after account deletion cleanup without logging out", async () => {
+    const userA = tenantSession("user-A", ["ws-A1", "ws-A2"], "ws-A1");
+    const userB = tenantSession("user-B", ["ws-B1"], "ws-B1");
+    let currentUserId: string | null = null;
+    const authClient = {
+      session: vi.fn()
+        .mockImplementationOnce(async () => { currentUserId = userA.user.id; return userA; })
+        .mockImplementationOnce(async () => { currentUserId = userB.user.id; return userB; }),
+      logout: vi.fn(async () => ({ logged_out: true as const })),
+    };
+    const scopedRequests: Array<{ userId: string | null; workspaceId: string; path: string }> = [];
+    const apiClient = tenantApi(() => currentUserId, scopedRequests);
+    render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={draftStore() as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 ws-A2" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "账户中心" })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "数据与隐私" }));
+    fireEvent.change(screen.getByLabelText("当前密码"), { target: { value: "current-password" } });
+    fireEvent.change(screen.getByLabelText("删除确认文字"), { target: { value: "永久删除我的账户" } });
+    fireEvent.click(screen.getByRole("button", { name: "永久删除账户" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认永久删除" }));
+
+    await waitFor(() => expect(authClient.session).toHaveBeenCalledTimes(2));
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    expect(await screen.findByRole("listitem", { name: "ws-B1 所有者 当前工作区" })).toBeInTheDocument();
+    const userBRequests = scopedRequests.filter((request) => request.userId === "user-B");
+    expect(userBRequests.length).toBeGreaterThan(0);
+    expect(userBRequests.every((request) => request.workspaceId === "ws-B1")).toBe(true);
+    expect(authClient.logout).not.toHaveBeenCalled();
   });
 });
