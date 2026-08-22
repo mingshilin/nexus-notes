@@ -113,6 +113,15 @@ function extractJavaScriptReferences(source) {
   return [...source.matchAll(JAVASCRIPT_REFERENCE_PATTERN)].map((match) => match[1]);
 }
 
+function resolveRemoteAssetUrl(reference, assetUrl) {
+  const normalizedReference = reference.startsWith("assets/") ? `/${reference}` : reference;
+  const resolved = new URL(normalizedReference, assetUrl);
+  if (resolved.pathname.startsWith("/assets/assets/")) {
+    resolved.pathname = resolved.pathname.slice("/assets".length);
+  }
+  return resolved;
+}
+
 function checkInitialAssetNames(assets, sourceLabel) {
   const offenders = assets.initialJs.filter((asset) =>
     FORBIDDEN_INITIAL_CHUNKS.some((chunkName) => asset.includes(chunkName)),
@@ -214,15 +223,19 @@ async function collectRemoteJavaScript(baseUrl, initialAssets) {
     if (assetUrl.origin !== baseUrl.origin || !assetUrl.pathname.startsWith("/assets/")) continue;
     const response = await fetchWithTimeout(assetUrl);
     assertReadiness(response.ok, `online: failed to fetch ${assetUrl} (${response.status})`);
+    assertReadiness(
+      !response.headers.get("content-type")?.toLowerCase().startsWith("text/html"),
+      `online: asset reference returned HTML instead of JavaScript: ${assetUrl}`,
+    );
     const source = await response.text();
     files.push({ path: assetUrl.pathname, source });
 
     for (const reference of extractJavaScriptReferences(source)) {
-      const referenceUrl = new URL(reference, assetUrl);
+      const referenceUrl = resolveRemoteAssetUrl(reference, assetUrl);
       if (
         referenceUrl.origin === baseUrl.origin
         && referenceUrl.pathname.startsWith("/assets/")
-        && /\.m?js$/i.test(referenceUrl.pathname)
+        && /\.js$/i.test(referenceUrl.pathname)
         && !visited.has(referenceUrl.href)
       ) {
         queue.push(referenceUrl);

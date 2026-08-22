@@ -52,7 +52,7 @@ describe("Turnstile deployment readiness", () => {
         });
       }
       if (url === `${baseUrl}/assets/main.js`) {
-        return new Response('import("./AuthPanel.js");', { status: 200 });
+        return new Response('import("assets/AuthPanel.js");', { status: 200 });
       }
       if (url === `${baseUrl}/assets/AuthPanel.js`) {
         return new Response(`const siteKey = "${siteKey}";`, { status: 200 });
