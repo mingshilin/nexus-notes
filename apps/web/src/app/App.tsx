@@ -1,17 +1,12 @@
 import {
   Bell,
-  BookOpen,
   Boxes,
-  Inbox,
-  PanelLeft,
   Plus,
   Search,
-  Settings,
   Sparkles,
-  Users,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import type { Attachment, Database, DatabaseRecord, KnowledgeDiagnostic, Note, WorkspaceRoleContract } from "@nexus/contracts";
+import type { Attachment, AuthUserSummary, Database, DatabaseRecord, KnowledgeDiagnostic, Note, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient } from "../data/api-client";
 import { CollaborationClient } from "../data/collaboration-client";
@@ -24,10 +19,10 @@ import { DatabaseClient, type DatabaseBundle } from "../data/database-client";
 import { BetaLocalStore } from "../data/local-store";
 import { NoteDraftController, type DraftSyncResult, type NoteDraftStore } from "../notes/note-draft-controller";
 import { NormalizedCache } from "../data/normalized-cache";
+import { ProductNavigation, type AccountSubsection, type ProductDomain } from "../navigation/ProductNavigation";
 import {
   CollaborationCenter,
   InviteRedemptionPage,
-  NotificationButton,
   NotificationCenter,
   PublicSharePage,
   notificationButtonLabel,
@@ -35,15 +30,6 @@ import {
   type CollaborationShareTarget,
   type NotificationTarget,
 } from "../collaboration";
-
-const domains = [
-  { label: "收集", icon: Inbox, target: "notes" as const },
-  { label: "创作", icon: BookOpen, target: "notes" as const },
-  { label: "整理", icon: Search, target: "notes" as const },
-  { label: "协作", icon: Users, target: "collaboration" as const },
-  { label: "运营", icon: Settings, target: "notes" as const },
-  { label: "数据库", icon: Boxes, target: "databases" as const },
-];
 
 const LazyDatabaseWorkbench = lazy(async () => {
   const module = await import("../databases/DatabaseWorkbench");
@@ -57,6 +43,19 @@ type AppRoute =
   | { kind: "workspace"; workspaceId?: string }
   | { kind: "invite"; token: string }
   | { kind: "share"; token: string };
+type UserScopedLocalStore = NoteDraftStore & { destroy?(): Promise<void> };
+
+function clearUserScopedBrowserState() {
+  if (typeof window === "undefined") return;
+  for (const storage of [window.localStorage, window.sessionStorage]) {
+    const keys: string[] = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key?.startsWith("nexus:")) keys.push(key);
+    }
+    keys.forEach((key) => storage.removeItem(key));
+  }
+}
 
 function resetTokenFromLocation() {
   if (typeof window === "undefined") return undefined;
@@ -122,23 +121,32 @@ function routeFromLocation(): AppRoute {
 function AuthenticatedWorkspace({
   apiClient,
   workspaceId,
-  userId,
+  user,
   role,
   collaborationEnabled,
   localStore,
+  logoutPending,
+  logoutError,
+  onLogout,
+  onRetryLogout,
   onDiagnosticNavigate,
 }: {
   apiClient: ApiClient;
   workspaceId?: string;
-  userId: string;
+  user: AuthUserSummary;
   role: WorkspaceRoleContract;
   collaborationEnabled: boolean;
-  localStore?: NoteDraftStore;
+  localStore: NoteDraftStore;
+  logoutPending: boolean;
+  logoutError: string | null;
+  onLogout(): void;
+  onRetryLogout(): void;
   onDiagnosticNavigate?: (diagnostic: KnowledgeDiagnostic) => void;
 }) {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
-  const [activeDomain, setActiveDomain] = useState<"notes" | "databases" | "collaboration">("notes");
+  const [activeDomain, setActiveDomain] = useState<ProductDomain>("notes");
+  const [accountSubsection, setAccountSubsection] = useState<AccountSubsection>("personal");
   const [collaborationClient] = useState(() => new CollaborationClient(apiClient, workspaceId ?? ""));
   const [unreadCount, setUnreadCount] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);
@@ -191,8 +199,7 @@ function AuthenticatedWorkspace({
   const notificationOpenerRef = useRef<HTMLElement | null>(null);
   const notificationTargetController = useRef<AbortController | null>(null);
   const [draftController] = useState(() => {
-    const store = localStore ?? new BetaLocalStore();
-    return new NoteDraftController(store);
+    return new NoteDraftController(localStore);
   });
   const activeDraftIdRef = useRef<string | null>(null);
   const activationInFlight = useRef(false);
@@ -209,6 +216,7 @@ function AuthenticatedWorkspace({
     id: note.id,
     label: note.title.trim() || "未命名笔记",
   }));
+  const userId = user.id;
 
   useEffect(() => {
     if (!inspectorOpen && inspectorOpenerRef.current) {
@@ -775,43 +783,32 @@ function AuthenticatedWorkspace({
     });
   };
 
-  const navigation = (
-    <>
-      <div className="brand-mark" aria-label="Nexus Notes">N</div>
-      {domains.map(({ label, icon: Icon, target }, index) => (
-        <button
-          key={label}
-          className={(target === "databases" ? activeDomain === "databases" : target === "collaboration" ? activeDomain === "collaboration" : activeDomain === "notes" && index === 1) ? "rail-item active" : "rail-item"}
-          type="button"
-          disabled={target === "collaboration" && !collaborationEnabled}
-          onClick={() => { if (target === "collaboration") setCollaborationInitialSection("people"); setActiveDomain(target); setActivePane("canvas"); }}
-        >
-          <Icon aria-hidden="true" size={19} />
-          <span>{label}</span>
-        </button>
-      ))}
-      {activeDomain !== "collaboration" ? (
-        <button
-          className="rail-item"
-          type="button"
-          aria-label={activePane === "context" ? "关闭笔记列表" : "打开笔记列表"}
-          onClick={() => setActivePane((pane) => pane === "context" ? "canvas" : "context")}
-        >
-          <PanelLeft aria-hidden="true" size={19} />
-          <span>列表</span>
-        </button>
-      ) : null}
-      <NotificationButton unreadCount={unreadCount} onClick={toggleNotifications} />
-    </>
-  );
-
-  const mobileNavigation = <>
-    <button type="button" onClick={() => { setActiveDomain("notes"); setActivePane("canvas"); }}>首页</button>
-    <button type="button" onClick={() => { setActiveDomain("databases"); setActivePane("canvas"); }}>数据库</button>
-    <button type="button" disabled={!collaborationEnabled} onClick={() => { setCollaborationInitialSection("people"); setActiveDomain("collaboration"); setActivePane("canvas"); }}>协作</button>
-    <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}>通知{unreadCount > 0 ? ` ${unreadCount}` : ""}</button>
-    <button type="button" onClick={(event) => openInspector(event.currentTarget)}>检查器</button>
-  </>;
+  const changeDomain = (domain: ProductDomain) => {
+    if (domain === "collaboration" && !collaborationEnabled) return;
+    if (domain === "collaboration") setCollaborationInitialSection("people");
+    setActiveDomain(domain);
+    setActivePane("canvas");
+  };
+  const openAccountSubsection = (subsection: AccountSubsection) => {
+    setAccountSubsection(subsection);
+    changeDomain("account");
+  };
+  const productNavigationProps = {
+    active: activeDomain,
+    user,
+    unreadCount,
+    collaborationEnabled,
+    contextOpen: activePane === "context",
+    logoutPending,
+    onChange: changeDomain,
+    onContextToggle: () => setActivePane((pane) => pane === "context" ? "canvas" : "context"),
+    onPersonalCenter: () => openAccountSubsection("personal"),
+    onNotifications: toggleNotifications,
+    onWorkspace: () => openAccountSubsection("workspace"),
+    onLogout,
+  };
+  const navigation = <ProductNavigation {...productNavigationProps} mode="rail" />;
+  const mobileNavigation = <ProductNavigation {...productNavigationProps} mode="mobile" />;
 
   const contextualList = (
     <div className="context-content">
@@ -912,6 +909,32 @@ function AuthenticatedWorkspace({
       {!databaseLoading && !databaseError && databases.length > 0 && !databaseBundle ? <p className="database-empty">请选择数据库。</p> : null}
     </section>
   );
+  const knowledgeCanvas = (
+    <section className="product-domain-page knowledge-domain-page">
+      <p className="eyebrow">KNOWLEDGE RECOVERY</p>
+      <h1>知识恢复</h1>
+      <p className="product-domain-lead">集中处理附件 OCR 状态与知识诊断。</p>
+      {recoveryPanel}
+    </section>
+  );
+  const aiCanvas = (
+    <section className="product-domain-page product-status-page">
+      <p className="eyebrow">NEXUS AI</p>
+      <h1>AI 助手尚未配置</h1>
+      <p className="product-domain-lead">当前工作区尚未接入 AI 服务，现有笔记与数据库功能不受影响。</p>
+    </section>
+  );
+  const accountCanvas = (
+    <section className="product-domain-page account-center-shell" data-account-subsection={accountSubsection}>
+      <p className="eyebrow">ACCOUNT CENTER</p>
+      <h1>账户中心</h1>
+      <p className="product-domain-lead">{accountSubsection === "workspace" ? "工作区设置将在后续任务中提供。" : "个人中心将在后续任务中提供。"}</p>
+      <div className="account-center-slot" aria-label={accountSubsection === "workspace" ? "工作区设置预留区域" : "个人中心预留区域"}>
+        <strong>{accountSubsection === "workspace" ? "工作区" : "个人中心"}</strong>
+        <span>此区域由 Product Completion Tasks 9-10 补充。</span>
+      </div>
+    </section>
+  );
 
   const collaborationRecords = resolvedNotificationRecord && !databaseRecords.some((record) => record.id === resolvedNotificationRecord.id)
     ? [...databaseRecords, resolvedNotificationRecord]
@@ -994,6 +1017,17 @@ function AuthenticatedWorkspace({
       if (notificationTargetController.current === controller) notificationTargetController.current = null;
     });
   };
+  const inspectorTitle = activeDomain === "databases"
+    ? databaseBundle?.database.name ?? "数据库"
+    : activeDomain === "collaboration"
+      ? "协作中心"
+      : activeDomain === "knowledge"
+        ? "知识整理"
+        : activeDomain === "ai"
+          ? "AI 助手"
+          : activeDomain === "account"
+            ? "账户中心"
+            : selectedNote?.title || "笔记";
 
   return (
     <>
@@ -1006,11 +1040,17 @@ function AuthenticatedWorkspace({
           }}>更新并重新加载</button>
         </div>
       ) : null}
+      {logoutError ? (
+        <div className="logout-error-banner" role="alert">
+          <span>{logoutError}</span>
+          <button type="button" disabled={logoutPending} onClick={onRetryLogout}>重试退出登录</button>
+        </div>
+      ) : null}
       <AdaptiveWorkbench
         navigation={navigation}
         mobileNavigation={mobileNavigation}
-        contextualList={activeDomain === "collaboration" ? undefined : activeDomain === "databases" ? databaseContextualList : contextualList}
-        inspector={<div className="inspector-content"><small>页面信息</small><h3>{activeDomain === "databases" ? databaseBundle?.database.name ?? "数据库" : activeDomain === "collaboration" ? "协作中心" : selectedNote?.title || "笔记"}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
+        contextualList={activeDomain === "databases" ? databaseContextualList : activeDomain === "notes" ? contextualList : undefined}
+        inspector={<div className="inspector-content"><small>页面信息</small><h3>{inspectorTitle}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
         inspectorOpen={inspectorOpen}
         activePane={activePane}
         onActivePaneChange={setActivePane}
@@ -1018,7 +1058,7 @@ function AuthenticatedWorkspace({
         onInspectorClose={closeInspector}
       >
         <>
-        {activeDomain === "collaboration" && collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : activeDomain === "databases" ? databaseCanvas : selectedNote || creatingNote ? <article className="editor-document">
+        {activeDomain === "collaboration" && collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : activeDomain === "databases" ? databaseCanvas : activeDomain === "knowledge" ? knowledgeCanvas : activeDomain === "ai" ? aiCanvas : activeDomain === "account" ? accountCanvas : selectedNote || creatingNote ? <article className="editor-document">
           <header className="editor-toolbar">
             <span className="saved-state"><span /> {noteSaving ? "保存中…" : noteMessage ?? "未保存更改"}</span>
             <div>
@@ -1084,13 +1124,39 @@ export function App({
 }: {
   authClient?: AuthClient;
   apiClient?: ApiClient;
-  localStore?: NoteDraftStore;
+  localStore?: UserScopedLocalStore;
   workspaceId?: string;
   turnstileSiteKey?: string;
   resetToken?: string;
   onDiagnosticNavigate?: (diagnostic: KnowledgeDiagnostic) => void;
 } = {}) {
   const [route, setRoute] = useState<AppRoute>(() => routeFromLocation());
+  const [authGateVersion, setAuthGateVersion] = useState(0);
+  const [defaultLocalStore, setDefaultLocalStore] = useState<UserScopedLocalStore>(() => new BetaLocalStore());
+  const [logoutPending, setLogoutPending] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  const logoutInFlight = useRef(false);
+  const activeLocalStore = localStore ?? defaultLocalStore;
+  const logout = () => {
+    if (logoutInFlight.current) return;
+    logoutInFlight.current = true;
+    setLogoutPending(true);
+    setLogoutError(null);
+    void authClient.logout().then(async () => {
+      await Promise.allSettled([
+        Promise.resolve().then(clearUserScopedBrowserState),
+        Promise.resolve().then(() => activeLocalStore.destroy?.()),
+      ]);
+      if (!localStore) setDefaultLocalStore(new BetaLocalStore());
+      logoutInFlight.current = false;
+      setLogoutPending(false);
+      setAuthGateVersion((version) => version + 1);
+    }, () => {
+      logoutInFlight.current = false;
+      setLogoutPending(false);
+      setLogoutError("退出登录失败，请检查网络后重试。当前工作区仍保持登录状态。");
+    });
+  };
   if (route.kind === "share") {
     return <PublicSharePage client={new CollaborationClient(apiClient, "public-share")} token={route.token} />;
   }
@@ -1107,7 +1173,7 @@ export function App({
     />;
   }
   return (
-    <AuthGate client={authClient} turnstileSiteKey={turnstileSiteKey} resetToken={resetToken}>
+    <AuthGate key={authGateVersion} client={authClient} turnstileSiteKey={turnstileSiteKey} resetToken={resetToken}>
       {(session) => {
         const activeWorkspaceId = workspaceId ?? route.workspaceId ?? session.active_workspace_id;
         const memberships = Array.isArray(session.workspaces) ? session.workspaces : [];
@@ -1117,10 +1183,14 @@ export function App({
             key={activeWorkspaceId ?? "no-active-workspace"}
             apiClient={apiClient}
             workspaceId={activeWorkspaceId ?? undefined}
-            userId={session.user.id}
+            user={{ ...session.user, displayName: session.user.displayName || session.user.email }}
             role={activeWorkspace?.role ?? "viewer"}
             collaborationEnabled={Boolean(activeWorkspace)}
-            localStore={localStore}
+            localStore={activeLocalStore}
+            logoutPending={logoutPending}
+            logoutError={logoutError}
+            onLogout={logout}
+            onRetryLogout={logout}
             onDiagnosticNavigate={onDiagnosticNavigate}
           />
         );

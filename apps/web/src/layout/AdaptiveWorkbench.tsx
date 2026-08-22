@@ -20,9 +20,14 @@ export interface AdaptiveWorkbenchProps {
 }
 
 const WorkbenchModalContext = createContext<(open: boolean) => void>(() => undefined);
+const WorkbenchModalOpenContext = createContext(false);
 
 export function useWorkbenchModalState() {
   return useContext(WorkbenchModalContext);
+}
+
+export function useWorkbenchModalOpen() {
+  return useContext(WorkbenchModalOpenContext);
 }
 
 function Canvas({ children, mobile = false, modalOpen = false }: { children: ReactNode; mobile?: boolean; modalOpen?: boolean }) {
@@ -68,6 +73,7 @@ export function AdaptiveWorkbench({
 
   return (
     <WorkbenchModalContext.Provider value={setChildModalOpen}>
+      <WorkbenchModalOpenContext.Provider value={modalOpen}>
       <Surface variant="window" className="adaptive-workbench" data-mode={currentMode} data-has-context={Boolean(contextualList)}>
       {!mobile ? (
         <nav className="workbench-rail" aria-label="主导航" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
@@ -139,6 +145,7 @@ export function AdaptiveWorkbench({
         </nav>
       ) : null}
       </Surface>
+      </WorkbenchModalOpenContext.Provider>
     </WorkbenchModalContext.Provider>
   );
 }
