@@ -5,6 +5,7 @@ import { createTestD1 } from "./helpers/d1";
 
 const now = "2026-08-22T00:00:00.000Z";
 const later = "2026-09-22T00:00:00.000Z";
+const audit = (event: any, requestId = "request-1") => ({ event, requestId, now });
 
 async function seed(db: D1Database, userId = "user-1") {
   await db.prepare(
@@ -24,16 +25,46 @@ describe("D1ProfileRepository", () => {
         biography: "Bio",
         locale: "zh-CN",
         timezone: "Asia/Shanghai",
-      }, now);
+      }, audit("profile.updated"));
 
       await expect(repository.getProfile("user-1")).resolves.toMatchObject({
         display_name: "New",
         biography: "Bio",
         avatar_url: null,
       });
+      await expect(test.db.prepare("SELECT event FROM account_audit_logs WHERE user_id = 'user-1'").first())
+        .resolves.toEqual({ event: "profile.updated" });
     } finally {
       await test.dispose();
     }
+  });
+
+  it("rolls back a profile mutation when its account audit event is rejected", async () => {
+    const test = await createTestD1();
+    try {
+      await seed(test.db);
+      const repository = new D1ProfileRepository(test.db, () => "audit-1");
+
+      await test.db.prepare(
+        "CREATE TRIGGER reject_profile_audit BEFORE INSERT ON account_audit_logs WHEN NEW.event = 'profile.updated' BEGIN SELECT RAISE(ABORT, 'AUDIT_WRITE_FAILED'); END;",
+      ).run();
+      await expect(repository.updateProfile("user-1", { display_name: "Changed" }, audit("profile.updated")))
+        .rejects.toThrow("AUDIT_WRITE_FAILED");
+      await expect(repository.getProfile("user-1")).resolves.toMatchObject({ display_name: "One" });
+      await expect(test.db.prepare("SELECT COUNT(*) AS count FROM account_audit_logs WHERE user_id = 'user-1'").first())
+        .resolves.toEqual({ count: 0 });
+    } finally { await test.dispose(); }
+  });
+
+  it("rejects forbidden audit events before starting a D1 mutation", async () => {
+    const test = await createTestD1();
+    try {
+      await seed(test.db);
+      const repository = new D1ProfileRepository(test.db, () => "audit-1");
+      await expect(repository.updateProfile("user-1", { display_name: "Changed" }, audit("profile.forbidden")))
+        .rejects.toMatchObject({ code: "ACCOUNT_AUDIT_EVENT_INVALID", status: 400 });
+      await expect(repository.getProfile("user-1")).resolves.toMatchObject({ display_name: "One" });
+    } finally { await test.dispose(); }
   });
 
   it("revokes only an owned non-current session", async () => {
@@ -47,9 +78,11 @@ describe("D1ProfileRepository", () => {
       }
       const repository = new D1ProfileRepository(test.db, () => "id-1");
 
-      expect(await repository.revokeOwnedSession("user-1", "current", "current", now)).toBe(false);
-      expect(await repository.revokeOwnedSession("user-1", "other", "current", now)).toBe(true);
-      expect(await repository.revokeOwnedSession("user-2", "other", "current", now)).toBe(false);
+      expect(await repository.revokeOwnedSession("user-1", "current", "current", audit("session.revoked"))).toBe(false);
+      expect(await repository.revokeOwnedSession("user-1", "other", "current", audit("session.revoked"))).toBe(true);
+      expect(await repository.revokeOwnedSession("user-2", "other", "current", audit("session.revoked"))).toBe(false);
+      await expect(test.db.prepare("SELECT COUNT(*) AS count FROM account_audit_logs WHERE user_id = 'user-1'").first())
+        .resolves.toEqual({ count: 1 });
     } finally {
       await test.dispose();
     }
@@ -59,12 +92,15 @@ describe("D1ProfileRepository", () => {
     const test = await createTestD1();
     try {
       await seed(test.db);
-      const repository = new D1ProfileRepository(test.db, () => "request-1");
-      await repository.createEmailChange("user-1", "new@example.test", "code-hash", "2026-08-22T00:15:00.000Z", now);
+      let nextId = 0;
+      const repository = new D1ProfileRepository(test.db, () => `request-${++nextId}`);
+      await repository.createEmailChange("user-1", "new@example.test", "code-hash", "2026-08-22T00:15:00.000Z", audit("email.change_requested"));
 
-      expect(await repository.consumeEmailChange("user-1", "new@example.test", "code-hash", now)).toBe(true);
-      expect(await repository.consumeEmailChange("user-1", "new@example.test", "code-hash", now)).toBe(false);
+      expect(await repository.consumeEmailChange("user-1", "new@example.test", "code-hash", audit("email.changed", "request-2"))).toBe(true);
+      expect(await repository.consumeEmailChange("user-1", "new@example.test", "code-hash", audit("email.changed", "request-3"))).toBe(false);
       await expect(repository.getProfile("user-1")).resolves.toMatchObject({ email: "new@example.test" });
+      await expect(test.db.prepare("SELECT COUNT(*) AS count FROM account_audit_logs WHERE user_id = 'user-1'").first())
+        .resolves.toEqual({ count: 2 });
     } finally {
       await test.dispose();
     }
@@ -77,12 +113,12 @@ describe("D1ProfileRepository", () => {
       let nextId = 0;
       const repository = new D1ProfileRepository(test.db, () => `request-${++nextId}`);
 
-      await repository.createEmailChange("user-1", "older@example.test", "older-code", later, now);
-      await repository.createEmailChange("user-1", "newer@example.test", "newer-code", later, now);
+      await repository.createEmailChange("user-1", "older@example.test", "older-code", later, audit("email.change_requested", "request-a"));
+      await repository.createEmailChange("user-1", "newer@example.test", "newer-code", later, audit("email.change_requested", "request-b"));
 
-      await expect(repository.consumeEmailChange("user-1", "older@example.test", "older-code", now)).resolves.toBe(false);
+      await expect(repository.consumeEmailChange("user-1", "older@example.test", "older-code", audit("email.changed", "request-c"))).resolves.toBe(false);
       await expect(repository.getProfile("user-1")).resolves.toMatchObject({ email: "user-1@example.test" });
-      await expect(repository.consumeEmailChange("user-1", "newer@example.test", "newer-code", now)).resolves.toBe(true);
+      await expect(repository.consumeEmailChange("user-1", "newer@example.test", "newer-code", audit("email.changed", "request-d"))).resolves.toBe(true);
       await expect(repository.getProfile("user-1")).resolves.toMatchObject({ email: "newer@example.test" });
     } finally {
       await test.dispose();
@@ -120,12 +156,11 @@ describe("D1ProfileRepository", () => {
       await test.db.prepare("UPDATE users SET avatar_key = 'avatars/old' WHERE id = 'user-1'").run();
       const repository = new D1ProfileRepository(test.db, () => "audit-1");
 
-      await expect(repository.replaceAvatar("user-1", "avatars/new", now)).resolves.toBe("avatars/old");
-      await repository.appendAudit("user-1", "profile.avatar.changed", "request-1", now);
+      await expect(repository.replaceAvatar("user-1", "avatars/new", audit("avatar.updated"))).resolves.toBe("avatars/old");
 
-      await expect(repository.getProfile("user-1")).resolves.toMatchObject({ avatar_key: "avatars/new", avatar_url: "avatars/new" });
+      await expect(repository.getProfile("user-1")).resolves.toMatchObject({ avatar_key: "avatars/new", avatar_url: "/api/v2/profile/avatar" });
       await expect(test.db.prepare("SELECT id, event, request_id FROM account_audit_logs WHERE user_id = ?").bind("user-1").first())
-        .resolves.toEqual({ id: "audit-1", event: "profile.avatar.changed", request_id: "request-1" });
+        .resolves.toEqual({ id: "audit-1", event: "avatar.updated", request_id: "request-1" });
     } finally {
       await test.dispose();
     }
@@ -140,11 +175,13 @@ describe("D1ProfileRepository", () => {
       ).bind(id, "user-1", `hash-${id}`, later, now, now, "Chrome")));
       const repository = new D1ProfileRepository(test.db, () => "id-1");
 
-      await repository.changePasswordAndRevokeOthers("user-1", "current", "new-hash", now);
+      await repository.changePasswordAndRevokeOthers("user-1", "current", "new-hash", audit("password.changed"));
 
       await expect(test.db.prepare("SELECT password_hash FROM users WHERE id = 'user-1'").first()).resolves.toEqual({ password_hash: "new-hash" });
       await expect(test.db.prepare("SELECT id, revoked_at FROM sessions WHERE user_id = ? ORDER BY id").bind("user-1").all())
         .resolves.toMatchObject({ results: [{ id: "current", revoked_at: null }, { id: "other", revoked_at: now }] });
+      await expect(test.db.prepare("SELECT event FROM account_audit_logs WHERE user_id = 'user-1'").first())
+        .resolves.toEqual({ event: "password.changed" });
     } finally {
       await test.dispose();
     }
@@ -171,7 +208,7 @@ describe("D1ProfileRepository", () => {
       const repository = new D1ProfileRepository(test.db, () => "id-1");
 
       await expect(repository.listOwnedTeamWorkspaces("user-1")).resolves.toEqual([{ id: "owned-team", name: "Owned team" }]);
-      await expect(repository.deleteAccount("user-1", "deleted-user-1@example.invalid", "deleted-hash", now))
+      await expect(repository.deleteAccount("user-1", "deleted-user-1@example.invalid", "deleted-hash", audit("account.deleted")))
         .rejects.toMatchObject({ code: "OWNERSHIP_TRANSFER_REQUIRED", status: 409 });
       await expect(test.db.prepare("SELECT status, password_hash, avatar_key FROM users WHERE id = 'user-1'").first())
         .resolves.toEqual({ status: "active", password_hash: "hash", avatar_key: "avatars/old" });
@@ -179,7 +216,7 @@ describe("D1ProfileRepository", () => {
       await expect(test.db.prepare("SELECT COUNT(*) AS count FROM workspace_members WHERE user_id = 'user-1'").first()).resolves.toEqual({ count: 2 });
       await expect(test.db.prepare("SELECT revoked_at FROM sessions WHERE id = 'session-1'").first()).resolves.toEqual({ revoked_at: null });
       await test.db.prepare("DELETE FROM workspaces WHERE id = 'owned-team'").run();
-      await expect(repository.deleteAccount("user-1", "deleted-user-1@example.invalid", "deleted-hash", now)).resolves.toBe("avatars/old");
+      await expect(repository.deleteAccount("user-1", "deleted-user-1@example.invalid", "deleted-hash", audit("account.deleted", "request-2"))).resolves.toBe("avatars/old");
 
       await expect(repository.listOwnedTeamWorkspaces("user-1")).resolves.toEqual([]);
       await expect(test.db.prepare("SELECT status, email, password_hash, display_name, biography, avatar_key, deletion_requested_at FROM users WHERE id = 'user-1'").first())
@@ -191,6 +228,8 @@ describe("D1ProfileRepository", () => {
       await expect(test.db.prepare("SELECT COUNT(*) AS count FROM password_resets WHERE user_id = 'user-1'").first()).resolves.toEqual({ count: 0 });
       await expect(test.db.prepare("SELECT COUNT(*) AS count FROM email_change_requests WHERE user_id = 'user-1'").first()).resolves.toEqual({ count: 0 });
       await expect(test.db.prepare("SELECT revoked_at FROM sessions WHERE id = 'session-1'").first()).resolves.toEqual({ revoked_at: now });
+      await expect(test.db.prepare("SELECT event FROM account_audit_logs WHERE user_id = 'user-1'").first())
+        .resolves.toEqual({ event: "account.deleted" });
     } finally {
       await test.dispose();
     }

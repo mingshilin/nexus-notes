@@ -17,4 +17,17 @@ describe("profile account migration", () => {
       expect(tables.results.map((row) => row.name)).toEqual(["account_audit_logs", "email_change_requests"]);
     } finally { await test.dispose(); }
   });
+
+  it("rejects audit events outside the account-event allowlist", async () => {
+    const test = await createTestD1({ through: 10 });
+    try {
+      await test.db.prepare(
+        "INSERT INTO users (id,email,password_hash,display_name,status,created_at,updated_at) VALUES ('u1','u@example.test','hash','User','active',?,?)",
+      ).bind("2026-08-22T00:00:00.000Z", "2026-08-22T00:00:00.000Z").run();
+      await applyMigration(test.db, "../../migrations/0011_profile_audit_enforcement.sql");
+      await expect(test.db.prepare(
+        "INSERT INTO account_audit_logs (id,user_id,event,request_id,created_at) VALUES ('bad','u1','profile.forbidden','req','2026-08-22T00:00:00.000Z')",
+      ).run()).rejects.toThrow("ACCOUNT_AUDIT_EVENT_INVALID");
+    } finally { await test.dispose(); }
+  });
 });
