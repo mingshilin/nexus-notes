@@ -1,6 +1,7 @@
 import type { RouteDefinition } from "../http/route-registry";
 import type { QueueJob } from "@nexus/contracts";
 import type { OcrAiBinding } from "../attachments/ocr-extractor";
+import type { ObservabilityAnalytics } from "../observability";
 
 export interface BetaWorkerEnv {
   DB: D1Database;
@@ -15,6 +16,7 @@ export interface BetaWorkerEnv {
   RESEND_API_KEY: string;
   EMAIL_FROM: string;
   DEPLOYMENT_VERSION?: string;
+  ANALYTICS?: ObservabilityAnalytics;
 }
 
 function ocrCapability(env: BetaWorkerEnv) {

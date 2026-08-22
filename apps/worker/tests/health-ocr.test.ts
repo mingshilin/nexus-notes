@@ -142,4 +142,29 @@ describe("OCR health capability", () => {
     expect(Object.keys(body.data).sort()).toEqual(["ocr", "status", "version"]);
     expect(Object.keys(body).sort()).toEqual(["data", "request_id", "success"]);
   });
+
+  it("records a redacted request event without changing the health response", async () => {
+    const logs: string[] = [];
+    const response = await createBetaWorker({
+      logger: { log: (message: string) => logs.push(message) },
+    }).fetch(
+      new Request("https://beta.test/api/v2/public/shares/raw-public-token?password=do-not-log", {
+        headers: { "x-workspace-id": "workspace-private" },
+      }),
+      healthEnv({ files: "absent", ai: "absent" }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(logs).toHaveLength(1);
+    const event = JSON.parse(logs[0]!);
+    expect(event).toMatchObject({
+      type: "http.request",
+      route: "/api/v2/public/:id",
+      status: 404,
+      error_class: "not_found",
+    });
+    expect(logs[0]).not.toContain("raw-public-token");
+    expect(logs[0]).not.toContain("do-not-log");
+    expect(logs[0]).not.toContain("workspace-private");
+  });
 });

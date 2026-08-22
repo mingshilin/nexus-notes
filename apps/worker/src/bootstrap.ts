@@ -40,6 +40,7 @@ import { registerOperationsRoutes } from "./routes/operations";
 import { createPresenceNotifier } from "./presence/presence-dispatcher";
 import { D1OperationsRepository } from "./operations/d1-operations-repository";
 import { OperationsOutboxDispatcher } from "./operations/operations-outbox-dispatcher";
+import { createObservability, type ObservabilityLogger, type ObservabilityAnalytics } from "./observability";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -70,6 +71,11 @@ async function rateLimitKey(
   const body = context.body as { email?: unknown } | null | undefined;
   const email = typeof body?.email === "string" ? normalizeEmail(body.email) : "unknown";
   return `account:${email}:${ip}`;
+}
+
+export interface BetaWorkerOptions {
+  logger?: ObservabilityLogger;
+  analytics?: ObservabilityAnalytics;
 }
 
 function createAuthService(env: BetaWorkerEnv) {
@@ -206,7 +212,7 @@ function allowedOrigins(env: BetaWorkerEnv) {
   return origins;
 }
 
-export function createBetaWorker() {
+export function createBetaWorker(options: BetaWorkerOptions = {}) {
   const registry = createRouteRegistry<BetaWorkerEnv>({
     authenticate: ({ request, env }) => new D1SessionAuthenticator(
       env.DB,
@@ -245,14 +251,67 @@ export function createBetaWorker() {
   registerOperationsRoutes(registry, createOperationsService);
 
   return {
-    fetch(request: Request, env: BetaWorkerEnv) {
-      return createSecureGateway({ allowedOrigins: allowedOrigins(env), handler: registry }).fetch(request, env);
+    async fetch(request: Request, env: BetaWorkerEnv) {
+      const startedAt = Date.now();
+      const observability = createObservability({
+        logger: options.logger,
+        analytics: options.analytics ?? env.ANALYTICS,
+        deploymentVersion: env.DEPLOYMENT_VERSION,
+        workspaceHashSecret: env.RATE_LIMIT_SECRET,
+      });
+      let response: Response;
+      try {
+        response = await createSecureGateway({ allowedOrigins: allowedOrigins(env), handler: registry }).fetch(request, env);
+      } catch (error) {
+        await observability.recordHttp({
+          requestId: "unavailable",
+          method: request.method,
+          pathname: new URL(request.url).pathname,
+          status: 500,
+          latencyMs: Date.now() - startedAt,
+          workspaceId: request.headers.get("x-workspace-id") ?? undefined,
+        });
+        throw error;
+      }
+      await observability.recordHttp({
+        requestId: response.headers.get("x-request-id") ?? "unavailable",
+        method: request.method,
+        pathname: new URL(request.url).pathname,
+        status: response.status,
+        latencyMs: Date.now() - startedAt,
+        workspaceId: request.headers.get("x-workspace-id") ?? undefined,
+      });
+      return response;
     },
     async queue(batch: MessageBatch<unknown>, env: BetaWorkerEnv, _ctx: ExecutionContext) {
+      const observability = createObservability({
+        logger: options.logger,
+        analytics: options.analytics ?? env.ANALYTICS,
+        deploymentVersion: env.DEPLOYMENT_VERSION,
+        workspaceHashSecret: env.RATE_LIMIT_SECRET,
+      });
       const consumer = new OcrConsumer(new D1AttachmentRepository(env.DB), createOcrExtractor(env));
       await Promise.all(batch.messages.map(async (message) => {
-        const outcome = await consumer.consume(message);
-        if (outcome.outcome === "retry") retryNativeMessage(message, outcome.delaySeconds);
+        const startedAt = Date.now();
+        let outcome: "success" | "retry" | "failure" = "success";
+        try {
+          const result = await consumer.consume(message);
+          if (result.outcome === "retry") {
+            outcome = "retry";
+            retryNativeMessage(message, result.delaySeconds);
+          }
+        } catch (error) {
+          outcome = "failure";
+          throw error;
+        } finally {
+          await observability.recordQueue({
+            queue: "ocr",
+            kind: "ocr",
+            outcome,
+            attempt: message.attempts,
+            ageMs: Date.now() - startedAt,
+          });
+        }
       }));
     },
     async scheduled(_controller: ScheduledController, env: BetaWorkerEnv) {

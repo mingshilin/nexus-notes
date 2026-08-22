@@ -154,11 +154,11 @@ export class D1OperationsRepository {
 
   async listPendingOutbox(now: string, limit: number) {
     const rows = (await this.db.prepare(
-      `SELECT id, payload_json FROM queue_outbox
+      `SELECT id, payload_json, attempt FROM queue_outbox
        WHERE job_kind IN ('index', 'import', 'export', 'email') AND published_at IS NULL AND available_at <= ?
        ORDER BY created_at, id LIMIT ?`,
-    ).bind(now, Math.min(Math.max(limit, 1), 100)).all<{ id: string; payload_json: string }>()).results ?? [];
-    return rows.map((row) => ({ id: row.id, message: QueueJobSchema.parse(JSON.parse(row.payload_json)) }));
+    ).bind(now, Math.min(Math.max(limit, 1), 100)).all<{ id: string; payload_json: string; attempt: number }>()).results ?? [];
+    return rows.map((row) => ({ id: row.id, attempt: row.attempt, message: QueueJobSchema.parse(JSON.parse(row.payload_json)) }));
   }
 
   async markOutboxDispatched(outboxId: string, now: string) {
@@ -167,9 +167,9 @@ export class D1OperationsRepository {
     ).bind(now, outboxId).run();
   }
 
-  async recordOutboxFailure(outboxId: string, now: string) {
+  async recordOutboxFailure(outboxId: string, _now: string, retryAt: string) {
     await this.db.prepare(
       "UPDATE queue_outbox SET available_at = ?, attempt = attempt + 1 WHERE id = ? AND job_kind IN ('index', 'import', 'export', 'email') AND published_at IS NULL",
-    ).bind(now, outboxId).run();
+    ).bind(retryAt, outboxId).run();
   }
 }
