@@ -16,6 +16,10 @@ function roleLabel(role: InvitationPreview["role"]) {
   return role === "editor" ? "编辑者" : "查看者";
 }
 
+export function formatInviteExpiry(value: string) {
+  return new Date(value).toLocaleString();
+}
+
 function AcceptInvitation({
   authClient,
   client,
@@ -102,7 +106,7 @@ export function InviteRedemptionPage({
         <dl>
           <div><dt>邀请邮箱</dt><dd>{preview.email}</dd></div>
           <div><dt>角色</dt><dd>{roleLabel(preview.role)}</dd></div>
-          <div><dt>有效期至</dt><dd>{new Date(preview.expires_at).toLocaleString()}</dd></div>
+          <div><dt>有效期至</dt><dd>{formatInviteExpiry(preview.expires_at)}</dd></div>
         </dl>
         {preview.status === "expired" ? <p className="collaboration-error">此邀请已过期。</p> : null}
         {preview.status === "revoked" ? <p className="collaboration-error">此邀请已撤销。</p> : null}

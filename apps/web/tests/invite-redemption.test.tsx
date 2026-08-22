@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { formatInviteExpiry } from "../src/collaboration/InviteRedemptionPage";
+
 const token = "i".repeat(43);
 const now = "2026-08-22T00:00:00.000Z";
 const preview = { workspace_name: "Research", inviter_display_name: "Ming", email: "invite@example.com", role: "editor", expires_at: "2026-08-25T00:00:00.000Z", status: "pending" };
@@ -35,7 +37,7 @@ describe("invite redemption route", () => {
     expect(await screen.findByRole("heading", { name: "加入 Research" })).toBeInTheDocument();
     expect(screen.getByText(preview.email)).toBeInTheDocument();
     expect(screen.getByText("编辑者")).toBeInTheDocument();
-    expect(screen.getByText(/2026\/8\/25/u)).toBeInTheDocument();
+    expect(screen.getByText(formatInviteExpiry(preview.expires_at))).toBeInTheDocument();
     await screen.findByRole("main");
     fireEvent.change(screen.getByRole("textbox", { name: "邮箱" }), { target: { value: preview.email } });
     fireEvent.change(screen.getByLabelText("密码"), { target: { value: "long-enough-123" } });
