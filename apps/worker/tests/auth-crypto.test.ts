@@ -7,6 +7,15 @@ async function loadWorker() {
 }
 
 describe("auth cryptography", () => {
+  it("uses the maximum PBKDF2 iteration count supported by Workers by default", async () => {
+    const worker = await loadWorker();
+    const Hasher = worker.WebCryptoPasswordHasher as new () => {
+      hash(password: string): Promise<string>;
+    };
+
+    await expect(new Hasher().hash("long-enough-123")).resolves.toMatch(/^pbkdf2_sha256\$100000\$/);
+  });
+
   it("salts PBKDF2 passwords and verifies without exposing plaintext", async () => {
     const worker = await loadWorker();
     expect(worker.WebCryptoPasswordHasher).toBeTypeOf("function");

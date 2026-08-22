@@ -1,10 +1,19 @@
+export interface EmailLogger {
+  log(message: string): void;
+}
+
 export class ResendEmailSender {
+  private readonly fetchImpl: typeof fetch;
+
   constructor(
     private readonly apiKey: string,
     private readonly from: string,
     private readonly appBaseUrl: string,
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
+    fetchImpl: typeof fetch = fetch,
+    private readonly logger: EmailLogger = console,
+  ) {
+    this.fetchImpl = fetchImpl.bind(globalThis);
+  }
 
   sendVerification(email: string, code: string) {
     return this.send({
@@ -26,14 +35,37 @@ export class ResendEmailSender {
 
   private async send(message: { to: string; subject: string; text: string }) {
     if (!this.apiKey) throw new Error("RESEND_API_KEY is not configured");
-    const response = await this.fetchImpl("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ from: this.from, ...message }),
-    });
-    if (!response.ok) throw new Error(`Email delivery failed with status ${response.status}`);
+    let response: Response;
+    try {
+      response = await this.fetchImpl("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ from: this.from, ...message }),
+      });
+    } catch {
+      this.emitDiagnostic({ outcome: "failure", failure: "network_error" });
+      throw new Error("Email delivery failed");
+    }
+    if (!response.ok) {
+      this.emitDiagnostic({ outcome: "failure", status: response.status });
+      throw new Error(`Email delivery failed with status ${response.status}`);
+    }
+  }
+
+  private emitDiagnostic(result: { outcome: "failure"; status?: number; failure?: string }) {
+    try {
+      this.logger.log(JSON.stringify({
+        type: "email.delivery",
+        provider: "resend",
+        ...(result.status !== undefined ? { status: result.status } : {}),
+        outcome: result.outcome,
+        ...(result.failure ? { failure: result.failure } : {}),
+      }));
+    } catch {
+      // Diagnostics must never change the delivery result.
+    }
   }
 }

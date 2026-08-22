@@ -94,13 +94,14 @@ export interface BetaWorkerOptions {
   analytics?: ObservabilityAnalytics;
 }
 
-function createAuthService(env: BetaWorkerEnv) {
+function createAuthService(env: BetaWorkerEnv, logger?: ObservabilityLogger) {
   const authTokens = secureTokens(env.RATE_LIMIT_SECRET, "auth");
   return new AuthService({
     repository: new D1AuthRepository(env.DB),
-    turnstile: new TurnstileVerifier(env.TURNSTILE_SECRET_KEY, fetch, allowedTurnstileHostnames(env)),
+    logger,
+    turnstile: new TurnstileVerifier(env.TURNSTILE_SECRET_KEY, fetch, allowedTurnstileHostnames(env), logger),
     risk: new D1LoginRiskService(env.DB, secureTokens(env.RATE_LIMIT_SECRET, "login-risk")),
-    email: new ResendEmailSender(env.RESEND_API_KEY, env.EMAIL_FROM, env.APP_BASE_URL),
+    email: new ResendEmailSender(env.RESEND_API_KEY, env.EMAIL_FROM, env.APP_BASE_URL, fetch, logger),
     password: new WebCryptoPasswordHasher(),
     tokens: authTokens,
     clock: () => new Date(),
@@ -250,7 +251,7 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
     },
   });
   registry.register(healthRoute);
-  registerAuthRoutes(registry, createAuthService);
+  registerAuthRoutes(registry, (env) => createAuthService(env, options.logger));
   registerNoteRoutes(registry, createNoteService);
   registerKnowledgeRoutes(registry, createKnowledgeService);
   registerTaxonomyRoutes(registry, createKnowledgeService);

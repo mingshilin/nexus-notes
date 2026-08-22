@@ -10,6 +10,10 @@ export interface AuthUser {
   status: "active" | "suspended" | "deleted";
 }
 
+export interface AuthLogger {
+  log(message: string): void;
+}
+
 export interface AuthWorkspaceMembership extends WorkspaceMembershipSummary {
   workspaceType: "personal" | "team";
 }
@@ -31,6 +35,7 @@ export interface AuthRepository {
 
 export interface AuthDependencies {
   repository: AuthRepository;
+  logger?: AuthLogger;
   turnstile: { verify(token: string, ip: string, action: "register" | "login" | "forgot_password" | "verify_email"): Promise<boolean> };
   risk: {
     requiresLoginChallenge(input: { email: string; ip: string }): Promise<boolean>;
@@ -73,7 +78,29 @@ function addMilliseconds(date: Date, milliseconds: number) {
 }
 
 export class AuthService {
-  constructor(private readonly dependencies: AuthDependencies) {}
+  private readonly logger: AuthLogger;
+
+  constructor(private readonly dependencies: AuthDependencies) {
+    this.logger = dependencies.logger ?? console;
+  }
+
+  private async guarded<T>(flow: string, stage: string, operation: () => Promise<T> | T) {
+    try {
+      return await operation();
+    } catch (error) {
+      try {
+        this.logger.log(JSON.stringify({
+          type: "auth.stage_failure",
+          flow,
+          stage,
+          error_name: error instanceof Error ? error.name : "unknown",
+        }));
+      } catch {
+        // Diagnostics must never change the authentication result.
+      }
+      throw error;
+    }
+  }
 
   async register(input: {
     email: string;
@@ -86,28 +113,28 @@ export class AuthService {
     assertPasswordPolicy(input.password);
     const challengeValid = await this.dependencies.turnstile.verify(input.turnstileToken, input.ip, "register");
     if (!challengeValid) throw new AuthServiceError("CHALLENGE_FAILED", "Human verification failed");
-    if (await this.dependencies.repository.findUserByEmail(email)) {
+    if (await this.guarded("register", "find_user", () => this.dependencies.repository.findUserByEmail(email))) {
       throw new AuthServiceError("EMAIL_EXISTS", "This email is already registered");
     }
 
     const now = this.dependencies.clock();
-    const passwordHash = await this.dependencies.password.hash(input.password);
-    const user = await this.dependencies.repository.createPendingUser({
+    const passwordHash = await this.guarded("register", "password_hash", () => this.dependencies.password.hash(input.password));
+    const user = await this.guarded("register", "create_user", () => this.dependencies.repository.createPendingUser({
       email,
       passwordHash,
       displayName: input.displayName?.trim() ?? "",
       now: now.toISOString(),
-    });
+    }));
     const code = this.dependencies.tokens.createEmailCode();
-    const codeHash = await this.dependencies.tokens.hash(`verify_email:${email}:${code}`);
-    await this.dependencies.repository.createEmailCode({
+    const codeHash = await this.guarded("register", "hash_email_code", () => this.dependencies.tokens.hash(`verify_email:${email}:${code}`));
+    await this.guarded("register", "create_email_code", () => this.dependencies.repository.createEmailCode({
       userId: user.id,
       codeHash,
       purpose: "verify_email",
       expiresAt: addMilliseconds(now, 15 * 60 * 1000),
       now: now.toISOString(),
-    });
-    await this.dependencies.email.sendVerification(email, code);
+    }));
+    await this.guarded("register", "send_verification_email", () => this.dependencies.email.sendVerification(email, code));
     return { userId: user.id, email, verificationRequired: true };
   }
 
