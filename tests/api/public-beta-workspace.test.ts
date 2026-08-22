@@ -25,9 +25,12 @@ describe("public Beta workspace", () => {
     const packageJson = readJson("package.json");
     const scripts = packageJson.scripts as Record<string, string>;
 
-    expect(scripts["beta:lint"]).toBe("npm run typecheck --workspaces --if-present");
-    expect(scripts["beta:test"]).toBe("npm run test --workspaces --if-present");
-    expect(scripts["beta:build"]).toBe("npm run build --workspaces --if-present");
+    expect(scripts["beta:lint"]).toBe("node scripts/run-workspace-scripts.mjs typecheck");
+    expect(scripts["beta:test"]).toBe("node scripts/run-workspace-scripts.mjs test");
+    expect(scripts["beta:build"]).toBe("node scripts/run-workspace-scripts.mjs build");
+    expect(readJson("apps/worker/package.json").scripts).toMatchObject({
+      test: "vitest run --config vitest.config.ts --maxWorkers=1 --minWorkers=1",
+    });
     expect(readFileSync(resolve(root, ".github/workflows/public-beta-ci.yml"), "utf8")).toContain("npm run beta:test");
     expect(readFileSync(resolve(root, "apps/worker/wrangler.preview.example.toml"), "utf8")).toContain("nexus-notes-public-beta-preview");
   });

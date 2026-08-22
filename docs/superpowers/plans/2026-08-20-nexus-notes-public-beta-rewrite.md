@@ -31,7 +31,7 @@
     - [x] Task 6B.2: Add folder/tag assignment, note links, reminders, and global/local graph APIs.
   - [x] Task 6C: Add private attachments, OCR retry flows, and knowledge diagnostics.
 - [x] Task 7: Deliver structured databases, typed properties, views, bulk operations, CSV, and virtualized views.
-- [ ] Task 8: Deliver workspace collaboration, sharing, notifications, audit, and Durable Object presence.
+- [x] Task 8: Deliver workspace collaboration, sharing, notifications, audit, and Durable Object presence.
 - [ ] Task 9: Deliver R2 files, queued OCR/index/import/export/email jobs, status, feedback, and administration.
 - [ ] Task 10: Add structured observability, partial failure handling, and recovery workflows.
 - [ ] Task 11: Close unit, integration, contract, browser, accessibility, performance, load, security, and fault gates.
