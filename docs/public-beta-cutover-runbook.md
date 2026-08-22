@@ -36,10 +36,13 @@ Restore the data SQL only into a disposable local or preview D1, never productio
 ```text
 $restore = Join-Path (Split-Path $PWD -Parent) "nexus-notes-restore-runtime\$stamp"
 New-Item -ItemType Directory -Force $restore
+node scripts/prepare-beta-restore.mjs "$backup\preview-data.sql" "$backup\preview-data.restore.sql"
 npx wrangler d1 migrations apply <PREVIEW_D1_NAME> --local --persist-to $restore
-npx wrangler d1 execute <PREVIEW_D1_NAME> --local --persist-to $restore --file "$backup\preview-data.sql"
+npx wrangler d1 execute <PREVIEW_D1_NAME> --local --persist-to $restore --file "$backup\preview-data.restore.sql"
 npx wrangler d1 execute <PREVIEW_D1_NAME> --local --persist-to $restore --command "SELECT COUNT(*) FROM workspaces"
 ```
+
+The restore copy changes only `workspace_membership_epochs` inserts to `INSERT OR REPLACE`. The membership trigger creates temporary epoch rows while `workspace_members` is imported; replacing those rows afterward preserves the exact exported security epoch instead of failing on a duplicate key or incrementing it. Keep `preview-data.sql` unchanged as the source backup.
 
 Then rerun the migration/schema and tenant-isolation tests. For R2, first export an object manifest and copy objects to the external backup directory; verify object count, byte totals, and hashes before attempting a restore. Record the backup path, timestamp, D1 export hash, R2 manifest hash, and the restore test result. If the preview database is empty, an empty data export plus the migration version and hash is still the required evidence.
 
