@@ -1,0 +1,85 @@
+:root {
+  color-scheme: light;
+  --nexus-accent: #007aff;
+  --background: 220 24% 96%;
+  --foreground: 222 28% 11%;
+  --muted-foreground: 222 9% 46%;
+  --destructive: 4 84% 58%;
+  --border: 220 14% 86%;
+  --ring: 212 100% 50%;
+  --radius-sm: 10px;
+  --radius-md: 12px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 22px;
+  --radius-window: 28px;
+  --shadow-xs: 0 1px 2px rgba(12, 16, 24, 0.06);
+  --shadow-sm: 0 10px 30px rgba(15, 23, 42, 0.08);
+  --shadow-md: 0 20px 60px rgba(15, 23, 42, 0.14);
+  --shadow-lg: 0 40px 100px rgba(15, 23, 42, 0.24);
+  --surface-app: #dfe8f6;
+  --surface-window: rgba(255, 255, 255, 0.62);
+  --surface-sidebar: rgba(255, 255, 255, 0.42);
+  --surface-list: rgba(255, 255, 255, 0.92);
+  --surface-editor: rgba(255, 255, 255, 0.96);
+  --surface-panel: rgba(248, 249, 251, 0.92);
+  --surface-elevated: rgba(255, 255, 255, 0.82);
+  --surface-overlay: rgba(255, 255, 255, 0.78);
+  --border-subtle: rgba(15, 23, 42, 0.08);
+  --border-strong: rgba(15, 23, 42, 0.14);
+  --selection: rgba(10, 132, 255, 0.22);
+  --desktop-wallpaper:
+    radial-gradient(circle at 12% 18%, rgba(255, 255, 255, 0.5), transparent 24%),
+    radial-gradient(circle at 88% 16%, rgba(255, 255, 255, 0.34), transparent 20%),
+    radial-gradient(circle at 78% 88%, rgba(255, 255, 255, 0.22), transparent 24%),
+    linear-gradient(120deg, #ffb6bb 0%, #f5d1f0 34%, #c7dafd 68%, #b0e2ff 100%);
+}
+
+.dark {
+  color-scheme: dark;
+  --background: 224 20% 9%;
+  --foreground: 210 18% 94%;
+  --muted-foreground: 220 10% 68%;
+  --destructive: 4 84% 63%;
+  --border: 220 8% 20%;
+  --ring: 209 100% 62%;
+  --surface-app: #12151f;
+  --surface-window: rgba(21, 24, 33, 0.66);
+  --surface-sidebar: rgba(18, 20, 28, 0.72);
+  --surface-list: rgba(22, 24, 33, 0.92);
+  --surface-editor: rgba(26, 28, 37, 0.95);
+  --surface-panel: rgba(28, 30, 40, 0.92);
+  --surface-elevated: rgba(30, 33, 44, 0.82);
+  --surface-overlay: rgba(24, 26, 35, 0.86);
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --selection: rgba(64, 156, 255, 0.3);
+  --desktop-wallpaper:
+    radial-gradient(circle at 18% 16%, rgba(73, 98, 186, 0.28), transparent 24%),
+    radial-gradient(circle at 82% 14%, rgba(179, 113, 212, 0.18), transparent 18%),
+    radial-gradient(circle at 74% 82%, rgba(44, 160, 176, 0.14), transparent 18%),
+    linear-gradient(145deg, #1a2030 0%, #171b27 34%, #1d2537 68%, #18202f 100%);
+}
+
+.nexus-surface {
+  border: 1px solid var(--border-subtle);
+  color: hsl(var(--foreground));
+}
+
+.nexus-surface-window {
+  background: var(--surface-window);
+  border-radius: var(--radius-window);
+  box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(30px) saturate(160%);
+}
+
+.nexus-surface-sidebar { background: var(--surface-sidebar); }
+.nexus-surface-list { background: var(--surface-list); }
+.nexus-surface-editor { background: var(--surface-editor); }
+.nexus-surface-panel { background: var(--surface-panel); }
+.nexus-surface-overlay {
+  background: var(--surface-overlay);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(24px) saturate(150%);
+}

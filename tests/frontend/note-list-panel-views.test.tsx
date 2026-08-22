@@ -1,6 +1,7 @@
 import type React from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { formatDailyTime } from "@/components/notes/DailyNoteListView";
 import { NoteListPanel } from "@/components/notes/NoteListPanel";
 
 const baseNote = {
@@ -97,7 +98,7 @@ describe("NoteListPanel view semantics", () => {
     expect(screen.getByTestId("daily-note-list-view")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "今天" })).toBeInTheDocument();
     expect(screen.getByLabelText("每日笔记日期")).toHaveValue("2026-05-10");
-    expect(screen.getAllByText("09:30").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(formatDailyTime(baseNote.created_at)).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "写记录" })).toBeInTheDocument();
   });
 

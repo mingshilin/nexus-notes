@@ -1,0 +1,77 @@
+import type { DatabaseProperty, DatabaseRecord, DatabaseTemplate, DatabaseView } from "@nexus/contracts";
+import { useEffect, useState } from "react";
+
+import { emptyPropertyValue, PropertyValueFields, PropertyValueInput } from "./DatabaseRecordForm";
+
+function emptyConfig(properties: readonly DatabaseProperty[]): DatabaseView["config"] {
+  return { filters: [], sorts: [], grouping: null, visible_columns: properties.map((property) => property.id), page_size: 50, settings: {} };
+}
+
+export function DatabaseViewForm({ name, type, properties, position, disabled, editingView, onNameChange, onTypeChange, onSubmit, onUpdate }: {
+  name: string;
+  type: DatabaseView["type"];
+  properties: readonly DatabaseProperty[];
+  position: number;
+  disabled: boolean;
+  editingView?: DatabaseView;
+  onNameChange(value: string): void;
+  onTypeChange(value: DatabaseView["type"]): void;
+  onSubmit(input: { name: string; type: DatabaseView["type"]; position: number; config: DatabaseView["config"] }): void;
+  onUpdate?(input: { name: string; config: DatabaseView["config"] }): void;
+}) {
+  const [config, setConfig] = useState<DatabaseView["config"]>(() => editingView?.config ?? emptyConfig(properties));
+  useEffect(() => setConfig(editingView?.config ?? emptyConfig(properties)), [editingView?.id, editingView?.revision, properties]);
+  const settings = config.settings;
+  const updateSettings = (next: Partial<DatabaseView["config"]["settings"]>) => setConfig((current) => ({ ...current, settings: { ...current.settings, ...next } }));
+  const toggleColumn = (id: string, selected: boolean) => setConfig((current) => ({ ...current, visible_columns: selected ? [...current.visible_columns, id] : current.visible_columns.filter((value) => value !== id) }));
+  const updateFilter = (index: number, next: Partial<DatabaseView["config"]["filters"][number]>) => setConfig((current) => ({ ...current, filters: current.filters.map((filter, currentIndex) => currentIndex === index ? { ...filter, ...next } : filter) }));
+  const updateSort = (index: number, next: Partial<DatabaseView["config"]["sorts"][number]>) => setConfig((current) => ({ ...current, sorts: current.sorts.map((sort, currentIndex) => currentIndex === index ? { ...sort, ...next } : sort) }));
+
+  return <section aria-label="视图表单">
+    <h2>{editingView ? "编辑视图" : "创建视图"}</h2>
+    <label>视图名称<input value={name} onChange={(event) => onNameChange(event.target.value)} /></label>
+    <label>视图类型<select value={type} disabled={Boolean(editingView)} onChange={(event) => onTypeChange(event.target.value as DatabaseView["type"])}><option value="table">table</option><option value="board">board</option><option value="calendar">calendar</option></select></label>
+    <label>每页记录数<input type="number" min="1" max="100" value={config.page_size} onChange={(event) => setConfig((current) => ({ ...current, page_size: Math.max(1, Math.min(100, Number(event.target.value) || 1)) }))} /></label>
+    <fieldset><legend>显示字段</legend>{properties.map((property) => <label key={property.id}><input type="checkbox" checked={config.visible_columns.includes(property.id)} onChange={(event) => toggleColumn(property.id, event.target.checked)} />{property.name}</label>)}</fieldset>
+    <fieldset><legend>过滤器</legend>{config.filters.map((filter, index) => {
+      const property = properties.find((candidate) => candidate.id === filter.property_id);
+      return <div className="database-tools-actions" key={`${filter.property_id}-${index}`}>
+        <select value={filter.property_id} onChange={(event) => {
+          const nextProperty = properties.find((candidate) => candidate.id === event.target.value);
+          updateFilter(index, { property_id: event.target.value, value: nextProperty ? emptyPropertyValue(nextProperty) : "" });
+        }}>{properties.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+        <select value={filter.operator} onChange={(event) => updateFilter(index, { operator: event.target.value as typeof filter.operator })}>{["equals", "not_equals", "contains", "not_contains", "is_empty", "is_not_empty", "before", "after"].map((operator) => <option key={operator} value={operator}>{operator}</option>)}</select>
+        {!filter.operator.includes("empty") && property ? <PropertyValueInput property={property} value={filter.value} ariaLabel={`过滤值 ${index + 1}`} onChange={(value) => updateFilter(index, { value })} /> : null}
+        <button type="button" onClick={() => setConfig((current) => ({ ...current, filters: current.filters.filter((_, currentIndex) => currentIndex !== index) }))}>删除过滤器</button>
+      </div>;
+    })}<button type="button" disabled={config.filters.length >= 20 || !properties[0]} onClick={() => setConfig((current) => ({ ...current, filters: [...current.filters, { property_id: properties[0]!.id, operator: "equals", value: emptyPropertyValue(properties[0]!) }] }))}>添加过滤器</button></fieldset>
+    <fieldset><legend>排序</legend>{config.sorts.map((sort, index) => <div className="database-tools-actions" key={`${sort.property_id}-${index}`}><select value={sort.property_id} onChange={(event) => updateSort(index, { property_id: event.target.value })}>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select><select value={sort.direction} onChange={(event) => updateSort(index, { direction: event.target.value as typeof sort.direction })}><option value="asc">asc</option><option value="desc">desc</option></select><button type="button" onClick={() => setConfig((current) => ({ ...current, sorts: current.sorts.filter((_, currentIndex) => currentIndex !== index) }))}>删除排序</button></div>)}<button type="button" disabled={config.sorts.length >= 10 || !properties[0]} onClick={() => setConfig((current) => ({ ...current, sorts: [...current.sorts, { property_id: properties[0]!.id, direction: "asc" }] }))}>添加排序</button></fieldset>
+    <label>分组字段<select value={config.grouping?.property_id ?? ""} onChange={(event) => setConfig((current) => ({ ...current, grouping: event.target.value ? { property_id: event.target.value } : null }))}><option value="">不分组</option>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label>
+    <label>冻结字段<select value={settings.frozen_property_id ?? ""} onChange={(event) => updateSettings({ frozen_property_id: event.target.value || null })}><option value="">无</option>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label>
+    <label>行高<select value={settings.row_height ?? "default"} onChange={(event) => updateSettings({ row_height: event.target.value as "compact" | "default" | "comfortable" })}><option value="compact">compact</option><option value="default">default</option><option value="comfortable">comfortable</option></select></label>
+    <fieldset><legend>卡片字段</legend>{properties.map((property) => <label key={property.id}><input type="checkbox" checked={settings.card_properties?.includes(property.id) ?? false} onChange={(event) => updateSettings({ card_properties: event.target.checked ? [...(settings.card_properties ?? []), property.id] : (settings.card_properties ?? []).filter((id) => id !== property.id) })} />{property.name}</label>)}</fieldset>
+    <label>隐藏空分组<input type="checkbox" checked={settings.hide_empty_groups ?? false} onChange={(event) => updateSettings({ hide_empty_groups: event.target.checked })} /></label>
+    <label>卡片分段<input type="number" min="10" max="200" value={settings.segment_size ?? 60} onChange={(event) => updateSettings({ segment_size: Math.max(10, Math.min(200, Number(event.target.value) || 10)) })} /></label>
+    <label>日历日期字段<select value={settings.date_property_id ?? ""} onChange={(event) => updateSettings({ date_property_id: event.target.value || null })}><option value="">无</option>{properties.filter((property) => property.type === "date").map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label>
+    <label>未安排记录<input type="checkbox" checked={settings.show_undated !== false} onChange={(event) => updateSettings({ show_undated: event.target.checked })} /></label>
+    <label>周起始日<select value={settings.week_start ?? "monday"} onChange={(event) => updateSettings({ week_start: event.target.value as "monday" | "sunday" })}><option value="monday">monday</option><option value="sunday">sunday</option></select></label>
+    <button type="button" disabled={disabled} onClick={() => editingView && onUpdate ? onUpdate({ name, config }) : onSubmit({ name, type, position, config })}>{editingView ? "保存视图" : "创建视图"}</button>
+  </section>;
+}
+
+export function DatabaseTemplateForm({ templates, templateId, name, records, properties, values, disabled, onTemplateChange, onNameChange, onValuesChange, onCreate, onApply }: {
+  templates: readonly DatabaseTemplate[];
+  templateId: string;
+  name: string;
+  records: readonly DatabaseRecord[];
+  properties: readonly DatabaseProperty[];
+  values: Record<string, unknown>;
+  disabled: boolean;
+  onTemplateChange(value: string): void;
+  onNameChange(value: string): void;
+  onValuesChange(propertyId: string, value: unknown): void;
+  onCreate(name: string): void;
+  onApply(templateId: string): void;
+}) {
+  return <section aria-label="模板表单"><h2>模板</h2><ul className="database-entity-list">{templates.map((template) => <li key={template.id}><button type="button" className={template.id === templateId ? "active" : ""} onClick={() => onTemplateChange(template.id)}>{template.name}</button></li>)}</ul><label>模板名称<input value={name} onChange={(event) => onNameChange(event.target.value)} /></label><fieldset><legend>模板默认值</legend><PropertyValueFields properties={properties} values={values} onChange={onValuesChange} /></fieldset><button type="button" disabled={disabled} onClick={() => onCreate(name)}>创建模板</button>{templateId && records.length ? <button type="button" disabled={disabled} onClick={() => onApply(templateId)}>应用所选模板</button> : null}</section>;
+}

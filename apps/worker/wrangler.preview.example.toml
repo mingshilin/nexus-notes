@@ -1,0 +1,54 @@
+name = "nexus-notes-public-beta-preview"
+main = "src/index.ts"
+compatibility_date = "2026-08-20"
+workers_dev = true
+preview_urls = true
+
+[triggers]
+crons = ["*/1 * * * *"]
+
+[assets]
+directory = "../web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+[vars]
+APP_NAME = "Nexus Notes Beta Preview"
+APP_BASE_URL = "https://nexus-notes-public-beta-preview.example.workers.dev"
+AI_ENABLED = "false"
+CORS_ALLOWED_ORIGINS = "https://nexus-notes-public-beta-preview.example.workers.dev"
+DEPLOYMENT_VERSION = "development"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "nexus-notes-public-beta-preview"
+database_id = "<PREVIEW_D1_DATABASE_ID>"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "nexus-notes-public-beta-preview-files"
+
+[ai]
+binding = "AI"
+
+[[queues.producers]]
+binding = "JOBS"
+queue = "nexus-notes-public-beta-preview-jobs"
+
+[[queues.consumers]]
+queue = "nexus-notes-public-beta-preview-jobs"
+max_batch_size = 10
+max_batch_timeout = 5
+
+[[durable_objects.bindings]]
+name = "PRESENCE"
+class_name = "PresenceRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PresenceRoom"]
+
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "nexus_notes_public_beta_preview"
