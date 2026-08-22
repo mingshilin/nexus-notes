@@ -11,6 +11,7 @@ routes = [
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
+run_worker_first = ["/*"]
 
 [vars]
 APP_NAME = "Nexus Notes"
