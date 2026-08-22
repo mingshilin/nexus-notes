@@ -354,6 +354,9 @@ async function main() {
     const assets = result.checkedAssets.map((asset) => `  - ${asset}`).join("\n");
     console.log(`${result.label}: deploy readiness checks passed`);
     console.log(assets);
+    if (result.checkedChunks !== undefined) {
+      console.log(`  - JavaScript chunks checked=${result.checkedChunks}; initial forbidden chunks absent=${FORBIDDEN_INITIAL_CHUNKS.join(", ")}`);
+    }
     if ("healthConfigured" in result) {
       console.log(`  - ${result.healthPath} configured=${result.healthConfigured}${result.healthStatus ? ` status=${result.healthStatus}` : ""}`);
     } else if ("healthOcr" in result) {
