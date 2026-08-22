@@ -169,12 +169,21 @@ export async function checkRemoteDeploy(baseUrl) {
     assertReadiness(typeof health?.data?.configured === "boolean", "online: health endpoint missing configured flag");
   }
 
+  const healthDetails = healthPath === "/api/v2/health"
+    ? {
+        healthStatus: health.data.status ?? undefined,
+        healthOcr: health.data.ocr ?? undefined,
+      }
+    : {
+        healthConfigured: health.data.configured === true,
+        healthStatus: health.data.status ?? undefined,
+      };
+
   return {
     label: "online",
     checkedAssets: assets.initialJs,
     healthPath,
-    healthConfigured: health.data.configured === true,
-    healthStatus: health.data.status ?? undefined,
+    ...healthDetails,
   };
 }
 
@@ -193,6 +202,8 @@ async function main() {
     console.log(assets);
     if ("healthConfigured" in result) {
       console.log(`  - ${result.healthPath} configured=${result.healthConfigured}${result.healthStatus ? ` status=${result.healthStatus}` : ""}`);
+    } else if ("healthOcr" in result) {
+      console.log(`  - ${result.healthPath} status=${result.healthStatus ?? "unknown"}${result.healthOcr ? ` ocr=${result.healthOcr}` : ""}`);
     }
   }
 }
