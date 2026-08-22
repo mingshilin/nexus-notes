@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 import { AdaptiveWorkbench } from "../src/layout/AdaptiveWorkbench";
@@ -66,6 +66,7 @@ function scrollOwners() {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   document.documentElement.style.removeProperty("--keyboard-inset");
 });
 
@@ -162,5 +163,27 @@ describe("core UX mobile", () => {
     render(<AdaptiveWorkbench mode="mobile" navigation="Navigation" mobileNavigation="Mobile navigation" inspectorOpen={false} onInspectorClose={vi.fn()}>Editor</AdaptiveWorkbench>);
     expect(document.documentElement.style.getPropertyValue("--keyboard-inset")).toBe("344px");
     expect(viewport.addEventListener).toHaveBeenCalledWith("resize", expect.any(Function));
+  });
+
+  it("does not restore chrome after a stationary downward scroll timer", () => {
+    vi.useFakeTimers();
+    const { container } = render(
+      <AdaptiveWorkbench mode="mobile" navigation="Navigation" mobileNavigation="Mobile navigation" inspectorOpen={false} onInspectorClose={vi.fn()}>
+        <input aria-label="编辑输入" />
+      </AdaptiveWorkbench>,
+    );
+    const page = container.querySelector<HTMLElement>(".page-scroll-area")!;
+    const navigation = container.querySelector<HTMLElement>('.mobile-bottom-nav[aria-label="移动端主导航"]')!;
+
+    page.scrollTop = 40;
+    fireEvent.scroll(page);
+    expect(navigation).toHaveAttribute("data-visible", "false");
+
+    act(() => { vi.advanceTimersByTime(900); });
+    expect(navigation).toHaveAttribute("data-visible", "false");
+
+    page.scrollTop = 20;
+    fireEvent.scroll(page);
+    expect(navigation).toHaveAttribute("data-visible", "true");
   });
 });

@@ -16,8 +16,7 @@ export interface MobileChromeState {
 export type MobileChromeEvent =
   | { type: "scroll"; scrollTop: number }
   | { type: "text-focus"; focused: boolean }
-  | { type: "keyboard"; inset: number }
-  | { type: "restore" };
+  | { type: "keyboard"; inset: number };
 
 export function createMobileChromeState(): MobileChromeState {
   return {
@@ -46,13 +45,6 @@ export function reduceMobileChrome(
       visible: event.inset > 0 ? false : !state.textFocused,
     };
   }
-  if (event.type === "restore") {
-    return {
-      ...state,
-      visible: !state.textFocused && state.keyboardInset === 0,
-    };
-  }
-
   const scrollTop = Math.max(0, event.scrollTop);
   const delta = scrollTop - state.lastScrollTop;
   let visible = state.visible;

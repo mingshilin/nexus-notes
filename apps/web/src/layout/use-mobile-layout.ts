@@ -36,14 +36,8 @@ export function useMobileChrome() {
   const [state, dispatch] = useReducer(reduceMobileChrome, undefined, createMobileChromeState);
 
   useEffect(() => {
-    let restoreTimer: ReturnType<typeof setTimeout> | undefined;
-    const scheduleRestore = () => {
-      clearTimeout(restoreTimer);
-      restoreTimer = setTimeout(() => dispatch({ type: "restore" }), 900);
-    };
     const onScroll = (event: Event) => {
       dispatch({ type: "scroll", scrollTop: readScrollTop(event.target) });
-      scheduleRestore();
     };
     const onFocusIn = (event: FocusEvent) => {
       if (isTextEntry(event.target)) dispatch({ type: "text-focus", focused: true });
@@ -66,7 +60,6 @@ export function useMobileChrome() {
     updateViewport();
 
     return () => {
-      clearTimeout(restoreTimer);
       document.removeEventListener("scroll", onScroll, true);
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onFocusOut);

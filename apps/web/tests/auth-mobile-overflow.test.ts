@@ -21,6 +21,7 @@ describe("mobile authentication overflow", () => {
     expect(css).toMatch(/\.account-form-grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)/);
     expect(css).toMatch(/\.account-form-grid, \.account-invite-form, \.account-metric-list\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
     expect(css).toMatch(/\.account-panel[^}]*overflow-wrap:\s*anywhere/);
+    expect(css).toMatch(/\.context-heading \.primary-create-note, \.primary-create-note\s*\{[^}]*min-height:\s*40px/);
     expect(css).toMatch(/\.mobile-bottom-nav[^}]*env\(safe-area-inset-bottom\)/);
     expect(css).toMatch(/\.mobile-create-note[^}]*var\(--keyboard-inset/);
     expect(css).toMatch(/visibility:\s*hidden/);
