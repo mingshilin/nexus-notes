@@ -151,4 +151,41 @@ describe("AuthPanel", () => {
       expect(screen.getByPlaceholderText("输入 6 位验证码")).toBeInTheDocument();
     });
   });
+
+  it("does not resend verification twice while the first request is pending", async () => {
+    const AuthPanel = await loadAuthPanel();
+    let resolveResend!: () => void;
+    const resendPending = new Promise<PendingVerificationAuth>((resolve) => {
+      resolveResend = () => resolve(pendingVerification);
+    });
+    const onResendVerificationCode = vi.fn(() => resendPending);
+
+    render(
+      <AuthPanel
+        loading={false}
+        onLogin={vi.fn().mockResolvedValue(undefined)}
+        onRegister={vi.fn().mockResolvedValue(pendingVerification)}
+        onVerifyEmailCode={vi.fn().mockResolvedValue(undefined)}
+        onResendVerificationCode={onResendVerificationCode}
+        onForgotPassword={vi.fn().mockResolvedValue(undefined)}
+        onResetPassword={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "注册" }));
+    fireEvent.change(screen.getByPlaceholderText("邮箱"), { target: { value: "a@test.com" } });
+    fireEvent.change(screen.getByPlaceholderText("密码"), { target: { value: "password123" } });
+    fireEvent.change(screen.getByPlaceholderText("确认密码"), { target: { value: "password123" } });
+    fireEvent.click(screen.getByText("mock-turnstile"));
+    fireEvent.click(screen.getByRole("button", { name: "注册" }));
+    await screen.findByPlaceholderText("输入 6 位验证码");
+
+    const resend = screen.getByRole("button", { name: "重新发送验证码" });
+    resend.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    resend.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(onResendVerificationCode).toHaveBeenCalledTimes(1);
+    resolveResend();
+    await waitFor(() => expect(onResendVerificationCode).toHaveBeenCalledOnce());
+  });
 });
