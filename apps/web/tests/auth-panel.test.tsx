@@ -40,6 +40,62 @@ describe("AuthPanel", () => {
     expect(screen.getByTestId("turnstile-widget")).toBeInTheDocument();
   });
 
+  it("recovers a rejected registration challenge with one request and a fresh token", async () => {
+    const web = await loadWeb();
+    const AuthPanel = web.AuthPanel as any;
+    let challengeCallback!: (token: string) => void;
+    const turnstile = {
+      render: vi.fn((_container: unknown, options: { callback(token: string): void }) => {
+        challengeCallback = options.callback;
+        return "widget-" + turnstile.render.mock.calls.length;
+      }),
+      remove: vi.fn(),
+      reset: vi.fn(),
+    };
+    window.turnstile = turnstile as any;
+    const challengeError = Object.assign(new Error("Human verification failed"), {
+      code: "CHALLENGE_FAILED",
+    });
+    const client = {
+      register: vi.fn()
+        .mockRejectedValueOnce(challengeError)
+        .mockResolvedValueOnce({ userId: "user-1", email: "user@example.com", verificationRequired: true }),
+    };
+
+    try {
+      render(<AuthPanel client={client} onAuthenticated={vi.fn()} turnstileSiteKey="test-site-key" />);
+      fireEvent.click(screen.getByRole("button", { name: "注册账户" }));
+      fireEvent.change(screen.getByLabelText("名称"), { target: { value: "Beta User" } });
+      fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "user@example.com" } });
+      fireEvent.change(screen.getByLabelText("密码"), { target: { value: "long-enough-123" } });
+
+      await waitFor(() => expect(turnstile.render).toHaveBeenCalledOnce());
+      act(() => challengeCallback("stale-token"));
+      fireEvent.click(screen.getByRole("button", { name: "创建账户" }));
+
+      await waitFor(() => expect(client.register).toHaveBeenCalledTimes(1));
+      expect(await screen.findByRole("alert")).toHaveTextContent("本次人机验证已失效，请重新验证后再提交。");
+      await waitFor(() => expect(turnstile.render).toHaveBeenCalledTimes(2));
+      expect(screen.getByRole("button", { name: "创建账户" })).toBeDisabled();
+
+      act(() => challengeCallback("fresh-token"));
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "创建账户" })).toBeEnabled();
+      fireEvent.click(screen.getByRole("button", { name: "创建账户" }));
+
+      await waitFor(() => expect(client.register).toHaveBeenCalledTimes(2));
+      expect(client.register).toHaveBeenLastCalledWith({
+        email: "user@example.com",
+        password: "long-enough-123",
+        displayName: "Beta User",
+        turnstileToken: "fresh-token",
+      });
+      expect(await screen.findByRole("heading", { name: "验证邮箱" })).toBeInTheDocument();
+    } finally {
+      delete window.turnstile;
+    }
+  });
+
   it("reveals login verification only after a risk challenge response", async () => {
     const web = await loadWeb();
     const AuthPanel = web.AuthPanel as any;
@@ -114,6 +170,53 @@ describe("AuthPanel", () => {
         email: "user@example.com",
         turnstileToken: "challenge-verify",
       }));
+    } finally {
+      delete window.turnstile;
+    }
+  });
+
+  it("recovers a rejected resend challenge with a fresh verification token", async () => {
+    const web = await loadWeb();
+    const AuthPanel = web.AuthPanel as any;
+    let challengeCallback!: (token: string) => void;
+    const turnstile = {
+      render: vi.fn((_container: unknown, options: { callback(token: string): void }) => {
+        challengeCallback = options.callback;
+        return "widget-resend";
+      }),
+      remove: vi.fn(),
+      reset: vi.fn(),
+    };
+    window.turnstile = turnstile as any;
+    const challengeError = Object.assign(new Error("Human verification failed"), {
+      code: "CHALLENGE_FAILED",
+    });
+    const client = {
+      resendVerification: vi.fn()
+        .mockRejectedValueOnce(challengeError)
+        .mockResolvedValueOnce({ accepted: true }),
+    };
+
+    try {
+      render(<AuthPanel client={client} onAuthenticated={vi.fn()} turnstileSiteKey="test-site-key" />);
+      fireEvent.click(screen.getByRole("button", { name: "验证邮箱" }));
+      fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "user@example.com" } });
+      await waitFor(() => expect(turnstile.render).toHaveBeenCalledOnce());
+      act(() => challengeCallback("stale-resend-token"));
+      fireEvent.click(screen.getByRole("button", { name: "重新发送验证码" }));
+
+      await waitFor(() => expect(client.resendVerification).toHaveBeenCalledTimes(1));
+      expect(await screen.findByRole("alert")).toHaveTextContent("本次人机验证已失效，请重新验证后再提交。");
+      await waitFor(() => expect(turnstile.render).toHaveBeenCalledTimes(2));
+      act(() => challengeCallback("fresh-resend-token"));
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "重新发送验证码" }));
+      await waitFor(() => expect(client.resendVerification).toHaveBeenCalledTimes(2));
+      expect(client.resendVerification).toHaveBeenLastCalledWith({
+        email: "user@example.com",
+        turnstileToken: "fresh-resend-token",
+      });
     } finally {
       delete window.turnstile;
     }
