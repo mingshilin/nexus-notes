@@ -115,20 +115,23 @@ export class NoteDraftController {
     lifecycle.tombstoned = true;
     const prior = lifecycle.tail;
     const run = prior.then(async () => {
-      const current = await this.store.getDraft(workspaceId, entityId);
-      if (!current) {
-        if (expectation) {
-          lifecycle.tombstoned = false;
-          return false;
+      const outcome: { value: "deleted" | "changed" | "absent" } = { value: "absent" };
+      await this.store.mutateDraft(workspaceId, entityId, (current) => {
+        if (!current) {
+          outcome.value = "absent";
+          return undefined;
         }
-        await this.store.removeDraft(workspaceId, entityId);
-        return true;
-      }
-      if (expectation && !this.matches(current, expectation)) {
+        if (expectation && !this.matches(current, expectation)) {
+          outcome.value = "changed";
+          return undefined;
+        }
+        outcome.value = "deleted";
+        return null;
+      });
+      if (outcome.value === "changed") {
         lifecycle.tombstoned = false;
         return false;
       }
-      await this.store.removeDraft(workspaceId, entityId);
       return true;
     });
     const tracked = run.then(
@@ -197,6 +200,7 @@ export class NoteDraftController {
 
       if (draft.pending_patch) {
         const pending = draft.pending_patch;
+        if (draft.server_note) serverNote = draft.server_note;
         serverNote = await client.update(
           serverNote.id,
           this.patchInput(pending),
@@ -212,6 +216,10 @@ export class NoteDraftController {
       if (serverNote.title !== draft.title || serverNote.content !== draft.content) {
         const staged = await this.stagePatch(workspaceId, entityId, serverNote);
         if (!staged) throw new Error("Draft was tombstoned before PATCH intent");
+        if (!staged.server_note || staged.server_note.id !== serverNote.id) {
+          throw new Error("DRAFT_CHANGED: server binding changed during PATCH staging");
+        }
+        serverNote = staged.server_note;
         continue;
       }
 
@@ -226,11 +234,12 @@ export class NoteDraftController {
       return this.store.mutateDraft(workspaceId, entityId, (current) => {
         if (!current) return undefined;
         if (current.pending_patch) return current;
+        if (!current.server_note || current.server_note.id !== serverNote.id) return current;
         const generation = current.next_patch_generation ?? 1;
         const pending: PendingPatch = {
           key: `${entityId}:patch:${generation}`,
           generation,
-          base_revision: serverNote.revision,
+          base_revision: current.server_note.revision,
           title: current.title,
           content: current.content,
           source: "manual",
@@ -243,7 +252,7 @@ export class NoteDraftController {
   private async bindServerNote(workspaceId: string, entityId: string, serverNote: Note) {
     return this.enqueue(this.key(workspaceId, entityId), async () => {
       return this.store.mutateDraft(workspaceId, entityId, (current) => {
-        if (!current || current.pending_patch) return undefined;
+        if (!current) return undefined;
         if (current.server_note_id && current.server_note_id !== serverNote.id) return current;
         if (!current.server_note && (current.server_revision ?? 0) > serverNote.revision) return current;
         if (current.server_note) {

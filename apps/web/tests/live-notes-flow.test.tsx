@@ -18,6 +18,7 @@ type NoteApiOptions = {
 
 function createDraftStore(initial: LocalDraft[] = []) {
   const drafts = new Map(initial.map((draft) => [`${draft.workspace_id}:${draft.entity_id}`, draft]));
+  const removeDraft = vi.fn(async (workspaceId: string, entityId: string) => { drafts.delete(`${workspaceId}:${entityId}`); });
   return {
     saveDraft: vi.fn(async (draft: LocalDraft) => { drafts.set(`${draft.workspace_id}:${draft.entity_id}`, { ...draft }); }),
     mutateDraft: vi.fn(async (workspaceId: string, entityId: string, mutation: (current: LocalDraft | null) => LocalDraft | null | undefined) => {
@@ -25,12 +26,12 @@ function createDraftStore(initial: LocalDraft[] = []) {
       const current = drafts.get(key) ?? null;
       const next = mutation(current ? { ...current } : null);
       if (next === undefined) return current ? { ...current } : null;
-      if (next === null) { drafts.delete(key); return null; }
+      if (next === null) { await removeDraft(workspaceId, entityId); return null; }
       drafts.set(key, { ...next });
       return { ...next };
     }),
     listDrafts: vi.fn(async (workspaceId: string) => [...drafts.values()].filter((draft) => draft.workspace_id === workspaceId).sort((left, right) => right.updated_at.localeCompare(left.updated_at))),
-    removeDraft: vi.fn(async (workspaceId: string, entityId: string) => { drafts.delete(`${workspaceId}:${entityId}`); }),
+    removeDraft,
     getDraft: (workspaceId: string, entityId: string) => drafts.get(`${workspaceId}:${entityId}`) ?? null,
   };
 }

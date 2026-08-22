@@ -12,6 +12,8 @@ function createStore(overrides: Partial<{
   const drafts = new Map<string, LocalDraft>();
   const saveDraft = vi.fn(async (draft: LocalDraft) => { drafts.set(`${draft.workspace_id}:${draft.entity_id}`, { ...draft }); });
   const persistedSaveDraft = overrides.saveDraft ?? saveDraft;
+  const removeDraft = vi.fn(async (workspaceId: string, entityId: string) => { drafts.delete(`${workspaceId}:${entityId}`); });
+  const persistedRemoveDraft = overrides.removeDraft ?? removeDraft;
   return {
     saveDraft: persistedSaveDraft,
     mutateDraft: vi.fn(async (workspaceId: string, entityId: string, mutation: (current: LocalDraft | null) => LocalDraft | null | undefined) => {
@@ -20,7 +22,7 @@ function createStore(overrides: Partial<{
       const next = mutation(current ? { ...current } : null);
       if (next === undefined) return current ? { ...current } : null;
       if (next === null) {
-        drafts.delete(key);
+        await persistedRemoveDraft(workspaceId, entityId);
         return null;
       }
       drafts.set(key, { ...next });
@@ -29,7 +31,7 @@ function createStore(overrides: Partial<{
     }),
     getDraft: vi.fn(async (workspaceId: string, entityId: string) => drafts.get(`${workspaceId}:${entityId}`) ?? null),
     listDrafts: vi.fn(async (workspaceId: string) => [...drafts.values()].filter((draft) => draft.workspace_id === workspaceId)),
-    removeDraft: vi.fn(async (workspaceId: string, entityId: string) => { drafts.delete(`${workspaceId}:${entityId}`); }),
+    removeDraft: persistedRemoveDraft,
     ...overrides,
   };
 }
@@ -161,6 +163,75 @@ describe("NoteDraftController", () => {
     await expect(deletingController.reconcile("ws-1", "local-1", { generation: 1 })).resolves.toBe(true);
     await expect(oldController.save("ws-1", "local-1", "Stale", "Stale body")).resolves.toBeNull();
     expect(await store.getDraft("ws-1", "local-1")).toBeNull();
+  });
+
+  it("does not atomically reconcile over a newer save from another controller", async () => {
+    const store = createStore();
+    const originalMutateDraft = store.mutateDraft.getMockImplementation()!;
+    let releaseMutation!: () => void;
+    const mutationBlocked = new Promise<void>((resolve) => { releaseMutation = resolve; });
+    let blockNextMutation = true;
+    store.mutateDraft.mockImplementation(async (workspaceId: string, entityId: string, mutation: (current: LocalDraft | null) => LocalDraft | null | undefined) => {
+      if (blockNextMutation) {
+        blockNextMutation = false;
+        await mutationBlocked;
+      }
+      return originalMutateDraft(workspaceId, entityId, mutation);
+    });
+    const originalRemoveDraft = store.removeDraft.getMockImplementation()!;
+    store.removeDraft.mockImplementation(async (workspaceId: string, entityId: string) => {
+      await originalRemoveDraft(workspaceId, entityId);
+    });
+    await store.saveDraft({ workspace_id: "ws-1", entity_id: "local-1", title: "Old", content: "Body", updated_at: "2026-08-22T00:00:00.000Z", draft_generation: 1 });
+    const controllerA = new NoteDraftController(store);
+    const controllerB = new NoteDraftController(store);
+    const reconciling = controllerA.reconcile("ws-1", "local-1", { generation: 1 });
+    await vi.waitFor(() => expect(store.mutateDraft).toHaveBeenCalled());
+    await controllerB.save("ws-1", "local-1", "New", "New body");
+    releaseMutation();
+
+    await expect(reconciling).resolves.toBe(false);
+    expect(await store.getDraft("ws-1", "local-1")).toMatchObject({ title: "New", content: "New body", draft_generation: 2 });
+    expect(store.removeDraft).not.toHaveBeenCalled();
+  });
+
+  it("stages PATCH from the current persisted server snapshot after another controller advances it", async () => {
+    const store = createStore();
+    const serverV1 = serverNote({ id: "server-1", title: "Base", content: "Base body", revision: 1 });
+    const serverV2 = serverNote({ id: "server-1", title: "New server", content: "New server body", revision: 2 });
+    await store.saveDraft({
+      workspace_id: "ws-1", entity_id: "local-1", title: "Local edit", content: "Local body", updated_at: "2026-08-22T00:00:00.000Z",
+      draft_generation: 1, next_patch_generation: 1, server_note: serverV1, server_note_id: serverV1.id, server_revision: serverV1.revision,
+    });
+    const controllerA = new NoteDraftController(store);
+    const controllerB = new NoteDraftController(store);
+    const originalGetDraft = store.getDraft.getMockImplementation()!;
+    let draftReads = 0;
+    let releaseDraftRead!: () => void;
+    const draftReadBlocked = new Promise<void>((resolve) => { releaseDraftRead = resolve; });
+    store.getDraft.mockImplementation(async (workspaceId: string, entityId: string) => {
+      const current = await originalGetDraft(workspaceId, entityId);
+      draftReads += 1;
+      if (draftReads === 2) await draftReadBlocked;
+      return current;
+    });
+    const update = vi.fn(async (_id: string, input: { title: string; content: string; base_revision: number }) => (
+      serverNote({ id: "server-1", title: input.title, content: input.content, revision: 3 })
+    ));
+    const syncing = controllerA.sync("ws-1", "local-1", { create: vi.fn(), update });
+    await vi.waitFor(() => expect(draftReads).toBe(2));
+    await store.mutateDraft("ws-1", "local-1", (current) => ({
+      ...current!, server_note: serverV2, server_note_id: serverV2.id, server_revision: serverV2.revision,
+    }));
+    releaseDraftRead();
+
+    const result = await syncing;
+
+    expect(update).toHaveBeenCalledWith("server-1", expect.objectContaining({ base_revision: 2 }), expect.objectContaining({ idempotencyKey: "local-1:patch:1" }));
+    expect(result.note).toMatchObject({ id: "server-1", revision: 3, title: "Local edit", content: "Local body" });
+    expect(result.localDraft.pending_patch).toBeUndefined();
+    expect(result.localDraft.server_note?.revision).toBe(3);
+    await expect(controllerB.sync("ws-1", "local-1", { create: vi.fn(), update })).resolves.toMatchObject({ note: expect.objectContaining({ revision: 3 }) });
   });
 
   it("does not hydrate a legacy response over a higher persisted server binding metadata", async () => {
@@ -672,14 +743,13 @@ describe("NoteDraftController", () => {
   it("retries local deletion after failure without issuing another POST", async () => {
     let removeAttempts = 0;
     const baseStore = createStore();
-    const store = {
-      ...baseStore,
-      removeDraft: vi.fn(async () => {
-        removeAttempts += 1;
-        if (removeAttempts === 1) throw new Error("delete failed");
-        await baseStore.removeDraft("ws-1", "local-1");
-      }),
-    };
+    const originalRemoveDraft = baseStore.removeDraft.getMockImplementation()!;
+    baseStore.removeDraft.mockImplementation(async (workspaceId: string, entityId: string) => {
+      removeAttempts += 1;
+      if (removeAttempts === 1) throw new Error("delete failed");
+      await originalRemoveDraft(workspaceId, entityId);
+    });
+    const store = baseStore;
     const controller = new NoteDraftController(store, { createId: () => "local-1" });
     await controller.create("ws-1");
     const create = vi.fn(async () => serverNote());
