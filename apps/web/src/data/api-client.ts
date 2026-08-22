@@ -16,6 +16,7 @@ export interface ApiRequestOptions {
   path: string;
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
+  bodyMode?: "json" | "raw";
   headers?: Record<string, string>;
   requestClass: RequestClass;
   policy: RequestPolicy;
@@ -116,17 +117,23 @@ export class ApiClient {
     for (let attempt = 0; attempt <= retryCount; attempt += 1) {
       const attemptSignal = createAttemptSignal(options.policy.timeoutMs, options.policy.signal);
       try {
+        const bodyMode = options.bodyMode ?? "json";
         const headers: Record<string, string> = {
           accept: "application/json",
           ...options.headers,
         };
-        if (options.body !== undefined) headers["content-type"] = "application/json";
+        if (options.body !== undefined && bodyMode === "json") headers["content-type"] = "application/json";
         if (options.policy.idempotencyKey) headers["idempotency-key"] = options.policy.idempotencyKey;
+        const requestBody = options.body === undefined
+          ? undefined
+          : bodyMode === "raw"
+            ? options.body as BodyInit
+            : JSON.stringify(options.body);
 
         const response = await this.fetchImpl(`${this.baseUrl}${options.path}`, {
           method,
           headers,
-          body: options.body === undefined ? undefined : JSON.stringify(options.body),
+          body: requestBody,
           signal: attemptSignal.signal,
           credentials: "include",
         });

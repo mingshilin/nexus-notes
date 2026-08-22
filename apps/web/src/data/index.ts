@@ -9,5 +9,6 @@ export * from "./normalized-cache";
 export * from "./note-autosave";
 export * from "./notes-client";
 export * from "./operations-client";
+export * from "./profile-client";
 export * from "./service-worker";
 export * from "./sync-engine";
