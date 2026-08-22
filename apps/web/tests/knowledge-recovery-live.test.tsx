@@ -28,11 +28,14 @@ describe("live knowledge recovery", () => {
     const apiClient = { request: vi.fn(() => new Promise(() => undefined)) };
     render(<App authClient={authClient as any} apiClient={apiClient as any} workspaceId="ws-1" turnstileSiteKey="test" />);
 
-    await waitFor(() => expect(apiClient.request).toHaveBeenCalledTimes(2));
-    const previousSignal = apiClient.request.mock.calls[0]?.[0].policy.signal as AbortSignal;
+    const recoveryRequests = () => apiClient.request.mock.calls
+      .map(([request]) => request as { path: string; policy: { signal?: AbortSignal } })
+      .filter((request) => request.path.startsWith("/api/v2/attachments") || request.path.startsWith("/api/v2/knowledge/diagnostics"));
+    await waitFor(() => expect(recoveryRequests()).toHaveLength(2));
+    const previousSignal = recoveryRequests()[0]?.policy.signal as AbortSignal;
     fireEvent.change(screen.getByRole("combobox", { name: "OCR 状态过滤" }), { target: { value: "failed" } });
 
-    await waitFor(() => expect(apiClient.request).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(recoveryRequests()).toHaveLength(4));
     expect(previousSignal.aborted).toBe(true);
   });
 

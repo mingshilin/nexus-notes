@@ -3,17 +3,19 @@ import {
   BookOpen,
   Boxes,
   Inbox,
+  PanelLeft,
   Search,
   Settings,
   Sparkles,
   Users,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import type { Attachment, Database, DatabaseRecord, KnowledgeDiagnostic, WorkspaceRoleContract } from "@nexus/contracts";
+import type { Attachment, Database, DatabaseRecord, KnowledgeDiagnostic, Note, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient } from "../data/api-client";
 import { CollaborationClient } from "../data/collaboration-client";
 import { KnowledgeClient } from "../data/knowledge-client";
+import { NotesClient } from "../data/notes-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic, type RecoveryFilters } from "../knowledge/KnowledgeRecoveryPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
@@ -48,12 +50,6 @@ const LazyDatabaseWorkbench = lazy(async () => {
 const defaultAuthClient = new AuthClient(new ApiClient());
 const initialRecoveryFilters: RecoveryFilters = { mimeType: "", ocrStatus: "" };
 type OcrStatus = NonNullable<Attachment["ocr_status"]>;
-const noteTargets = [
-  { type: "note" as const, id: "note-1", label: "Public Beta 重写计划" },
-  { type: "note" as const, id: "note-2", label: "每日产品复盘" },
-  { type: "note" as const, id: "note-3", label: "数据库设计记录" },
-  { type: "note" as const, id: "note-4", label: "欢迎使用 Nexus Notes" },
-];
 type AppRoute =
   | { kind: "workspace"; workspaceId?: string }
   | { kind: "invite"; token: string }
@@ -133,7 +129,16 @@ function AuthenticatedWorkspace({
   const [collaborationClient] = useState(() => new CollaborationClient(apiClient, workspaceId ?? ""));
   const [unreadCount, setUnreadCount] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);
-  const [selectedNoteId, setSelectedNoteId] = useState(noteTargets[0].id);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [notesLoading, setNotesLoading] = useState(Boolean(workspaceId));
+  const [notesError, setNotesError] = useState<string | null>(null);
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [creatingNote, setCreatingNote] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+  const [draftContent, setDraftContent] = useState("");
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [noteMessage, setNoteMessage] = useState<string | null>(null);
+  const [noteError, setNoteError] = useState<string | null>(null);
   const [selectedDatabaseRecordId, setSelectedDatabaseRecordId] = useState<string | null>(null);
   const [selectedCommentId, setSelectedCommentId] = useState<string | null>(null);
   const [collaborationInitialSection, setCollaborationInitialSection] = useState<"people" | "comments">("people");
@@ -169,6 +174,12 @@ function AuthenticatedWorkspace({
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
   const notificationOpenerRef = useRef<HTMLElement | null>(null);
   const notificationTargetController = useRef<AbortController | null>(null);
+  const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
+  const noteTargets = notes.map((note) => ({
+    type: "note" as const,
+    id: note.id,
+    label: note.title.trim() || "未命名笔记",
+  }));
 
   useEffect(() => {
     if (!inspectorOpen && inspectorOpenerRef.current) {
@@ -187,6 +198,56 @@ function AuthenticatedWorkspace({
     if (!collaborationEnabled) return;
     notificationOpenerRef.current = opener;
     setNotificationOpen((open) => !open);
+  };
+
+  const startNewNote = () => {
+    setSelectedNoteId(null);
+    setCreatingNote(true);
+    setDraftTitle("");
+    setDraftContent("");
+    setNoteMessage(null);
+    setNoteError(null);
+    setActiveDomain("notes");
+    setActivePane("canvas");
+  };
+
+  const selectNote = (note: Note) => {
+    setSelectedNoteId(note.id);
+    setCreatingNote(false);
+    setDraftTitle(note.title);
+    setDraftContent(note.content);
+    setNoteMessage(null);
+    setNoteError(null);
+    setSelectedDatabaseRecordId(null);
+    setSelectedCommentId(null);
+    setResolvedNotificationRecord(null);
+    setActivePane("canvas");
+  };
+
+  const saveNote = () => {
+    if (!workspaceId || noteSaving || (!creatingNote && !selectedNote)) return;
+    setNoteSaving(true);
+    setNoteMessage(null);
+    setNoteError(null);
+    const client = new NotesClient(apiClient, workspaceId);
+    const request = creatingNote || !selectedNote
+      ? client.create({ title: draftTitle, content: draftContent })
+      : client.update(selectedNote.id, {
+        base_revision: selectedNote.revision,
+        title: draftTitle,
+        content: draftContent,
+        source: "manual",
+      });
+    void request.then((saved) => {
+      setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
+      setSelectedNoteId(saved.id);
+      setCreatingNote(false);
+      setDraftTitle(saved.title);
+      setDraftContent(saved.content);
+      setNoteMessage("已保存");
+    }).catch(() => {
+      setNoteError("笔记保存失败，请稍后重试。未保存的内容仍保留在当前编辑器中。");
+    }).finally(() => setNoteSaving(false));
   };
 
   const abortRecoveryRequests = () => {
@@ -229,6 +290,43 @@ function AuthenticatedWorkspace({
     window.addEventListener("nexus:service-worker-update", handleUpdate);
     return () => window.removeEventListener("nexus:service-worker-update", handleUpdate);
   }, []);
+
+  useEffect(() => {
+    if (!workspaceId) {
+      setNotes([]);
+      setSelectedNoteId(null);
+      setCreatingNote(false);
+      setNotesLoading(false);
+      setNotesError(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setNotesLoading(true);
+    setNotesError(null);
+    void new NotesClient(apiClient, workspaceId).list({ limit: 50, signal: controller.signal }).then((page) => {
+      if (controller.signal.aborted) return;
+      const activeNotes = page.items.filter((note) => note.status === "active");
+      setNotes(activeNotes);
+      setSelectedNoteId((current) => activeNotes.some((note) => note.id === current) ? current : activeNotes[0]?.id ?? null);
+      setCreatingNote(false);
+    }).catch((error: unknown) => {
+      if (!isAborted(error, controller.signal)) setNotesError("笔记列表暂时无法加载。你仍可以尝试新建笔记。");
+    }).finally(() => {
+      if (!controller.signal.aborted) setNotesLoading(false);
+    });
+    return () => controller.abort();
+  }, [apiClient, workspaceId]);
+
+  useEffect(() => {
+    if (creatingNote) return;
+    if (selectedNote) {
+      setDraftTitle(selectedNote.title);
+      setDraftContent(selectedNote.content);
+    } else {
+      setDraftTitle("");
+      setDraftContent("");
+    }
+  }, [creatingNote, selectedNote]);
 
   useEffect(() => {
     if (!workspaceId || !collaborationEnabled) {
@@ -501,6 +599,17 @@ function AuthenticatedWorkspace({
           <span>{label}</span>
         </button>
       ))}
+      {activeDomain !== "collaboration" ? (
+        <button
+          className="rail-item"
+          type="button"
+          aria-label={activePane === "context" ? "关闭笔记列表" : "打开笔记列表"}
+          onClick={() => setActivePane((pane) => pane === "context" ? "canvas" : "context")}
+        >
+          <PanelLeft aria-hidden="true" size={19} />
+          <span>列表</span>
+        </button>
+      ) : null}
       <NotificationButton unreadCount={unreadCount} onClick={toggleNotifications} />
     </>
   );
@@ -517,13 +626,16 @@ function AuthenticatedWorkspace({
     <div className="context-content">
       <div className="context-heading">
         <div><small>CREATE</small><h2>所有笔记</h2></div>
-        <button type="button" aria-label="新建笔记"><Sparkles size={17} /></button>
+        <button type="button" aria-label="新建笔记" onClick={startNewNote}><Sparkles size={17} /></button>
       </div>
       <label className="search-field"><Search size={15} /><input aria-label="搜索笔记" placeholder="搜索笔记" /></label>
-      {noteTargets.map((note, index) => (
-        <button key={note.id} className={note.id === selectedNoteId ? "note-row selected" : "note-row"} type="button" onClick={() => { setSelectedNoteId(note.id); setSelectedDatabaseRecordId(null); setSelectedCommentId(null); setResolvedNotificationRecord(null); setActivePane("canvas"); }}>
-          <strong>{note.label}</strong><span>{index === 0 ? "刚刚" : `${index + 1} 天前`}</span>
-          <p>保持专注、可靠并且随时可以恢复的知识工作台。</p>
+      {notesLoading ? <p className="database-empty" role="status">正在加载笔记…</p> : null}
+      {notesError ? <p className="database-operation-error" role="alert">{notesError}</p> : null}
+      {!notesLoading && notes.length === 0 ? <p className="database-empty">暂无笔记，点击右上角开始记录。</p> : null}
+      {notes.map((note) => (
+        <button key={note.id} className={note.id === selectedNoteId ? "note-row selected" : "note-row"} type="button" onClick={() => selectNote(note)}>
+          <strong>{note.title.trim() || "未命名笔记"}</strong><span>{new Date(note.updated_at).toLocaleDateString()}</span>
+          <p>{note.content.trim().slice(0, 80) || "空白笔记"}</p>
         </button>
       ))}
     </div>
@@ -609,7 +721,9 @@ function AuthenticatedWorkspace({
     }));
   const commentTargets: CollaborationCommentTarget[] = [
     ...noteTargets,
-    ...(noteTargets.some((target) => target.id === selectedNoteId) ? [] : [{ type: "note" as const, id: selectedNoteId, label: "通知中的笔记" }]),
+    ...(selectedNoteId && !noteTargets.some((target) => target.id === selectedNoteId)
+      ? [{ type: "note" as const, id: selectedNoteId, label: "通知中的笔记" }]
+      : []),
     ...recordTargets,
     ...(selectedDatabaseRecordId && !recordTargets.some((target) => target.id === selectedDatabaseRecordId)
       ? [{ type: "database_record" as const, id: selectedDatabaseRecordId, label: "通知中的数据库记录" }]
@@ -625,7 +739,9 @@ function AuthenticatedWorkspace({
   ];
   const activeCollaborationTarget = selectedDatabaseRecordId
     ? { type: "database_record" as const, id: selectedDatabaseRecordId }
-    : { type: "note" as const, id: selectedNoteId };
+    : selectedNoteId
+      ? { type: "note" as const, id: selectedNoteId }
+      : undefined;
   const navigateNotificationTarget = (target: NotificationTarget) => {
     setNotificationOpen(false);
     notificationTargetController.current?.abort();
@@ -692,7 +808,7 @@ function AuthenticatedWorkspace({
         navigation={navigation}
         mobileNavigation={mobileNavigation}
         contextualList={activeDomain === "collaboration" ? undefined : activeDomain === "databases" ? databaseContextualList : contextualList}
-        inspector={<div className="inspector-content"><small>页面信息</small><h3>{activeDomain === "databases" ? databaseBundle?.database.name ?? "数据库" : activeDomain === "collaboration" ? "协作中心" : "Public Beta 重写计划"}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
+        inspector={<div className="inspector-content"><small>页面信息</small><h3>{activeDomain === "databases" ? databaseBundle?.database.name ?? "数据库" : activeDomain === "collaboration" ? "协作中心" : selectedNote?.title || "笔记"}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
         inspectorOpen={inspectorOpen}
         activePane={activePane}
         onActivePaneChange={setActivePane}
@@ -700,7 +816,28 @@ function AuthenticatedWorkspace({
         onInspectorClose={closeInspector}
       >
         <>
-        {activeDomain === "collaboration" && collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : activeDomain === "databases" ? databaseCanvas : <article className="editor-document">
+        {activeDomain === "collaboration" && collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : activeDomain === "databases" ? databaseCanvas : selectedNote || creatingNote ? <article className="editor-document">
+          <header className="editor-toolbar">
+            <span className="saved-state"><span /> {noteSaving ? "保存中…" : noteMessage ?? "未保存更改"}</span>
+            <div>
+              <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}><Bell aria-hidden="true" size={17} /></button>
+              <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>
+            </div>
+          </header>
+          <div className="editor-copy">
+            <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
+            <h1>{draftTitle.trim() || "未命名笔记"}</h1>
+            <label className="note-editor-field">标题<input aria-label="笔记标题" value={draftTitle} onChange={(event) => { setDraftTitle(event.target.value); setNoteMessage(null); }} /></label>
+            <label className="note-editor-field">内容<textarea aria-label="笔记内容" value={draftContent} onChange={(event) => { setDraftContent(event.target.value); setNoteMessage(null); }} /></label>
+            <div className="note-editor-actions">
+              <button type="button" disabled={noteSaving || (!draftTitle.trim() && !draftContent.trim())} onClick={saveNote}>保存笔记</button>
+              {noteMessage ? <p role="status">{noteMessage}</p> : null}
+              {noteError ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
+            </div>
+            <p className="note-content-preview" aria-label="笔记内容预览">{draftContent || "开始记录你的想法。"}</p>
+            {recoveryPanel}
+          </div>
+        </article> : <article className="editor-document">
           <header className="editor-toolbar">
             <span className="saved-state"><span /> 已保存</span>
             <div>
