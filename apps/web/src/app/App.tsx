@@ -10,6 +10,7 @@ import type { Attachment, AuthUserSummary, Database, DatabaseRecord, KnowledgeDi
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient } from "../data/api-client";
 import { ProfileClient } from "../data/profile-client";
+import { OperationsClient } from "../data/operations-client";
 import { AccountCenter } from "../account";
 import { CollaborationClient } from "../data/collaboration-client";
 import { KnowledgeClient } from "../data/knowledge-client";
@@ -60,7 +61,7 @@ function clearUserScopedBrowserState() {
   }
 }
 
-function LogoutCleanupRecovery({ failed, onRetry }: { failed: boolean; onRetry(): void }) {
+function LogoutCleanupRecovery({ failed, deleted, onRetry }: { failed: boolean; deleted: boolean; onRetry(): void }) {
   return (
     <main className="logout-cleanup-page">
       <section className="logout-cleanup-card" aria-live="polite">
@@ -68,7 +69,7 @@ function LogoutCleanupRecovery({ failed, onRetry }: { failed: boolean; onRetry()
         <h1>{failed ? "本地数据清理失败" : "正在清理本地数据"}</h1>
         {failed ? (
           <>
-            <p role="alert">服务器会话已退出，但此设备上的离线数据尚未清理完成。完成清理前无法重新登录。</p>
+            <p role="alert">{deleted ? "账户已删除，但此设备上的离线数据尚未清理完成。完成清理前无法重新登录。" : "服务器会话已退出，但此设备上的离线数据尚未清理完成。完成清理前无法重新登录。"}</p>
             <button type="button" onClick={onRetry}>重试清理本地数据</button>
           </>
         ) : <p role="status">正在移除此账户的离线数据，请勿关闭页面。</p>}
@@ -153,6 +154,8 @@ function AuthenticatedWorkspace({
   onLogout,
   onRetryLogout,
   onDiagnosticNavigate,
+  onWorkspaceChange,
+  onDeleted,
 }: {
   apiClient: ApiClient;
   workspaceId?: string;
@@ -167,6 +170,8 @@ function AuthenticatedWorkspace({
   logoutError: string | null;
   onLogout(): void;
   onRetryLogout(): void;
+  onWorkspaceChange(workspaceId: string): void;
+  onDeleted(): void;
   onDiagnosticNavigate?: (diagnostic: KnowledgeDiagnostic) => void;
 }) {
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -174,6 +179,7 @@ function AuthenticatedWorkspace({
   const [activeDomain, setActiveDomain] = useState<ProductDomain>("notes");
   const [accountSubsection, setAccountSubsection] = useState<AccountSubsection>("personal");
   const [collaborationClient] = useState(() => new CollaborationClient(apiClient, workspaceId ?? ""));
+  const [operationsClient] = useState(() => new OperationsClient(apiClient, workspaceId ?? ""));
   const [profileClient] = useState(() => new ProfileClient(apiClient));
   const [navigationUser, setNavigationUser] = useState(user);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -834,6 +840,20 @@ function AuthenticatedWorkspace({
     setAccountSubsection(subsection);
     changeDomain("account");
   };
+  const changeWorkspace = async (nextWorkspaceId: string) => {
+    if (!workspaceId || nextWorkspaceId === workspaceId) return;
+    await draftController.quiesce();
+    try {
+      onWorkspaceChange(nextWorkspaceId);
+      abortRecoveryRequests();
+      abortRetryRequests();
+      abortDatabaseRequests();
+      notificationTargetController.current?.abort();
+    } catch (error) {
+      draftController.resume();
+      throw error;
+    }
+  };
   const productNavigationProps = {
     active: activeDomain,
     user: navigationUser,
@@ -969,11 +989,16 @@ function AuthenticatedWorkspace({
   const accountCanvas = (
     <AccountCenter
       client={profileClient}
+      collaboration={collaborationClient}
+      operations={operationsClient}
       workspaces={workspaces}
       activeWorkspaceId={activeWorkspaceId}
+      currentUserId={userId}
       initialTab={accountSubsection === "workspace" ? "workspace" : "profile"}
-      onWorkspaceChange={() => undefined}
-      onDeleted={() => undefined}
+      onWorkspaceChange={changeWorkspace}
+      onPrepareDelete={() => draftController.quiesce()}
+      onDeleteFailed={() => draftController.resume()}
+      onDeleted={onDeleted}
       onProfileChange={handleProfileChange}
     />
   );
@@ -1184,6 +1209,7 @@ export function App({
   const [defaultLocalStore, setDefaultLocalStore] = useState<UserScopedLocalStore>(() => new BetaLocalStore());
   const [logoutPhase, setLogoutPhase] = useState<LogoutPhase>("idle");
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [cleanupAfterDelete, setCleanupAfterDelete] = useState(false);
   const logoutAttempted = useRef(false);
   const cleanupInFlight = useRef(false);
   const draftControllerRef = useRef<NoteDraftController | null>(null);
@@ -1211,6 +1237,7 @@ export function App({
       logoutAttempted.current = false;
       if (!localStore) setDefaultLocalStore(new BetaLocalStore());
       setLogoutError(null);
+      setCleanupAfterDelete(false);
       setLogoutPhase("idle");
       setAuthGateVersion((version) => version + 1);
     });
@@ -1223,6 +1250,7 @@ export function App({
       return;
     }
     logoutAttempted.current = true;
+    setCleanupAfterDelete(false);
     setLogoutPhase("quiescing");
     setLogoutError(null);
     void draftController.quiesce().then(() => authClient.logout()).then(() => {
@@ -1233,6 +1261,13 @@ export function App({
       setLogoutPhase("idle");
       setLogoutError("退出登录失败，请检查网络后重试。当前工作区仍保持登录状态。");
     });
+  };
+  const accountDeleted = () => {
+    if (logoutPhase !== "idle") return;
+    logoutAttempted.current = true;
+    setLogoutError(null);
+    setCleanupAfterDelete(true);
+    requestCleanup();
   };
   if (route.kind === "share") {
     return <PublicSharePage client={new CollaborationClient(apiClient, "public-share")} token={route.token} />;
@@ -1250,7 +1285,7 @@ export function App({
     />;
   }
   if (logoutPhase === "cleanup" || logoutPhase === "cleanup-error") {
-    return <LogoutCleanupRecovery failed={logoutPhase === "cleanup-error"} onRetry={requestCleanup} />;
+    return <LogoutCleanupRecovery failed={logoutPhase === "cleanup-error"} deleted={cleanupAfterDelete} onRetry={requestCleanup} />;
   }
   return (
     <AuthGate key={authGateVersion} client={authClient} turnstileSiteKey={turnstileSiteKey} resetToken={resetToken}>
@@ -1274,6 +1309,8 @@ export function App({
             logoutError={logoutError}
             onLogout={logout}
             onRetryLogout={logout}
+            onWorkspaceChange={(nextWorkspaceId) => setRoute({ kind: "workspace", workspaceId: nextWorkspaceId })}
+            onDeleted={accountDeleted}
             onDiagnosticNavigate={onDiagnosticNavigate}
           />
         );

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountCenter } from "../src/account/AccountCenter";
+import { ApiClientError } from "../src/data/api-client";
 import { ProfileClient } from "../src/data/profile-client";
 import { AdaptiveWorkbench } from "../src/layout/AdaptiveWorkbench";
 
@@ -51,6 +52,47 @@ function client(overrides: Record<string, unknown> = {}) {
     changePassword: vi.fn(async () => ({ changed: true as const })),
     listSessions: vi.fn(async () => [currentSession, otherSession]),
     revokeSession: vi.fn(async () => ({ revoked: true as const })),
+    deleteAccount: vi.fn(async () => ({ deleted: true as const })),
+    ...overrides,
+  };
+}
+
+const workspaces = [
+  { id: "ws-1", name: "个人空间", slug: "personal", role: "owner" as const, revision: 1 },
+  { id: "ws-2", name: "研究团队", slug: "research", role: "editor" as const, revision: 2 },
+  { id: "ws-3", name: "只读资料", slug: "readonly", role: "viewer" as const, revision: 3 },
+];
+
+const ownerMember = {
+  user_id: "u1", email: "u@example.test", display_name: "当前用户", role: "owner" as const, revision: 1,
+  joined_at: "2026-08-20T00:00:00.000Z", updated_at: "2026-08-20T00:00:00.000Z",
+};
+
+const editorMember = {
+  user_id: "u2", email: "editor@example.test", display_name: "协作者", role: "editor" as const, revision: 2,
+  joined_at: "2026-08-21T00:00:00.000Z", updated_at: "2026-08-21T00:00:00.000Z",
+};
+
+function collaboration(overrides: Record<string, unknown> = {}) {
+  return {
+    listMembers: vi.fn(async () => [ownerMember, editorMember]),
+    updateMemberRole: vi.fn(async () => ({ ...editorMember, role: "viewer" as const, revision: 3 })),
+    removeMember: vi.fn(async () => ({ user_id: editorMember.user_id })),
+    createInvitation: vi.fn(async () => ({ invitation: {}, token: "invite-token" })),
+    ...overrides,
+  };
+}
+
+const job = {
+  id: "job-1", workspace_id: "ws-1", kind: "export" as const, status: "queued" as const, revision: 1,
+  error_code: null, created_at: "2026-08-23T00:00:00.000Z", updated_at: "2026-08-23T00:00:00.000Z",
+};
+
+function operations(overrides: Record<string, unknown> = {}) {
+  return {
+    getUsage: vi.fn(async () => ({ notes: 1, databases: 2, attachment_bytes: 1024, queued_jobs: 0 })),
+    getStatus: vi.fn(async () => ({ queue: "ready" as const, storage: "ready" as const, ocr: "ready" as const, version: "test" })),
+    createJob: vi.fn(async () => job),
     ...overrides,
   };
 }
@@ -499,7 +541,7 @@ describe("AccountCenter", () => {
     fireEvent.keyDown(tabs[3]!, { key: "Home" });
     expect(tabs[0]).toHaveFocus();
     fireEvent.click(tabs[2]!);
-    expect(screen.getByText("工作区设置将在后续任务中提供。" )).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "工作区" })).toBeInTheDocument();
     fireEvent.click(tabs[0]!);
     expect(screen.getByLabelText("昵称")).toHaveValue("跨标签草稿");
     expect(screen.getAllByRole("tabpanel")).toHaveLength(1);
@@ -529,5 +571,188 @@ describe("AccountCenter", () => {
     update.resolve({ ...profile, display_name: "过期结果" });
     await Promise.resolve();
     expect(onProfileChange).not.toHaveBeenCalled();
+  });
+
+  it("shows every workspace role and only exposes member administration to the active owner", async () => {
+    const collaborationClient = collaboration();
+    const ownerView = renderCenter({ workspaces, activeWorkspaceId: "ws-1", collaboration: collaborationClient, currentUserId: "u1" });
+    fireEvent.click(await screen.findByRole("tab", { name: "工作区" }));
+
+    expect(screen.getByRole("listitem", { name: "个人空间 所有者 当前工作区" })).toBeInTheDocument();
+    expect(screen.getByRole("listitem", { name: "研究团队 编辑者" })).toBeInTheDocument();
+    expect(screen.getByRole("listitem", { name: "只读资料 查看者" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "成员管理" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "移除 协作者" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "移除 当前用户" })).toBeDisabled();
+    ownerView.unmount();
+
+    const editorView = renderCenter({ workspaces, activeWorkspaceId: "ws-2", collaboration: collaboration(), currentUserId: "u1" });
+    fireEvent.click(screen.getByRole("tab", { name: "工作区" }));
+    expect(screen.getByText("你在此工作区拥有编辑权限，只有所有者可以管理成员。" )).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "成员管理" })).not.toBeInTheDocument();
+    editorView.unmount();
+  });
+
+  it("switches exactly once, deduplicates pending activation, and keeps the active workspace on failure", async () => {
+    const first = deferred<void>();
+    const onWorkspaceChange = vi.fn(() => first.promise);
+    renderCenter({ workspaces, activeWorkspaceId: "ws-1", collaboration: collaboration(), currentUserId: "u1", onWorkspaceChange });
+    fireEvent.click(await screen.findByRole("tab", { name: "工作区" }));
+    const switchButton = screen.getByRole("button", { name: "切换到 研究团队" });
+    act(() => { switchButton.click(); switchButton.click(); });
+    await waitFor(() => expect(onWorkspaceChange).toHaveBeenCalledOnce());
+    expect(switchButton).toBeDisabled();
+    first.reject(new Error("offline"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("切换工作区失败");
+    expect(screen.getByRole("listitem", { name: "个人空间 所有者 当前工作区" })).toBeInTheDocument();
+  });
+
+  it("ignores an old workspace member response after the active workspace changes", async () => {
+    const stale = deferred<Array<typeof editorMember>>();
+    const firstClient = collaboration({ listMembers: vi.fn(() => stale.promise) });
+    const nextMember = { ...editorMember, user_id: "u3", display_name: "新空间成员" };
+    const secondClient = collaboration({ listMembers: vi.fn(async () => [nextMember]) });
+    const view = renderCenter({ workspaces, activeWorkspaceId: "ws-1", collaboration: firstClient, currentUserId: "u1" });
+    fireEvent.click(await screen.findByRole("tab", { name: "工作区" }));
+    const nextWorkspaces = workspaces.map((workspace) => workspace.id === "ws-2" ? { ...workspace, role: "owner" as const } : workspace);
+    view.rerender(<AccountCenter client={client()} workspaces={nextWorkspaces} activeWorkspaceId="ws-2" onWorkspaceChange={vi.fn()} onDeleted={vi.fn()} collaboration={secondClient as any} currentUserId="u1" initialTab="workspace" />);
+    expect(await screen.findByText("新空间成员")).toBeInTheDocument();
+    stale.resolve([editorMember]);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByText("协作者")).not.toBeInTheDocument();
+  });
+
+  it("keeps member state authoritative across role failure and confirmed removal failure", async () => {
+    const api = collaboration({
+      updateMemberRole: vi.fn(async () => { throw new Error("conflict"); }),
+      removeMember: vi.fn(async () => { throw new Error("offline"); }),
+    });
+    renderCenter({ workspaces, activeWorkspaceId: "ws-1", collaboration: api, currentUserId: "u1" });
+    fireEvent.click(await screen.findByRole("tab", { name: "工作区" }));
+    const role = await screen.findByRole("combobox", { name: "协作者 的角色" });
+    fireEvent.change(role, { target: { value: "viewer" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("更新成员角色失败");
+    expect(api.updateMemberRole).toHaveBeenCalledWith("u2", { role: "viewer", base_revision: 2 }, expect.any(AbortSignal));
+    expect(role).toHaveValue("editor");
+
+    fireEvent.click(screen.getByRole("button", { name: "移除 协作者" }));
+    expect(await screen.findByRole("dialog", { name: "确认移除成员" })).toBeInTheDocument();
+    const confirmRemoval = screen.getByRole("button", { name: "确认移除" });
+    act(() => { confirmRemoval.click(); confirmRemoval.click(); });
+    expect(await screen.findByRole("alert")).toHaveTextContent("移除成员失败");
+    expect(api.removeMember).toHaveBeenCalledOnce();
+    expect(api.removeMember).toHaveBeenCalledWith("u2", 2, expect.any(AbortSignal));
+    expect(screen.getByText("协作者")).toBeInTheDocument();
+  });
+
+  it("loads usage and service status independently and retries only the failed resource", async () => {
+    const retryUsage = deferred<{ notes: number; databases: number; attachment_bytes: number; queued_jobs: number }>();
+    const api = operations({
+      getUsage: vi.fn().mockRejectedValueOnce(new Error("offline")).mockReturnValueOnce(retryUsage.promise),
+    });
+    renderCenter({ workspaces, activeWorkspaceId: "ws-1", operations: api });
+    fireEvent.click(await screen.findByRole("tab", { name: "数据与隐私" }));
+    expect(await screen.findByText("队列：正常")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("用量加载失败");
+    expect(screen.getByText("未配置自动备份，可立即导出")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试用量加载" }));
+    retryUsage.resolve({ notes: 9, databases: 2, attachment_bytes: 2048, queued_jobs: 1 });
+    expect(await screen.findByText("9 条笔记")).toBeInTheDocument();
+    expect(api.getStatus).toHaveBeenCalledOnce();
+  });
+
+  it("reuses an export idempotency key after response loss, deduplicates clicks, and rotates it after success", async () => {
+    const ids = vi.spyOn(crypto, "randomUUID")
+      .mockReturnValueOnce("00000000-0000-4000-8000-000000000001")
+      .mockReturnValueOnce("00000000-0000-4000-8000-000000000002");
+    const first = deferred<typeof job>();
+    const second = deferred<typeof job>();
+    const third = deferred<typeof job>();
+    const createJob = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise).mockReturnValueOnce(third.promise);
+    renderCenter({ workspaces, activeWorkspaceId: "ws-1", operations: operations({ createJob }) });
+    fireEvent.click(await screen.findByRole("tab", { name: "数据与隐私" }));
+    const exportButton = screen.getByRole("button", { name: "导出全部数据" });
+    act(() => { exportButton.click(); exportButton.click(); });
+    expect(createJob).toHaveBeenCalledOnce();
+    first.reject(new Error("response lost"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("导出请求失败");
+    fireEvent.click(screen.getByRole("button", { name: "重试导出" }));
+    expect(createJob).toHaveBeenLastCalledWith({ kind: "export", idempotency_key: "00000000-0000-4000-8000-000000000001", payload: { format: "zip", scope: "workspace" } });
+    second.resolve(job);
+    expect(await screen.findByRole("status")).toHaveTextContent("job-1");
+    fireEvent.click(screen.getByRole("button", { name: "再次导出" }));
+    expect(createJob).toHaveBeenLastCalledWith({ kind: "export", idempotency_key: "00000000-0000-4000-8000-000000000002", payload: { format: "zip", scope: "workspace" } });
+    expect(ids).toHaveBeenCalledTimes(2);
+    third.resolve(job);
+  });
+
+  it("requires the exact phrase and uses a portal focus-trapped second deletion confirmation", async () => {
+    const api = client();
+    renderCenterInWorkbench(api, { workspaces, activeWorkspaceId: "ws-1", operations: operations() });
+    fireEvent.click(await screen.findByRole("tab", { name: "数据与隐私" }));
+    const deleteButton = screen.getByRole("button", { name: "永久删除账户" });
+    fireEvent.change(screen.getByLabelText("当前密码"), { target: { value: "current-password" } });
+    fireEvent.change(screen.getByLabelText("删除确认文字"), { target: { value: "永久删除我的帐户" } });
+    expect(deleteButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("删除确认文字"), { target: { value: "永久删除我的账户" } });
+    fireEvent.click(deleteButton);
+    expect(api.deleteAccount).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog", { name: "最后确认删除账户" });
+    expect(dialog.parentElement?.parentElement).toBe(document.body);
+    expect(document.querySelector(".workbench-canvas")).toHaveAttribute("inert", "");
+    const cancel = screen.getByRole("button", { name: "取消删除" });
+    const confirm = screen.getByRole("button", { name: "确认永久删除" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(confirm).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "最后确认删除账户" })).not.toBeInTheDocument();
+    expect(document.querySelector(".workbench-canvas")).not.toHaveAttribute("inert");
+  });
+
+  it("orders deletion preparation, request, and completion while deduplicating submit", async () => {
+    const order: string[] = [];
+    const deletion = deferred<{ deleted: true }>();
+    const api = client({ deleteAccount: vi.fn(() => { order.push("delete"); return deletion.promise; }) });
+    const onPrepareDelete = vi.fn(async () => { order.push("quiesce"); });
+    const onDeleted = vi.fn(() => { order.push("deleted"); });
+    renderCenter({ client: api, workspaces, activeWorkspaceId: "ws-1", operations: operations(), onPrepareDelete, onDeleted });
+    fireEvent.click(await screen.findByRole("tab", { name: "数据与隐私" }));
+    fireEvent.change(screen.getByLabelText("当前密码"), { target: { value: "current-password" } });
+    fireEvent.change(screen.getByLabelText("删除确认文字"), { target: { value: "永久删除我的账户" } });
+    fireEvent.click(screen.getByRole("button", { name: "永久删除账户" }));
+    const confirm = await screen.findByRole("button", { name: "确认永久删除" });
+    act(() => { confirm.click(); confirm.click(); });
+    await waitFor(() => expect(api.deleteAccount).toHaveBeenCalledOnce());
+    expect(screen.getByRole("dialog", { name: "最后确认删除账户" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "取消删除" })).toBeDisabled();
+    expect(order).toEqual(["quiesce", "delete"]);
+    deletion.resolve({ deleted: true });
+    await waitFor(() => expect(onDeleted).toHaveBeenCalledOnce());
+    expect(order).toEqual(["quiesce", "delete", "deleted"]);
+    expect(api.deleteAccount).toHaveBeenCalledWith({ current_password: "current-password", confirmation: "永久删除我的账户" });
+  });
+
+  it("resumes drafts and preserves secrets plus ownership recovery details after deletion failure", async () => {
+    const ownership = new ApiClientError({
+      code: "OWNERSHIP_TRANSFER_REQUIRED",
+      message: "Transfer owned team workspaces before deleting the account: 研究团队, 发布空间",
+      retryable: false,
+    }, 409);
+    const api = client({ deleteAccount: vi.fn(async () => { throw ownership; }) });
+    const onDeleteFailed = vi.fn();
+    renderCenter({ client: api, workspaces, activeWorkspaceId: "ws-1", operations: operations(), onPrepareDelete: vi.fn(async () => undefined), onDeleteFailed });
+    fireEvent.click(await screen.findByRole("tab", { name: "数据与隐私" }));
+    fireEvent.change(screen.getByLabelText("当前密码"), { target: { value: "current-password" } });
+    fireEvent.change(screen.getByLabelText("删除确认文字"), { target: { value: "永久删除我的账户" } });
+    fireEvent.click(screen.getByRole("button", { name: "永久删除账户" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认永久删除" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("研究团队, 发布空间");
+    expect(onDeleteFailed).toHaveBeenCalledOnce();
+    expect(screen.getByLabelText("当前密码")).toHaveValue("current-password");
+    expect(screen.getByLabelText("删除确认文字")).toHaveValue("永久删除我的账户");
+    expect(screen.getByRole("button", { name: "确认永久删除" })).toBeEnabled();
   });
 });

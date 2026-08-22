@@ -2,6 +2,8 @@ import type { AccountSession, Profile } from "@nexus/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ProfilePanel } from "./ProfilePanel";
 import { SecurityPanel } from "./SecurityPanel";
+import { WorkspacePanel } from "./WorkspacePanel";
+import { DataPrivacyPanel } from "./DataPrivacyPanel";
 import type { AccountCenterProps, AccountTab } from "./index";
 
 const tabs: Array<{ id: AccountTab; label: string }> = [
@@ -15,7 +17,7 @@ function isAbort(error: unknown, signal: AbortSignal) {
   return signal.aborted || (error instanceof DOMException && error.name === "AbortError");
 }
 
-export function AccountCenter({ client, workspaces, activeWorkspaceId, onWorkspaceChange, onDeleted, onProfileChange, initialTab = "profile" }: AccountCenterProps) {
+export function AccountCenter({ client, collaboration, operations, workspaces, activeWorkspaceId, currentUserId, onWorkspaceChange, onPrepareDelete, onDeleteFailed, onDeleted, onProfileChange, initialTab = "profile" }: AccountCenterProps) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [profileLoading, setProfileLoading] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
@@ -113,15 +115,15 @@ export function AccountCenter({ client, workspaces, activeWorkspaceId, onWorkspa
     <section className="product-domain-page account-center-shell" aria-labelledby="account-center-heading">
       <p className="eyebrow">ACCOUNT CENTER</p>
       <h1 id="account-center-heading">账户中心</h1>
-      <p className="product-domain-lead">管理个人资料和账户安全。工作区与数据设置将在后续阶段提供。</p>
+      <p className="product-domain-lead">管理个人资料、账户安全、工作区与数据隐私。</p>
       <div className="account-tabs" role="tablist" aria-label="账户中心">
         {tabs.map((tab) => <button key={tab.id} id={`account-tab-${tab.id}`} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls={`account-panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => setActiveTab(tab.id)} onKeyDown={moveTab}>{tab.label}</button>)}
       </div>
       <div className="account-panels">
         <div hidden={activeTab !== "profile"}><ProfilePanel client={client} profile={profile} loading={profileLoading} error={profileError} onRetry={() => setProfileRetry((retry) => retry + 1)} onProfileChange={handleProfileChange} /></div>
-        <div hidden={activeTab !== "security"}><SecurityPanel client={client} profile={profile} sessions={sessions} loading={sessionsLoading} error={sessionsError} onRetry={refreshSessions} onSessionsRefresh={refreshSessions} onSessionRevokeStart={invalidateSessions} onSessionRevokeFailed={handleSessionRevokeFailed} onSessionRevoked={handleSessionRevoked} onProfileChange={handleProfileChange} /></div>
-        <section id="account-panel-workspace" role="tabpanel" aria-labelledby="account-tab-workspace" className="account-panel" hidden={activeTab !== "workspace"}><p className="eyebrow">WORKSPACE</p><h2>工作区</h2><p>工作区成员、权限和切换设置将在后续任务中提供。</p><p className="account-center-slot">工作区设置将在后续任务中提供。</p><span className="sr-only">当前工作区：{workspaces.find((workspace) => workspace.id === activeWorkspaceId)?.name ?? "未选择"}</span></section>
-        <section id="account-panel-privacy" role="tabpanel" aria-labelledby="account-tab-privacy" className="account-panel" hidden={activeTab !== "privacy"}><p className="eyebrow">DATA & PRIVACY</p><h2>数据与隐私</h2><p>数据导出、删除和隐私设置将在后续任务中提供。</p><p className="account-center-slot">数据与隐私设置将在后续任务中提供。</p></section>
+        <div hidden={activeTab !== "security"}><SecurityPanel active={activeTab === "security"} client={client} profile={profile} sessions={sessions} loading={sessionsLoading} error={sessionsError} onRetry={refreshSessions} onSessionsRefresh={refreshSessions} onSessionRevokeStart={invalidateSessions} onSessionRevokeFailed={handleSessionRevokeFailed} onSessionRevoked={handleSessionRevoked} onProfileChange={handleProfileChange} /></div>
+        <div hidden={activeTab !== "workspace"}><WorkspacePanel workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} client={collaboration} currentUserId={currentUserId} onWorkspaceChange={onWorkspaceChange} /></div>
+        <div hidden={activeTab !== "privacy"}><DataPrivacyPanel active={activeTab === "privacy"} client={client} operations={operations} activeWorkspaceId={activeWorkspaceId} onPrepareDelete={onPrepareDelete} onDeleteFailed={onDeleteFailed} onDeleted={onDeleted} /></div>
       </div>
     </section>
   );

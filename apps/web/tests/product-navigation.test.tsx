@@ -122,6 +122,25 @@ function noteFlowApi(createNote: Promise<ReturnType<typeof note>>) {
   };
 }
 
+function accountDeletionApi(createNote: Promise<ReturnType<typeof note>>, deletion: Promise<{ deleted: true }>, order: string[]) {
+  return {
+    request: vi.fn(async (request: { path: string; method?: string; body?: Record<string, unknown> }) => {
+      if (request.path === "/api/v2/profile" && request.method === "DELETE") { order.push("delete"); return deletion; }
+      if (request.path === "/api/v2/profile") return { id: "u1", email: "u@example.test", display_name: "用户", biography: "", locale: "zh-CN", timezone: "Asia/Shanghai", avatar_url: null, updated_at: "2026-08-23T00:00:00.000Z" };
+      if (request.path === "/api/v2/profile/sessions") return { items: [] };
+      if (request.path === "/api/v2/operations/usage") return { notes: 1, databases: 0, attachment_bytes: 0, queued_jobs: 0 };
+      if (request.path === "/api/v2/operations/status") return { queue: "ready", storage: "ready", ocr: "ready", version: "test" };
+      if (request.path === "/api/v2/members") return { items: [] };
+      if (request.path.startsWith("/api/v2/attachments") || request.path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
+      if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+      if (request.path === "/api/v2/notes?limit=50") return { items: [], next_cursor: null };
+      if (request.path === "/api/v2/notes" && request.method === "POST") return { note: await createNote };
+      if (request.path.startsWith("/api/v2/notes/") && request.method === "PATCH") return { note: note({ title: String(request.body?.title ?? ""), content: String(request.body?.content ?? ""), revision: 2 }) };
+      return { items: [], next_cursor: null };
+    }),
+  };
+}
+
 describe("ProductNavigation", () => {
   it("uses direct Chinese destinations and exact domain callbacks", () => {
     const props = navigationProps();
@@ -512,5 +531,57 @@ describe("App product navigation", () => {
     await waitFor(() => expect(authClient.logout).toHaveBeenCalledOnce());
     logout.reject(Object.assign(new Error("offline"), { code: "NETWORK_ERROR" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("退出登录失败");
+  });
+
+  it("drains drafts before account deletion, never logs out, and blocks AuthGate through cleanup retry", async () => {
+    const signedOut = Object.assign(new Error("Not authenticated"), { code: "UNAUTHENTICATED", status: 401 });
+    const order: string[] = [];
+    const serverCreate = deferred<ReturnType<typeof note>>();
+    const deletion = deferred<{ deleted: true }>();
+    const authClient = {
+      session: vi.fn().mockResolvedValueOnce(authenticatedSession()).mockImplementationOnce(async () => { order.push("authgate"); throw signedOut; }),
+      logout: vi.fn(async () => ({ logged_out: true })),
+      login: vi.fn(),
+    };
+    const localStore = durableDraftStore(order);
+    localStore.destroy.mockRejectedValueOnce(new Error("IndexedDB blocked")).mockImplementationOnce(async () => { order.push("destroy-hidden"); });
+    const apiClient = accountDeletionApi(serverCreate.promise, deletion.promise, order);
+    render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={localStore as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    const title = await screen.findByRole("textbox", { name: "笔记标题" });
+    await waitFor(() => expect(apiClient.request.mock.calls.some(([request]) => request.path === "/api/v2/notes" && request.method === "POST")).toBe(true));
+    const write = deferred<void>();
+    localStore.blockNextMutation(write.promise);
+    fireEvent.change(title, { target: { value: "删除前持久化" } });
+
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "个人中心" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "数据与隐私" }));
+    fireEvent.change(screen.getByLabelText("当前密码"), { target: { value: "current-password" } });
+    fireEvent.change(screen.getByLabelText("删除确认文字"), { target: { value: "永久删除我的账户" } });
+    fireEvent.click(screen.getByRole("button", { name: "永久删除账户" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认永久删除" }));
+    expect(order).toEqual([]);
+    expect(authClient.logout).not.toHaveBeenCalled();
+
+    write.resolve();
+    await waitFor(() => expect(order).toContain("write"));
+    expect(order).toEqual(["write"]);
+    serverCreate.resolve(note());
+    await waitFor(() => expect(order).toContain("delete"));
+    deletion.resolve({ deleted: true });
+    expect(await screen.findByRole("heading", { name: "本地数据清理失败" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "登录" })).not.toBeInTheDocument();
+    expect(authClient.session).toHaveBeenCalledOnce();
+    expect(authClient.logout).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试清理本地数据" }));
+    await waitFor(() => expect(authClient.session).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("main")).toHaveClass("auth-page");
+    expect(order).toEqual(["write", "delete", "destroy-hidden", "authgate"]);
+    expect(authClient.logout).not.toHaveBeenCalled();
   });
 });

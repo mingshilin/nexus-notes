@@ -13,6 +13,7 @@ import type { ProfileClientLike } from "./index";
 const focusableSelector = "button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
 export interface SecurityPanelProps {
+  active?: boolean;
   client: ProfileClientLike;
   profile: Profile | null;
   sessions: AccountSession[];
@@ -34,7 +35,7 @@ function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
 }
 
-export function SecurityPanel({ client, profile, sessions, loading, error, onRetry, onSessionsRefresh, onSessionRevokeStart, onSessionRevokeFailed, onSessionRevoked, onProfileChange }: SecurityPanelProps) {
+export function SecurityPanel({ active = true, client, profile, sessions, loading, error, onRetry, onSessionsRefresh, onSessionRevokeStart, onSessionRevokeFailed, onSessionRevoked, onProfileChange }: SecurityPanelProps) {
   const [newEmail, setNewEmail] = useState("");
   const [requestedEmail, setRequestedEmail] = useState<string | null>(null);
   const [emailPassword, setEmailPassword] = useState("");
@@ -271,7 +272,7 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
       <section className="account-subpanel" aria-labelledby="password-heading">
         <h3 id="password-heading">密码</h3>
         <form className="account-form" onSubmit={(event) => { event.preventDefault(); changePassword(); }}>
-          <label>当前密码<input type="password" autoComplete="current-password" value={passwordCurrent} disabled={pendingAction !== null} onChange={(event) => setPasswordCurrent(event.target.value)} /></label>
+          <label>{active ? "当前密码" : "修改密码当前密码"}<input type="password" autoComplete="current-password" value={passwordCurrent} disabled={pendingAction !== null} onChange={(event) => setPasswordCurrent(event.target.value)} /></label>
           <label>新密码<input type="password" autoComplete="new-password" value={passwordNew} disabled={pendingAction !== null} onChange={(event) => setPasswordNew(event.target.value)} /></label>
           <label>确认新密码<input type="password" autoComplete="new-password" value={passwordConfirm} disabled={pendingAction !== null} onChange={(event) => setPasswordConfirm(event.target.value)} /></label>
           <button type="submit" disabled={pendingAction !== null}>修改密码</button>
