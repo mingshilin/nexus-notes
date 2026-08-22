@@ -1,5 +1,6 @@
 import type { AccountSession, UpdateProfileInput } from "@nexus/contracts";
 
+import { ProfileServiceError } from "./profile-model";
 import type { ProfileRepository, StoredProfile } from "./profile-model";
 
 interface ProfileRow {
@@ -96,28 +97,34 @@ export class D1ProfileRepository implements ProfileRepository {
   }
 
   async createEmailChange(userId: string, email: string, codeHash: string, expiresAt: string, now: string): Promise<void> {
-    await this.db.prepare(
-      `INSERT INTO email_change_requests (id, user_id, new_email, code_hash, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).bind(this.createId(), userId, email, codeHash, expiresAt, now).run();
+    await this.db.batch([
+      this.db.prepare(
+        "UPDATE email_change_requests SET consumed_at = ? WHERE user_id = ? AND consumed_at IS NULL",
+      ).bind(now, userId),
+      this.db.prepare(
+        `INSERT INTO email_change_requests (id, user_id, new_email, code_hash, expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(this.createId(), userId, email, codeHash, expiresAt, now),
+    ]);
   }
 
   async consumeEmailChange(userId: string, email: string, codeHash: string, now: string): Promise<boolean> {
+    const update = this.db.prepare(
+      `UPDATE users SET email = ?, email_verified_at = ?, updated_at = ?
+       WHERE id = ? AND EXISTS (
+         SELECT 1 FROM email_change_requests
+         WHERE user_id = ? AND new_email = ? COLLATE NOCASE AND code_hash = ?
+           AND consumed_at IS NULL AND expires_at > ?
+       )`,
+    ).bind(email, now, now, userId, userId, email, codeHash, now);
     const consume = this.db.prepare(
       `UPDATE email_change_requests SET consumed_at = ?
        WHERE user_id = ? AND new_email = ? COLLATE NOCASE AND code_hash = ?
          AND consumed_at IS NULL AND expires_at > ?
        RETURNING id`,
     ).bind(now, userId, email, codeHash, now);
-    const update = this.db.prepare(
-      `UPDATE users SET email = ?, email_verified_at = ?, updated_at = ?
-       WHERE id = ? AND EXISTS (
-         SELECT 1 FROM email_change_requests
-         WHERE user_id = ? AND new_email = ? COLLATE NOCASE AND code_hash = ? AND consumed_at = ?
-       )`,
-    ).bind(email, now, now, userId, userId, email, codeHash, now);
-    const result = await this.db.batch([consume, update]);
-    return Boolean(result[0]?.results?.length);
+    const result = await this.db.batch([update, consume]);
+    return Boolean(result[1]?.results?.length);
   }
 
   async changePasswordAndRevokeOthers(userId: string, currentSessionId: string, passwordHash: string, now: string): Promise<void> {
@@ -130,22 +137,43 @@ export class D1ProfileRepository implements ProfileRepository {
   }
 
   async deleteAccount(userId: string, anonymizedEmail: string, passwordHash: string, now: string): Promise<string | null> {
-    const results = await this.db.batch<{ avatar_key: string | null }>([
-      this.db.prepare("SELECT avatar_key FROM users WHERE id = ? LIMIT 1").bind(userId),
-      this.db.prepare("DELETE FROM workspaces WHERE owner_user_id = ? AND workspace_type = 'personal'").bind(userId),
-      this.db.prepare("DELETE FROM workspace_members WHERE user_id = ?").bind(userId),
-      this.db.prepare("DELETE FROM email_codes WHERE user_id = ?").bind(userId),
-      this.db.prepare("DELETE FROM password_resets WHERE user_id = ?").bind(userId),
-      this.db.prepare("DELETE FROM email_change_requests WHERE user_id = ?").bind(userId),
-      this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(now, userId),
+    const noOwnedTeamWorkspace = `NOT EXISTS (
+      SELECT 1 FROM workspaces WHERE owner_user_id = ? AND workspace_type = 'team'
+    )`;
+    const results = await this.db.batch([
+      this.db.prepare(
+        `SELECT id, name FROM workspaces
+         WHERE owner_user_id = ? AND workspace_type = 'team'
+         ORDER BY lower(name), id`,
+      ).bind(userId),
+      this.db.prepare(
+        `SELECT avatar_key FROM users WHERE id = ? AND ${noOwnedTeamWorkspace} LIMIT 1`,
+      ).bind(userId, userId),
+      this.db.prepare(
+        `DELETE FROM workspaces
+         WHERE owner_user_id = ? AND workspace_type = 'personal' AND ${noOwnedTeamWorkspace}`,
+      ).bind(userId, userId),
+      this.db.prepare(`DELETE FROM workspace_members WHERE user_id = ? AND ${noOwnedTeamWorkspace}`).bind(userId, userId),
+      this.db.prepare(`DELETE FROM email_codes WHERE user_id = ? AND ${noOwnedTeamWorkspace}`).bind(userId, userId),
+      this.db.prepare(`DELETE FROM password_resets WHERE user_id = ? AND ${noOwnedTeamWorkspace}`).bind(userId, userId),
+      this.db.prepare(`DELETE FROM email_change_requests WHERE user_id = ? AND ${noOwnedTeamWorkspace}`).bind(userId, userId),
+      this.db.prepare(
+        `UPDATE sessions SET revoked_at = ?
+         WHERE user_id = ? AND revoked_at IS NULL AND ${noOwnedTeamWorkspace}`,
+      ).bind(now, userId, userId),
       this.db.prepare(
         `UPDATE users
          SET email = ?, password_hash = ?, display_name = '已删除用户', biography = '', avatar_key = NULL,
            status = 'deleted', deletion_requested_at = ?, updated_at = ?
-         WHERE id = ?`,
-      ).bind(anonymizedEmail, passwordHash, now, now, userId),
+         WHERE id = ? AND ${noOwnedTeamWorkspace}`,
+      ).bind(anonymizedEmail, passwordHash, now, now, userId, userId),
     ]);
-    return results[0]?.results?.[0]?.avatar_key ?? null;
+    const ownedWorkspaces = results[0]?.results as Array<{ id: string; name: string }> | undefined;
+    if (ownedWorkspaces?.length) {
+      throw new ProfileServiceError("OWNERSHIP_TRANSFER_REQUIRED", "Transfer owned team workspaces before deleting the account", 409);
+    }
+    const avatar = results[1]?.results?.[0] as { avatar_key: string | null } | undefined;
+    return avatar?.avatar_key ?? null;
   }
 
   async appendAudit(userId: string, event: string, requestId: string, now: string): Promise<void> {

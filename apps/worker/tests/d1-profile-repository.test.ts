@@ -13,7 +13,7 @@ async function seed(db: D1Database, userId = "user-1") {
 }
 
 describe("D1ProfileRepository", () => {
-  it("updates profile fields without exposing password data", async () => {
+  it("updates the requested profile fields", async () => {
     const test = await createTestD1();
     try {
       await seed(test.db);
@@ -65,6 +65,25 @@ describe("D1ProfileRepository", () => {
       expect(await repository.consumeEmailChange("user-1", "new@example.test", "code-hash", now)).toBe(true);
       expect(await repository.consumeEmailChange("user-1", "new@example.test", "code-hash", now)).toBe(false);
       await expect(repository.getProfile("user-1")).resolves.toMatchObject({ email: "new@example.test" });
+    } finally {
+      await test.dispose();
+    }
+  });
+
+  it("retires older unconsumed email changes before issuing a replacement code", async () => {
+    const test = await createTestD1();
+    try {
+      await seed(test.db);
+      let nextId = 0;
+      const repository = new D1ProfileRepository(test.db, () => `request-${++nextId}`);
+
+      await repository.createEmailChange("user-1", "older@example.test", "older-code", later, now);
+      await repository.createEmailChange("user-1", "newer@example.test", "newer-code", later, now);
+
+      await expect(repository.consumeEmailChange("user-1", "older@example.test", "older-code", now)).resolves.toBe(false);
+      await expect(repository.getProfile("user-1")).resolves.toMatchObject({ email: "user-1@example.test" });
+      await expect(repository.consumeEmailChange("user-1", "newer@example.test", "newer-code", now)).resolves.toBe(true);
+      await expect(repository.getProfile("user-1")).resolves.toMatchObject({ email: "newer@example.test" });
     } finally {
       await test.dispose();
     }
@@ -152,6 +171,13 @@ describe("D1ProfileRepository", () => {
       const repository = new D1ProfileRepository(test.db, () => "id-1");
 
       await expect(repository.listOwnedTeamWorkspaces("user-1")).resolves.toEqual([{ id: "owned-team", name: "Owned team" }]);
+      await expect(repository.deleteAccount("user-1", "deleted-user-1@example.invalid", "deleted-hash", now))
+        .rejects.toMatchObject({ code: "OWNERSHIP_TRANSFER_REQUIRED", status: 409 });
+      await expect(test.db.prepare("SELECT status, password_hash, avatar_key FROM users WHERE id = 'user-1'").first())
+        .resolves.toEqual({ status: "active", password_hash: "hash", avatar_key: "avatars/old" });
+      await expect(test.db.prepare("SELECT COUNT(*) AS count FROM workspaces WHERE id = 'personal'").first()).resolves.toEqual({ count: 1 });
+      await expect(test.db.prepare("SELECT COUNT(*) AS count FROM workspace_members WHERE user_id = 'user-1'").first()).resolves.toEqual({ count: 2 });
+      await expect(test.db.prepare("SELECT revoked_at FROM sessions WHERE id = 'session-1'").first()).resolves.toEqual({ revoked_at: null });
       await test.db.prepare("DELETE FROM workspaces WHERE id = 'owned-team'").run();
       await expect(repository.deleteAccount("user-1", "deleted-user-1@example.invalid", "deleted-hash", now)).resolves.toBe("avatars/old");
 
