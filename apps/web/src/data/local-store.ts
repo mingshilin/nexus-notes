@@ -61,6 +61,25 @@ export class BetaLocalStore {
     return this.get<LocalDraft>("drafts", this.entityKey(workspaceId, entityId));
   }
 
+  async listDrafts(workspaceId: string): Promise<LocalDraft[]> {
+    const database = await this.database;
+    const transaction = database.transaction("drafts", "readonly");
+    const done = transactionDone(transaction);
+    const drafts = await requestResult(transaction.objectStore("drafts").getAll()) as LocalDraft[];
+    await done;
+    return drafts
+      .filter((draft) => draft.workspace_id === workspaceId)
+      .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  }
+
+  async removeDraft(workspaceId: string, entityId: string) {
+    const database = await this.database;
+    const transaction = database.transaction("drafts", "readwrite");
+    const done = transactionDone(transaction);
+    transaction.objectStore("drafts").delete(this.entityKey(workspaceId, entityId));
+    await done;
+  }
+
   async saveQuerySnapshot(snapshot: QuerySnapshot) {
     await this.put("query_snapshots", snapshot);
   }

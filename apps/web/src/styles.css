@@ -44,6 +44,9 @@ button { color: inherit; }
 .context-heading small, .eyebrow, .inspector-content small { color: hsl(var(--muted-foreground)); font-size: 10px; font-weight: 700; letter-spacing: 0.15em; }
 .context-heading h2 { margin: 5px 0 0; font-size: 24px; }
 .context-heading button, .editor-toolbar button { display: grid; width: 34px; height: 34px; border: 1px solid var(--border-subtle); border-radius: 11px; place-items: center; background: var(--surface-elevated); cursor: pointer; }
+.context-heading .primary-create-note, .primary-create-note { display: inline-flex; width: auto; min-height: 38px; align-items: center; gap: 7px; padding: 8px 12px; color: var(--nexus-accent); background: rgba(0,122,255,.08); font-size: 12px; font-weight: 700; }
+.note-empty-state { display: grid; gap: 12px; padding: 16px 0; }
+.note-empty-state p { margin: 0; }
 .search-field { display: flex; height: 40px; align-items: center; gap: 8px; margin-bottom: 15px; padding: 0 12px; border: 1px solid var(--border-subtle); border-radius: 13px; color: hsl(var(--muted-foreground)); background: rgba(255,255,255,.58); }
 .search-field input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; }
 .note-row { display: block; width: 100%; margin: 4px 0; padding: 13px; border: 0; border-radius: 15px; text-align: left; background: transparent; cursor: pointer; }

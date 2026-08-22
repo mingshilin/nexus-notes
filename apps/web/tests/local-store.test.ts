@@ -20,6 +20,8 @@ describe("BetaLocalStore", () => {
     const Store = web.BetaLocalStore as new (options: Record<string, unknown>) => {
       saveDraft(draft: Record<string, unknown>): Promise<void>;
       getDraft(workspaceId: string, entityId: string): Promise<Record<string, unknown> | null>;
+      listDrafts(workspaceId: string): Promise<Array<Record<string, unknown>>>;
+      removeDraft(workspaceId: string, entityId: string): Promise<void>;
       enqueueOperation(operation: Record<string, unknown>): Promise<void>;
       listOperations(workspaceId: string): Promise<Array<Record<string, unknown>>>;
       setSyncCursor(workspaceId: string, cursor: string): Promise<void>;
@@ -37,5 +39,29 @@ describe("BetaLocalStore", () => {
     expect(await store.getDraft("ws-1", "note-1")).toMatchObject({ title: "Local", content: "Draft" });
     expect((await store.listOperations("ws-1")).map((operation) => operation.operation_id)).toEqual(["op-1", "op-2"]);
     expect(await store.getSyncCursor("ws-1")).toBe("cursor-7");
+  });
+
+  it("lists only workspace drafts newest first and removes only the scoped draft", async () => {
+    const web = await loadWeb();
+    const Store = web.BetaLocalStore as new (options: Record<string, unknown>) => {
+      saveDraft(draft: Record<string, unknown>): Promise<void>;
+      getDraft(workspaceId: string, entityId: string): Promise<Record<string, unknown> | null>;
+      listDrafts(workspaceId: string): Promise<Array<Record<string, unknown>>>;
+      removeDraft(workspaceId: string, entityId: string): Promise<void>;
+      destroy(): Promise<void>;
+    };
+    const store = new Store({ databaseName: `nexus-test-${crypto.randomUUID()}` });
+    stores.push(store);
+
+    await store.saveDraft({ workspace_id: "ws-1", entity_id: "shared-id", title: "Older", content: "one", updated_at: "2026-08-22T00:00:00.000Z" });
+    await store.saveDraft({ workspace_id: "ws-1", entity_id: "newest", title: "Newest", content: "two", updated_at: "2026-08-22T00:02:00.000Z" });
+    await store.saveDraft({ workspace_id: "ws-2", entity_id: "shared-id", title: "Other workspace", content: "three", updated_at: "2026-08-22T00:03:00.000Z" });
+
+    expect((await store.listDrafts("ws-1")).map((draft) => draft.entity_id)).toEqual(["newest", "shared-id"]);
+
+    await store.removeDraft("ws-1", "shared-id");
+
+    expect(await store.getDraft("ws-1", "shared-id")).toBeNull();
+    expect(await store.getDraft("ws-2", "shared-id")).toMatchObject({ title: "Other workspace" });
   });
 });
