@@ -25,9 +25,15 @@ export function AccountCenter({ client, workspaces, activeWorkspaceId, onWorkspa
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const sessionsVersionRef = useRef(0);
   const sessionsControllerRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(false);
   const [activeTab, setActiveTab] = useState<AccountTab>(initialTab);
 
   useEffect(() => setActiveTab(initialTab), [initialTab]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -49,6 +55,7 @@ export function AccountCenter({ client, workspaces, activeWorkspaceId, onWorkspa
     sessionsVersionRef.current += 1;
     sessionsControllerRef.current?.abort();
     sessionsControllerRef.current = null;
+    if (mountedRef.current) setSessionsLoading(false);
   }, []);
 
   const loadSessions = useCallback(() => {
@@ -84,6 +91,9 @@ export function AccountCenter({ client, workspaces, activeWorkspaceId, onWorkspa
     setSessions((current) => current.filter((session) => session.id !== sessionId));
     loadSessions();
   };
+  const handleSessionRevokeFailed = () => {
+    loadSessions();
+  };
 
   const moveTab = (event: React.KeyboardEvent<HTMLButtonElement>) => {
     const current = tabs.findIndex((tab) => tab.id === activeTab);
@@ -109,7 +119,7 @@ export function AccountCenter({ client, workspaces, activeWorkspaceId, onWorkspa
       </div>
       <div className="account-panels">
         <div hidden={activeTab !== "profile"}><ProfilePanel client={client} profile={profile} loading={profileLoading} error={profileError} onRetry={() => setProfileRetry((retry) => retry + 1)} onProfileChange={handleProfileChange} /></div>
-        <div hidden={activeTab !== "security"}><SecurityPanel client={client} profile={profile} sessions={sessions} loading={sessionsLoading} error={sessionsError} onRetry={refreshSessions} onSessionsRefresh={refreshSessions} onSessionRevokeStart={invalidateSessions} onSessionRevoked={handleSessionRevoked} onProfileChange={handleProfileChange} /></div>
+        <div hidden={activeTab !== "security"}><SecurityPanel client={client} profile={profile} sessions={sessions} loading={sessionsLoading} error={sessionsError} onRetry={refreshSessions} onSessionsRefresh={refreshSessions} onSessionRevokeStart={invalidateSessions} onSessionRevokeFailed={handleSessionRevokeFailed} onSessionRevoked={handleSessionRevoked} onProfileChange={handleProfileChange} /></div>
         <section id="account-panel-workspace" role="tabpanel" aria-labelledby="account-tab-workspace" className="account-panel" hidden={activeTab !== "workspace"}><p className="eyebrow">WORKSPACE</p><h2>工作区</h2><p>工作区成员、权限和切换设置将在后续任务中提供。</p><p className="account-center-slot">工作区设置将在后续任务中提供。</p><span className="sr-only">当前工作区：{workspaces.find((workspace) => workspace.id === activeWorkspaceId)?.name ?? "未选择"}</span></section>
         <section id="account-panel-privacy" role="tabpanel" aria-labelledby="account-tab-privacy" className="account-panel" hidden={activeTab !== "privacy"}><p className="eyebrow">DATA & PRIVACY</p><h2>数据与隐私</h2><p>数据导出、删除和隐私设置将在后续任务中提供。</p><p className="account-center-slot">数据与隐私设置将在后续任务中提供。</p></section>
       </div>

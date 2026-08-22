@@ -6,7 +6,7 @@ import {
   type Profile,
 } from "@nexus/contracts";
 import { createPortal } from "react-dom";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useWorkbenchModalState } from "../layout/AdaptiveWorkbench";
 import type { ProfileClientLike } from "./index";
 
@@ -21,6 +21,7 @@ export interface SecurityPanelProps {
   onRetry(): void;
   onSessionsRefresh(): void;
   onSessionRevokeStart(): void;
+  onSessionRevokeFailed(): void;
   onSessionRevoked(sessionId: string): void;
   onProfileChange(profile: Profile): void;
 }
@@ -33,7 +34,7 @@ function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
 }
 
-export function SecurityPanel({ client, profile, sessions, loading, error, onRetry, onSessionsRefresh, onSessionRevokeStart, onSessionRevoked, onProfileChange }: SecurityPanelProps) {
+export function SecurityPanel({ client, profile, sessions, loading, error, onRetry, onSessionsRefresh, onSessionRevokeStart, onSessionRevokeFailed, onSessionRevoked, onProfileChange }: SecurityPanelProps) {
   const [newEmail, setNewEmail] = useState("");
   const [requestedEmail, setRequestedEmail] = useState<string | null>(null);
   const [emailPassword, setEmailPassword] = useState("");
@@ -54,6 +55,8 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const dialogCancelRef = useRef<HTMLButtonElement | null>(null);
   const sessionsHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const pendingFocusRef = useRef<HTMLElement | null>(null);
+  const focusFrameRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
   const revokePendingRef = useRef(false);
   const setWorkbenchModalOpen = useWorkbenchModalState();
@@ -64,7 +67,7 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
     return () => { mountedRef.current = false; };
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!revokeTarget) return undefined;
     setWorkbenchModalOpen(true);
     dialogCancelRef.current?.focus();
@@ -89,6 +92,31 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
     return () => {
       document.removeEventListener("keydown", trapFocus);
       setWorkbenchModalOpen(false);
+    };
+  }, [revokeTarget]);
+
+  useLayoutEffect(() => {
+    if (focusFrameRef.current !== null) {
+      cancelAnimationFrame(focusFrameRef.current);
+      focusFrameRef.current = null;
+    }
+    if (revokeTarget) {
+      pendingFocusRef.current = null;
+      return undefined;
+    }
+    const target = pendingFocusRef.current;
+    pendingFocusRef.current = null;
+    if (!target) return undefined;
+    focusFrameRef.current = requestAnimationFrame(() => {
+      focusFrameRef.current = null;
+      if (!mountedRef.current || !target.isConnected || target.closest("[inert]")) return;
+      target.focus();
+    });
+    return () => {
+      if (focusFrameRef.current !== null) {
+        cancelAnimationFrame(focusFrameRef.current);
+        focusFrameRef.current = null;
+      }
     };
   }, [revokeTarget]);
 
@@ -184,11 +212,10 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
     });
   };
 
-  function closeRevokeDialog(focus: "origin" | "fallback") {
-    if (focus === "origin") revokeOriginRef.current?.focus();
-    else sessionsHeadingRef.current?.focus();
+  function closeRevokeDialog(focus: "origin" | "fallback", preserveError = false) {
+    pendingFocusRef.current = focus === "origin" ? revokeOriginRef.current : sessionsHeadingRef.current;
     setRevokeTarget(null);
-    if (focus === "origin" && !revokeError) setRevokeError(null);
+    if (!preserveError) setRevokeError(null);
   }
 
   const revokeSession = () => {
@@ -203,7 +230,11 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
       setRevokeError(null);
       closeRevokeDialog("fallback");
     }).catch(() => {
-      if (mountedRef.current) setRevokeError("撤销会话失败，请重试。");
+      if (mountedRef.current) {
+        setRevokeError("撤销会话失败，请重试。");
+        onSessionRevokeFailed();
+        closeRevokeDialog("origin", true);
+      }
     }).finally(() => {
       if (mountedRef.current) setRevokePending(false);
     });

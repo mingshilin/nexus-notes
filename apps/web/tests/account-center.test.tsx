@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountCenter } from "../src/account/AccountCenter";
 import { ProfileClient } from "../src/data/profile-client";
 import { AdaptiveWorkbench } from "../src/layout/AdaptiveWorkbench";
@@ -70,6 +70,10 @@ function renderCenterInWorkbench(api: ReturnType<typeof client>, overrides: Reco
 }
 
 describe("AccountCenter", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("loads profile and sessions independently and retries only the failed resource", async () => {
     const profileRequest = deferred<typeof profile>();
     const sessionsRequest = deferred<typeof currentSession[]>();
@@ -363,8 +367,7 @@ describe("AccountCenter", () => {
     revoke.reject(new Error("offline"));
     expect(await screen.findByRole("alert")).toHaveTextContent("撤销会话失败");
     expect(screen.getByRole("listitem", { name: "其他会话 未知设备" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "取消撤销" }));
-    expect(revokeButton).toHaveFocus();
+    await waitFor(() => expect(revokeButton).toHaveFocus());
   });
 
   it("portals the revoke dialog, contains focus, closes safely, and restores modal context", async () => {
@@ -388,11 +391,36 @@ describe("AccountCenter", () => {
     expect(confirm).toHaveFocus();
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "确认撤销会话" })).not.toBeInTheDocument();
-    expect(revokeButton).toHaveFocus();
     expect(document.querySelector(".workbench-canvas")).not.toHaveAttribute("inert");
+    await waitFor(() => expect(revokeButton).toHaveFocus());
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "确认撤销会话" })).not.toBeInTheDocument();
     view.unmount();
+  });
+
+  it("restores revoke focus only after modal teardown removes inert", async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const api = client();
+    renderCenterInWorkbench(api);
+    fireEvent.click(await screen.findByRole("tab", { name: "安全" }));
+    const revokeButton = await screen.findByRole("button", { name: "撤销此会话" });
+    const focus = vi.spyOn(revokeButton, "focus");
+    fireEvent.click(revokeButton);
+    fireEvent.click(await screen.findByRole("button", { name: "取消撤销" }));
+    expect(screen.queryByRole("dialog", { name: "确认撤销会话" })).not.toBeInTheDocument();
+    expect(document.querySelector(".workbench-canvas")).not.toHaveAttribute("inert");
+    expect(focus).not.toHaveBeenCalled();
+    const frame = frames.shift();
+    expect(frame).toBeDefined();
+    await act(async () => {
+      frame?.(0);
+    });
+    expect(focus).toHaveBeenCalledOnce();
+    expect(revokeButton).toHaveFocus();
   });
 
   it("focuses the surviving sessions heading after successful revoke and ignores an old refresh", async () => {
@@ -408,10 +436,39 @@ describe("AccountCenter", () => {
     fireEvent.click(revokeButton);
     fireEvent.click(await screen.findByRole("button", { name: "确认撤销" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "撤销此会话" })).not.toBeInTheDocument());
-    expect(screen.getByRole("heading", { name: "登录会话" })).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "登录会话" })).toHaveFocus());
     oldRefresh.resolve([currentSession, otherSession]);
     await act(async () => { await Promise.resolve(); });
     expect(screen.queryByRole("button", { name: "撤销此会话" })).not.toBeInTheDocument();
+  });
+
+  it("settles refresh loading and replaces an aborted refresh after revoke failure", async () => {
+    const oldRefresh = deferred<typeof currentSession[]>();
+    const replacementRefresh = deferred<typeof currentSession[]>();
+    const revoke = deferred<{ revoked: true }>();
+    const staleSession = { ...otherSession, id: "stale" };
+    const listSessions = vi.fn()
+      .mockResolvedValueOnce([currentSession, otherSession])
+      .mockReturnValueOnce(oldRefresh.promise)
+      .mockReturnValueOnce(replacementRefresh.promise);
+    const api = client({ listSessions, revokeSession: vi.fn(() => revoke.promise) });
+    renderCenter({ client: api });
+    fireEvent.click(await screen.findByRole("tab", { name: "安全" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    fireEvent.click(screen.getByRole("button", { name: "撤销此会话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认撤销" }));
+    await waitFor(() => expect(api.revokeSession).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toBeEnabled());
+    revoke.reject(new Error("offline"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("撤销会话失败");
+    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(3));
+    expect(screen.getByRole("button", { name: "刷新" })).toBeDisabled();
+    replacementRefresh.resolve([currentSession, otherSession]);
+    await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toBeEnabled());
+    expect(screen.getByRole("listitem", { name: "其他会话 未知设备" })).toBeInTheDocument();
+    oldRefresh.resolve([currentSession, staleSession]);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole("listitem", { name: /stale/ })).not.toBeInTheDocument();
   });
 
   it("removes another session only after a successful confirmed revoke", async () => {
