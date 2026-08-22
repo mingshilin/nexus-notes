@@ -1,4 +1,4 @@
-import type { Profile, UpdateProfileInput } from "@nexus/contracts";
+import { UpdateProfileInputSchema, type Profile, type UpdateProfileInput } from "@nexus/contracts";
 import { useEffect, useRef, useState } from "react";
 import type { ProfileClientLike } from "./index";
 
@@ -42,6 +42,8 @@ export interface ProfilePanelProps {
 
 export function ProfilePanel({ client, profile, loading, error, onRetry, onProfileChange }: ProfilePanelProps) {
   const [form, setForm] = useState<ProfileForm>(() => profile ? formFromProfile(profile) : emptyForm);
+  const formRef = useRef<ProfileForm>(profile ? formFromProfile(profile) : emptyForm);
+  const editRevisionRef = useRef(0);
   const baselineRef = useRef<ProfileForm>(profile ? formFromProfile(profile) : emptyForm);
   const baselineProfileIdRef = useRef<string | null>(profile?.id ?? null);
   const profileIdRef = useRef<string | null>(profile?.id ?? null);
@@ -70,6 +72,7 @@ export function ProfilePanel({ client, profile, loading, error, onRetry, onProfi
     if (profileChanged || !dirtyRef.current) {
       baselineProfileIdRef.current = profile.id;
       baselineRef.current = next;
+      formRef.current = next;
       setForm(next);
       setFormError(null);
     }
@@ -78,27 +81,40 @@ export function ProfilePanel({ client, profile, loading, error, onRetry, onProfi
   const updateField = (field: keyof ProfileForm, value: string) => {
     const next = { ...form, [field]: value };
     dirtyRef.current = !sameForm(next, baselineRef.current);
+    editRevisionRef.current += 1;
+    formRef.current = next;
     setForm(next);
     setFormError(null);
   };
 
   const saveProfile = () => {
     if (!profile || loading || profilePending) return;
+    const parsed = UpdateProfileInputSchema.safeParse(form);
+    if (!parsed.success) {
+      setFormError("个人资料格式无效，请检查昵称、语言和时区。");
+      return;
+    }
     setProfilePending(true);
     setFormError(null);
     const profileId = profileIdRef.current;
-    void client.updateProfile(form).then((next) => {
+    const submitRevision = editRevisionRef.current;
+    void Promise.resolve().then(() => client.updateProfile(parsed.data)).then((next) => {
       if (!mountedRef.current || profileIdRef.current !== profileId) return;
       const nextForm = formFromProfile(next);
       baselineProfileIdRef.current = next.id;
       baselineRef.current = nextForm;
       dirtyRef.current = false;
-      setForm(nextForm);
+      const changedSinceSubmit = editRevisionRef.current !== submitRevision;
+      if (!changedSinceSubmit) {
+        formRef.current = nextForm;
+        setForm(nextForm);
+      }
+      dirtyRef.current = !sameForm(formRef.current, nextForm);
       onProfileChange(next);
     }).catch(() => {
       if (mountedRef.current && profileIdRef.current === profileId) setFormError("保存失败，请稍后重试。");
     }).finally(() => {
-      if (mountedRef.current && profileIdRef.current === profileId) setProfilePending(false);
+      if (mountedRef.current) setProfilePending(false);
     });
   };
 
@@ -124,7 +140,7 @@ export function ProfilePanel({ client, profile, loading, error, onRetry, onProfi
     setAvatarError(null);
     const file = selectedFile;
     const profileId = profileIdRef.current;
-    void client.uploadAvatar(file).then((next) => {
+    void Promise.resolve().then(() => client.uploadAvatar(file)).then((next) => {
       if (!mountedRef.current || profileIdRef.current !== profileId) return;
       setSelectedFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -132,7 +148,7 @@ export function ProfilePanel({ client, profile, loading, error, onRetry, onProfi
     }).catch(() => {
       if (mountedRef.current && profileIdRef.current === profileId) setAvatarError("头像上传失败，请重试。");
     }).finally(() => {
-      if (mountedRef.current && profileIdRef.current === profileId) setAvatarPending(null);
+      if (mountedRef.current) setAvatarPending(null);
     });
   };
 
@@ -141,13 +157,13 @@ export function ProfilePanel({ client, profile, loading, error, onRetry, onProfi
     setAvatarPending("delete");
     setAvatarError(null);
     const profileId = profileIdRef.current;
-    void client.deleteAvatar().then((next) => {
+    void Promise.resolve().then(() => client.deleteAvatar()).then((next) => {
       if (!mountedRef.current || profileIdRef.current !== profileId) return;
       onProfileChange(next);
     }).catch(() => {
       if (mountedRef.current && profileIdRef.current === profileId) setAvatarError("头像删除失败，请重试。");
     }).finally(() => {
-      if (mountedRef.current && profileIdRef.current === profileId) setAvatarPending(null);
+      if (mountedRef.current) setAvatarPending(null);
     });
   };
 

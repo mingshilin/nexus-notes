@@ -101,6 +101,7 @@ button { color: inherit; }
 .account-tabs button[aria-selected="true"] { color: white; background: var(--nexus-accent); box-shadow: 0 6px 15px rgba(0,122,255,.18); }
 .account-tabs button:focus-visible, .account-panel button:focus-visible, .account-panel input:focus-visible, .account-panel textarea:focus-visible { outline: 3px solid rgba(0,122,255,.27); outline-offset: 2px; }
 .account-panel { display: grid; gap: 22px; }
+.account-panel[hidden] { display: none; }
 .account-panel-heading, .account-subpanel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .account-panel-heading h2, .account-subpanel-heading h3 { margin: 7px 0; }
 .account-panel-heading p:not(.eyebrow), .account-subpanel > p, .account-panel > p { color: hsl(var(--muted-foreground)); line-height: 1.65; }

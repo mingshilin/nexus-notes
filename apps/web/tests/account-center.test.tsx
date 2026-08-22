@@ -1,6 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AccountCenter } from "../src/account/AccountCenter";
+import { ProfileClient } from "../src/data/profile-client";
+import { AdaptiveWorkbench } from "../src/layout/AdaptiveWorkbench";
 
 const profile = {
   id: "u1",
@@ -57,6 +59,16 @@ function renderCenter(overrides: Record<string, unknown> = {}) {
   return render(<AccountCenter client={client()} workspaces={[]} activeWorkspaceId={null} onWorkspaceChange={vi.fn()} onDeleted={vi.fn()} {...overrides} />);
 }
 
+function realProfileClient(transport: ReturnType<typeof vi.fn>) {
+  return new ProfileClient({ request: transport } as never);
+}
+
+function renderCenterInWorkbench(api: ReturnType<typeof client>, overrides: Record<string, unknown> = {}) {
+  return render(<AdaptiveWorkbench navigation={<nav aria-label="测试导航" />} inspectorOpen={false} onInspectorClose={vi.fn()}>
+    <AccountCenter client={api} workspaces={[]} activeWorkspaceId={null} onWorkspaceChange={vi.fn()} onDeleted={vi.fn()} {...overrides} />
+  </AdaptiveWorkbench>);
+}
+
 describe("AccountCenter", () => {
   it("loads profile and sessions independently and retries only the failed resource", async () => {
     const profileRequest = deferred<typeof profile>();
@@ -103,6 +115,7 @@ describe("AccountCenter", () => {
     const api = client({ updateProfile: vi.fn(async () => { throw new Error("offline"); }) });
     renderCenter({ client: api });
     const name = await screen.findByLabelText("昵称");
+    await waitFor(() => expect(name).toHaveValue("用户"));
     fireEvent.change(name, { target: { value: "新昵称" } });
     fireEvent.click(screen.getByRole("tab", { name: "安全" }));
     fireEvent.click(screen.getByRole("tab", { name: "个人资料" }));
@@ -126,9 +139,71 @@ describe("AccountCenter", () => {
     const onProfileChange = vi.fn();
     const api = client({ updateProfile: vi.fn(async () => returned) });
     renderCenter({ client: api, onProfileChange });
-    fireEvent.change(await screen.findByLabelText("昵称"), { target: { value: "新身份" } });
+    const name = await screen.findByLabelText("昵称");
+    await waitFor(() => expect(name).toHaveValue("用户"));
+    fireEvent.change(name, { target: { value: "新身份" } });
     fireEvent.click(screen.getByRole("button", { name: "保存个人资料" }));
     await waitFor(() => expect(onProfileChange).toHaveBeenCalledWith(returned));
+  });
+
+  it("keeps newer profile edits after a late save success while adopting the returned baseline", async () => {
+    const update = deferred<typeof profile>();
+    const returned = { ...profile, display_name: "服务端昵称", biography: "服务端简介" };
+    const onProfileChange = vi.fn();
+    const api = client({ updateProfile: vi.fn().mockReturnValueOnce(update.promise).mockRejectedValueOnce(new Error("offline")) });
+    renderCenter({ client: api, onProfileChange });
+    await waitFor(() => expect(screen.getByLabelText("昵称")).toHaveValue("用户"));
+    fireEvent.change(screen.getByLabelText("昵称"), { target: { value: "第一次编辑" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存个人资料" }));
+    fireEvent.change(screen.getByLabelText("昵称"), { target: { value: "提交后的更新" } });
+    update.resolve(returned);
+    await waitFor(() => expect(onProfileChange).toHaveBeenCalledWith(returned));
+    expect(screen.getByLabelText("昵称")).toHaveValue("提交后的更新");
+    fireEvent.click(screen.getByRole("button", { name: "保存个人资料" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("保存失败");
+  });
+
+  it("uses real ProfileClient schema boundaries without transport calls or stuck pending state", async () => {
+    const transport = vi.fn(async (request: { path: string; method?: string }) => {
+      if (request.path === "/api/v2/profile/sessions") return { items: [] };
+      if (request.path === "/api/v2/profile") return profile;
+      if (request.path.includes("email/change")) return { accepted: true };
+      if (request.path.includes("email/confirm")) return profile;
+      if (request.path.includes("password/change")) return { changed: true };
+      throw new Error(`Unexpected ${request.method ?? "GET"} ${request.path}`);
+    });
+    const api = realProfileClient(transport);
+    renderCenter({ client: api });
+    await waitFor(() => expect(screen.getByLabelText("昵称")).toHaveValue("用户"));
+    fireEvent.change(screen.getByLabelText("语言"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存个人资料" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("个人资料格式无效");
+    expect(screen.getByRole("button", { name: "保存个人资料" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("tab", { name: "安全" }));
+    const securityPanel = screen.getByRole("tabpanel", { name: "安全" });
+    fireEvent.change(screen.getByLabelText("新邮箱"), { target: { value: "not-an-email" } });
+    fireEvent.change(screen.getByLabelText("邮箱变更当前密码"), { target: { value: "current-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "请求邮箱变更" }));
+    expect(await within(securityPanel).findByRole("alert")).toHaveTextContent("邮箱变更输入无效");
+    expect(screen.getByRole("button", { name: "请求邮箱变更" })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText("新邮箱"), { target: { value: "new@example.test" } });
+    fireEvent.click(screen.getByRole("button", { name: "请求邮箱变更" }));
+    await screen.findByLabelText("验证码");
+    fireEvent.change(screen.getByLabelText("验证码"), { target: { value: "bad" } });
+    fireEvent.click(screen.getByRole("button", { name: "确认邮箱变更" }));
+    expect(await within(securityPanel).findByRole("alert")).toHaveTextContent("验证码格式无效");
+    expect(screen.getByRole("button", { name: "确认邮箱变更" })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText("验证码"), { target: { value: "123456" } });
+    fireEvent.change(screen.getByLabelText("当前密码"), { target: { value: "current-secret" } });
+    fireEvent.change(screen.getByLabelText("新密码"), { target: { value: "short" } });
+    fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: "short" } });
+    fireEvent.click(screen.getByRole("button", { name: "修改密码" }));
+    await waitFor(() => expect(within(securityPanel).getAllByRole("alert").at(-1)).toHaveTextContent("密码格式无效"));
+    expect(screen.getByRole("button", { name: "修改密码" })).toBeEnabled();
+    expect(transport.mock.calls.filter(([request]) => request.path === "/api/v2/profile" && request.method === "PATCH")).toHaveLength(0);
+    expect(transport.mock.calls.filter(([request]) => request.path === "/api/v2/profile/email/change")).toHaveLength(1);
+    expect(transport.mock.calls.filter(([request]) => request.path === "/api/v2/profile/email/confirm")).toHaveLength(0);
+    expect(transport.mock.calls.filter(([request]) => request.path === "/api/v2/profile/password/change")).toHaveLength(0);
   });
 
   it("rejects avatar type and size in the browser before upload", async () => {
@@ -189,6 +264,34 @@ describe("AccountCenter", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认邮箱变更" }));
     await waitFor(() => expect(onProfileChange).toHaveBeenCalledWith(confirmed));
     expect(code).toHaveValue("");
+  });
+
+  it("freezes the normalized requested email and supports a safe restart", async () => {
+    const requestEmailChange = vi.fn(async () => ({ accepted: true as const }));
+    const confirmEmailChange = vi.fn(async () => profile);
+    const api = client({ requestEmailChange, confirmEmailChange });
+    renderCenter({ client: api });
+    fireEvent.click(await screen.findByRole("tab", { name: "安全" }));
+    fireEvent.change(screen.getByLabelText("新邮箱"), { target: { value: "  NEW@EXAMPLE.TEST " } });
+    fireEvent.change(screen.getByLabelText("邮箱变更当前密码"), { target: { value: "current-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "请求邮箱变更" }));
+    expect(await screen.findByLabelText("验证码")).toBeInTheDocument();
+    const frozenEmail = screen.getByLabelText("新邮箱");
+    expect(frozenEmail).toHaveValue("new@example.test");
+    expect(frozenEmail).toBeDisabled();
+    fireEvent.change(frozenEmail, { target: { value: "attacker@example.test" } });
+    fireEvent.change(screen.getByLabelText("验证码"), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: "确认邮箱变更" }));
+    await waitFor(() => expect(confirmEmailChange).toHaveBeenCalledWith({ new_email: "new@example.test", code: "123456" }));
+    fireEvent.change(screen.getByLabelText("新邮箱"), { target: { value: "restart@example.test" } });
+    fireEvent.change(screen.getByLabelText("邮箱变更当前密码"), { target: { value: "current-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "请求邮箱变更" }));
+    await screen.findByLabelText("验证码");
+    fireEvent.change(screen.getByLabelText("验证码"), { target: { value: "654321" } });
+    fireEvent.click(screen.getByRole("button", { name: "重新开始邮箱变更" }));
+    expect(screen.queryByLabelText("验证码")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("邮箱变更当前密码")).toHaveValue("");
+    expect(screen.getByLabelText("新邮箱")).toHaveValue("");
   });
 
   it("preserves email fields when either email step fails", async () => {
@@ -256,7 +359,7 @@ describe("AccountCenter", () => {
     const confirm = screen.getByRole("button", { name: "确认撤销" });
     fireEvent.click(confirm);
     fireEvent.click(confirm);
-    expect(revokeSession).toHaveBeenCalledOnce();
+    await waitFor(() => expect(revokeSession).toHaveBeenCalledOnce());
     revoke.reject(new Error("offline"));
     expect(await screen.findByRole("alert")).toHaveTextContent("撤销会话失败");
     expect(screen.getByRole("listitem", { name: "其他会话 未知设备" })).toBeInTheDocument();
@@ -264,9 +367,57 @@ describe("AccountCenter", () => {
     expect(revokeButton).toHaveFocus();
   });
 
+  it("portals the revoke dialog, contains focus, closes safely, and restores modal context", async () => {
+    const api = client();
+    const view = renderCenterInWorkbench(api);
+    fireEvent.click(await screen.findByRole("tab", { name: "安全" }));
+    const revokeButton = await screen.findByRole("button", { name: "撤销此会话" });
+    fireEvent.click(revokeButton);
+    const dialog = await screen.findByRole("dialog", { name: "确认撤销会话" });
+    expect(dialog.parentElement?.parentElement).toBe(document.body);
+    expect(dialog).toContainElement(document.activeElement);
+    expect(document.querySelector(".workbench-canvas")).toHaveAttribute("inert", "");
+    const cancel = screen.getByRole("button", { name: "取消撤销" });
+    const confirm = screen.getByRole("button", { name: "确认撤销" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(confirm).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(confirm).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "确认撤销会话" })).not.toBeInTheDocument();
+    expect(revokeButton).toHaveFocus();
+    expect(document.querySelector(".workbench-canvas")).not.toHaveAttribute("inert");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "确认撤销会话" })).not.toBeInTheDocument();
+    view.unmount();
+  });
+
+  it("focuses the surviving sessions heading after successful revoke and ignores an old refresh", async () => {
+    const oldRefresh = deferred<typeof currentSession[]>();
+    const api = client({
+      listSessions: vi.fn().mockResolvedValueOnce([currentSession, otherSession]).mockReturnValueOnce(oldRefresh.promise).mockResolvedValueOnce([currentSession]),
+      revokeSession: vi.fn(async () => ({ revoked: true as const })),
+    });
+    renderCenter({ client: api });
+    fireEvent.click(await screen.findByRole("tab", { name: "安全" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const revokeButton = await screen.findByRole("button", { name: "撤销此会话" });
+    fireEvent.click(revokeButton);
+    fireEvent.click(await screen.findByRole("button", { name: "确认撤销" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "撤销此会话" })).not.toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "登录会话" })).toHaveFocus();
+    oldRefresh.resolve([currentSession, otherSession]);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole("button", { name: "撤销此会话" })).not.toBeInTheDocument();
+  });
+
   it("removes another session only after a successful confirmed revoke", async () => {
     const revokeSession = vi.fn(async () => ({ revoked: true as const }));
-    const api = client({ revokeSession });
+    const listSessions = vi.fn().mockResolvedValueOnce([currentSession, otherSession]).mockResolvedValueOnce([currentSession]);
+    const api = client({ revokeSession, listSessions });
     renderCenter({ client: api });
     fireEvent.click(await screen.findByRole("tab", { name: "安全" }));
     fireEvent.click(screen.getByRole("button", { name: "撤销此会话" }));
@@ -294,6 +445,8 @@ describe("AccountCenter", () => {
     expect(screen.getByText("工作区设置将在后续任务中提供。" )).toBeInTheDocument();
     fireEvent.click(tabs[0]!);
     expect(screen.getByLabelText("昵称")).toHaveValue("跨标签草稿");
+    expect(screen.getAllByRole("tabpanel")).toHaveLength(1);
+    expect(screen.queryByRole("heading", { name: "工作区" })).not.toBeInTheDocument();
   });
 
   it("does not persist secrets in browser storage", async () => {

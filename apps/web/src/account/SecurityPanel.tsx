@@ -1,6 +1,16 @@
-import type { AccountSession, Profile } from "@nexus/contracts";
+import {
+  ChangePasswordInputSchema,
+  ConfirmEmailChangeInputSchema,
+  RequestEmailChangeInputSchema,
+  type AccountSession,
+  type Profile,
+} from "@nexus/contracts";
+import { createPortal } from "react-dom";
 import { useEffect, useRef, useState } from "react";
+import { useWorkbenchModalState } from "../layout/AdaptiveWorkbench";
 import type { ProfileClientLike } from "./index";
+
+const focusableSelector = "button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
 export interface SecurityPanelProps {
   client: ProfileClientLike;
@@ -10,6 +20,7 @@ export interface SecurityPanelProps {
   error: string | null;
   onRetry(): void;
   onSessionsRefresh(): void;
+  onSessionRevokeStart(): void;
   onSessionRevoked(sessionId: string): void;
   onProfileChange(profile: Profile): void;
 }
@@ -18,8 +29,13 @@ function formatTimestamp(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
-export function SecurityPanel({ client, profile, sessions, loading, error, onRetry, onSessionsRefresh, onSessionRevoked, onProfileChange }: SecurityPanelProps) {
+function normalizeEmail(value: string) {
+  return value.trim().toLowerCase();
+}
+
+export function SecurityPanel({ client, profile, sessions, loading, error, onRetry, onSessionsRefresh, onSessionRevokeStart, onSessionRevoked, onProfileChange }: SecurityPanelProps) {
   const [newEmail, setNewEmail] = useState("");
+  const [requestedEmail, setRequestedEmail] = useState<string | null>(null);
   const [emailPassword, setEmailPassword] = useState("");
   const [emailCode, setEmailCode] = useState("");
   const [emailStep, setEmailStep] = useState<"request" | "confirm">("request");
@@ -35,8 +51,13 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
   const [revokePending, setRevokePending] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const revokeOriginRef = useRef<HTMLButtonElement | null>(null);
-  const dialogConfirmRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const dialogCancelRef = useRef<HTMLButtonElement | null>(null);
+  const sessionsHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const mountedRef = useRef(true);
+  const revokePendingRef = useRef(false);
+  const setWorkbenchModalOpen = useWorkbenchModalState();
+  revokePendingRef.current = revokePending;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -44,16 +65,48 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
   }, []);
 
   useEffect(() => {
-    if (revokeTarget) dialogConfirmRef.current?.focus();
+    if (!revokeTarget) return undefined;
+    setWorkbenchModalOpen(true);
+    dialogCancelRef.current?.focus();
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (!revokePendingRef.current) closeRevokeDialog("origin");
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>(focusableSelector)];
+      if (focusable.length === 0) return;
+      const activeIndex = focusable.indexOf(document.activeElement as HTMLElement);
+      const nextIndex = event.shiftKey
+        ? activeIndex <= 0 ? focusable.length - 1 : activeIndex - 1
+        : activeIndex < 0 || activeIndex === focusable.length - 1 ? 0 : activeIndex + 1;
+      event.preventDefault();
+      focusable[nextIndex]!.focus();
+    };
+    document.addEventListener("keydown", trapFocus);
+    return () => {
+      document.removeEventListener("keydown", trapFocus);
+      setWorkbenchModalOpen(false);
+    };
   }, [revokeTarget]);
 
   const requestEmail = () => {
     if (pendingAction) return;
+    const parsed = RequestEmailChangeInputSchema.safeParse({ new_email: normalizeEmail(newEmail), current_password: emailPassword });
+    if (!parsed.success) {
+      setEmailError("邮箱变更输入无效，请检查新邮箱和当前密码。");
+      setEmailStatus(null);
+      return;
+    }
     setPendingAction("email-request");
     setEmailError(null);
     setEmailStatus(null);
-    void client.requestEmailChange({ new_email: newEmail, current_password: emailPassword }).then(() => {
+    void Promise.resolve().then(() => client.requestEmailChange(parsed.data)).then(() => {
       if (!mountedRef.current) return;
+      setRequestedEmail(parsed.data.new_email);
+      setNewEmail(parsed.data.new_email);
       setEmailPassword("");
       setEmailStep("confirm");
       setEmailStatus("验证码已发送，请完成第二步确认。");
@@ -65,14 +118,21 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
   };
 
   const confirmEmail = () => {
-    if (pendingAction) return;
+    if (pendingAction || !requestedEmail) return;
+    const parsed = ConfirmEmailChangeInputSchema.safeParse({ new_email: requestedEmail, code: emailCode });
+    if (!parsed.success) {
+      setEmailError("验证码格式无效，请输入 6 位数字验证码。");
+      setEmailStatus(null);
+      return;
+    }
     setPendingAction("email-confirm");
     setEmailError(null);
     setEmailStatus(null);
-    void client.confirmEmailChange({ new_email: newEmail, code: emailCode }).then((next) => {
+    void Promise.resolve().then(() => client.confirmEmailChange(parsed.data)).then((next) => {
       if (!mountedRef.current) return;
       setEmailCode("");
       setNewEmail("");
+      setRequestedEmail(null);
       setEmailStep("request");
       setEmailStatus("邮箱已更新。");
       onProfileChange(next);
@@ -83,6 +143,17 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
     });
   };
 
+  const restartEmail = () => {
+    if (pendingAction) return;
+    setEmailStep("request");
+    setRequestedEmail(null);
+    setNewEmail("");
+    setEmailPassword("");
+    setEmailCode("");
+    setEmailError(null);
+    setEmailStatus(null);
+  };
+
   const changePassword = () => {
     if (pendingAction) return;
     if (passwordNew !== passwordConfirm) {
@@ -90,10 +161,16 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
       setPasswordStatus(null);
       return;
     }
+    const parsed = ChangePasswordInputSchema.safeParse({ current_password: passwordCurrent, new_password: passwordNew });
+    if (!parsed.success) {
+      setPasswordError("密码格式无效，新密码至少需要 10 个字符。");
+      setPasswordStatus(null);
+      return;
+    }
     setPendingAction("password");
     setPasswordError(null);
     setPasswordStatus(null);
-    void client.changePassword({ current_password: passwordCurrent, new_password: passwordNew }).then(() => {
+    void Promise.resolve().then(() => client.changePassword(parsed.data)).then(() => {
       if (!mountedRef.current) return;
       setPasswordCurrent("");
       setPasswordNew("");
@@ -107,27 +184,42 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
     });
   };
 
-  const closeRevokeDialog = () => {
-    revokeOriginRef.current?.focus();
+  function closeRevokeDialog(focus: "origin" | "fallback") {
+    if (focus === "origin") revokeOriginRef.current?.focus();
+    else sessionsHeadingRef.current?.focus();
     setRevokeTarget(null);
-    setRevokeError(null);
-  };
+    if (focus === "origin" && !revokeError) setRevokeError(null);
+  }
 
   const revokeSession = () => {
     if (!revokeTarget || revokePending) return;
+    onSessionRevokeStart();
     setRevokePending(true);
     setRevokeError(null);
     const targetId = revokeTarget.id;
-    void client.revokeSession(targetId).then(() => {
+    void Promise.resolve().then(() => client.revokeSession(targetId)).then(() => {
       if (!mountedRef.current) return;
       onSessionRevoked(targetId);
-      closeRevokeDialog();
+      setRevokeError(null);
+      closeRevokeDialog("fallback");
     }).catch(() => {
       if (mountedRef.current) setRevokeError("撤销会话失败，请重试。");
     }).finally(() => {
       if (mountedRef.current) setRevokePending(false);
     });
   };
+
+  const revokeDialog = revokeTarget ? createPortal(
+    <div className="account-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !revokePendingRef.current) closeRevokeDialog("origin"); }}>
+      <div ref={dialogRef} className="account-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="revoke-dialog-heading">
+        <h3 id="revoke-dialog-heading">确认撤销会话</h3>
+        <p>将退出 {revokeTarget.user_agent || "未知设备"} 的登录会话。</p>
+        {revokeError ? <p className="account-error" role="alert">{revokeError}</p> : null}
+        <div className="account-actions"><button ref={dialogCancelRef} type="button" onClick={() => closeRevokeDialog("origin")} disabled={revokePending}>取消撤销</button><button type="button" onClick={revokeSession} disabled={revokePending}>{revokePending ? "正在撤销…" : "确认撤销"}</button></div>
+      </div>
+    </div>,
+    document.body,
+  ) : null;
 
   return (
     <section id="account-panel-security" role="tabpanel" aria-labelledby="account-tab-security" className="account-panel">
@@ -137,10 +229,10 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
       <section className="account-subpanel" aria-labelledby="email-heading">
         <h3 id="email-heading">邮箱</h3>
         <p className="account-muted">当前邮箱：{profile?.email ?? "正在加载…"}</p>
-        <form className="account-form" onSubmit={(event) => { event.preventDefault(); emailStep === "request" ? requestEmail() : confirmEmail(); }}>
-          <label>新邮箱<input type="email" autoComplete="off" value={newEmail} onChange={(event) => setNewEmail(event.target.value)} /></label>
-          {emailStep === "request" ? <label>邮箱变更当前密码<input type="password" autoComplete="off" value={emailPassword} onChange={(event) => setEmailPassword(event.target.value)} /></label> : <label>验证码<input inputMode="numeric" autoComplete="one-time-code" value={emailCode} onChange={(event) => setEmailCode(event.target.value)} /></label>}
-          <button type="submit" disabled={pendingAction !== null}>{pendingAction === "email-request" ? "正在请求…" : pendingAction === "email-confirm" ? "正在确认…" : emailStep === "request" ? "请求邮箱变更" : "确认邮箱变更"}</button>
+        <form className="account-form" noValidate onSubmit={(event) => { event.preventDefault(); emailStep === "request" ? requestEmail() : confirmEmail(); }}>
+          <label>新邮箱<input type="email" autoComplete="off" value={requestedEmail ?? newEmail} disabled={emailStep === "confirm" || pendingAction !== null} onChange={(event) => { if (emailStep === "request") setNewEmail(event.target.value); }} /></label>
+          {emailStep === "request" ? <label>邮箱变更当前密码<input type="password" autoComplete="off" value={emailPassword} disabled={pendingAction !== null} onChange={(event) => setEmailPassword(event.target.value)} /></label> : <label>验证码<input inputMode="numeric" autoComplete="one-time-code" value={emailCode} disabled={pendingAction !== null} onChange={(event) => setEmailCode(event.target.value)} /></label>}
+          <div className="account-actions"><button type="submit" disabled={pendingAction !== null}>{pendingAction === "email-request" ? "正在请求…" : pendingAction === "email-confirm" ? "正在确认…" : emailStep === "request" ? "请求邮箱变更" : "确认邮箱变更"}</button>{emailStep === "confirm" ? <button type="button" onClick={restartEmail} disabled={pendingAction !== null}>重新开始邮箱变更</button> : null}</div>
         </form>
         {emailError ? <p className="account-error" role="alert">{emailError}</p> : null}
         {emailStatus ? <p className="account-status" role="status">{emailStatus}</p> : null}
@@ -148,16 +240,16 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
       <section className="account-subpanel" aria-labelledby="password-heading">
         <h3 id="password-heading">密码</h3>
         <form className="account-form" onSubmit={(event) => { event.preventDefault(); changePassword(); }}>
-          <label>当前密码<input type="password" autoComplete="current-password" value={passwordCurrent} onChange={(event) => setPasswordCurrent(event.target.value)} /></label>
-          <label>新密码<input type="password" autoComplete="new-password" value={passwordNew} onChange={(event) => setPasswordNew(event.target.value)} /></label>
-          <label>确认新密码<input type="password" autoComplete="new-password" value={passwordConfirm} onChange={(event) => setPasswordConfirm(event.target.value)} /></label>
+          <label>当前密码<input type="password" autoComplete="current-password" value={passwordCurrent} disabled={pendingAction !== null} onChange={(event) => setPasswordCurrent(event.target.value)} /></label>
+          <label>新密码<input type="password" autoComplete="new-password" value={passwordNew} disabled={pendingAction !== null} onChange={(event) => setPasswordNew(event.target.value)} /></label>
+          <label>确认新密码<input type="password" autoComplete="new-password" value={passwordConfirm} disabled={pendingAction !== null} onChange={(event) => setPasswordConfirm(event.target.value)} /></label>
           <button type="submit" disabled={pendingAction !== null}>修改密码</button>
         </form>
         {passwordError ? <p className="account-error" role="alert">{passwordError}</p> : null}
         {passwordStatus ? <p className="account-status" role="status">{passwordStatus}</p> : null}
       </section>
       <section className="account-subpanel" aria-labelledby="sessions-heading">
-        <div className="account-subpanel-heading"><h3 id="sessions-heading">登录会话</h3><button type="button" onClick={onRetry} disabled={loading}>刷新</button></div>
+        <div className="account-subpanel-heading"><h3 id="sessions-heading" ref={sessionsHeadingRef} tabIndex={-1}>登录会话</h3><button type="button" onClick={onRetry} disabled={loading}>刷新</button></div>
         <ul className="account-session-list" aria-label="登录会话">
           {sessions.map((session) => <li key={session.id} className="account-session-row" aria-label={`${session.current ? "当前会话" : "其他会话"} ${session.user_agent || "未知设备"}`}>
             <div><strong>{session.current ? "当前会话" : "其他会话"}</strong><span>{session.user_agent || "未知设备"}</span><small>创建于 {formatTimestamp(session.created_at)}，最近活动 {formatTimestamp(session.last_seen_at)}</small></div>
@@ -166,7 +258,7 @@ export function SecurityPanel({ client, profile, sessions, loading, error, onRet
         </ul>
         {revokeError && !revokeTarget ? <p className="account-error" role="alert">{revokeError}</p> : null}
       </section>
-      {revokeTarget ? <div className="account-dialog-backdrop" role="presentation"><div className="account-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="revoke-dialog-heading"><h3 id="revoke-dialog-heading">确认撤销会话</h3><p>将退出 {revokeTarget.user_agent || "未知设备"} 的登录会话。</p>{revokeError ? <p className="account-error" role="alert">{revokeError}</p> : null}<div className="account-actions"><button type="button" onClick={closeRevokeDialog} disabled={revokePending}>取消撤销</button><button ref={dialogConfirmRef} type="button" onClick={revokeSession} disabled={revokePending}>{revokePending ? "正在撤销…" : "确认撤销"}</button></div></div></div> : null}
+      {revokeDialog}
     </section>
   );
 }
