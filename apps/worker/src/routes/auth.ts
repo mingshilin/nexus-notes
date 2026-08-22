@@ -48,6 +48,7 @@ interface AuthRouteService {
     password: string;
     turnstileToken?: string;
     ip: string;
+    userAgent: string;
   }): Promise<{ sessionToken: string; user: unknown }>;
   verifyEmail(input: { email: string; code: string }): Promise<void>;
   resendVerification(input: { email: string; turnstileToken: string; ip: string }): Promise<{ accepted: boolean }>;
@@ -75,7 +76,7 @@ function sessionCookie(token: string) {
   return `nexus_session=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${30 * 24 * 60 * 60}`;
 }
 
-const expiredSessionCookie = "nexus_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0";
+export const expiredSessionCookie = "nexus_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0";
 
 export function registerAuthRoutes<TEnv>(
   registry: AuthRegistry<TEnv>,
@@ -111,6 +112,7 @@ export function registerAuthRoutes<TEnv>(
         password: body.password,
         turnstileToken: body.turnstile_token,
         ip: clientIp(request),
+        userAgent: request.headers.get("user-agent") ?? "",
       });
       return {
         data: { user: result.user },

@@ -104,6 +104,26 @@ describe("AuthService", () => {
     expect(result).toMatchObject({ sessionToken: "plain-session-token", user: { id: "user-1", email: "user@example.com" } });
   });
 
+  it("sanitizes and bounds the user agent persisted with a newly created session", async () => {
+    const worker = await loadWorker();
+    const dependencies = createDependencies();
+    dependencies.repository.findUserByEmail.mockResolvedValue({
+      id: "user-1", email: "user@example.com", password_hash: "stored", email_verified_at: "2026-08-20T00:00:00.000Z", status: "active",
+    });
+    const AuthService = worker.AuthService as new (dependencies: Record<string, unknown>) => {
+      login(input: Record<string, unknown>): Promise<Record<string, unknown>>;
+    };
+
+    await new AuthService(dependencies).login({
+      email: "user@example.com", password: "long-enough-123", ip: "203.0.113.2",
+      userAgent: `Test Browser\u0000${"x".repeat(600)}`,
+    });
+
+    expect(dependencies.repository.createSession).toHaveBeenCalledWith(expect.objectContaining({
+      userAgent: `Test Browser ${"x".repeat(499)}`,
+    }));
+  });
+
   it("atomically consumes password reset and revokes all old sessions", async () => {
     const worker = await loadWorker();
     const dependencies = createDependencies();

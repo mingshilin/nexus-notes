@@ -26,7 +26,7 @@ export interface AuthRepository {
   verifyEmailCodeAndEnsurePersonalWorkspace(codeHash: string, now: string): Promise<{ userId: string } | null | undefined>;
   ensurePersonalWorkspace(userId: string, now: string): Promise<void>;
   listWorkspaceMemberships(userId: string): Promise<AuthWorkspaceMembership[]>;
-  createSession(input: { userId: string; tokenHash: string; expiresAt: string; now: string }): Promise<void>;
+  createSession(input: { userId: string; tokenHash: string; expiresAt: string; now: string; userAgent: string }): Promise<void>;
   createPasswordReset(input: { userId: string; tokenHash: string; expiresAt: string; now: string }): Promise<void>;
   consumePasswordReset(tokenHash: string, now: string): Promise<{ userId: string } | null | undefined>;
   updatePasswordAndRevokeSessions(userId: string, passwordHash: string, now: string): Promise<void>;
@@ -75,6 +75,10 @@ export class AuthServiceError extends Error {
 
 function addMilliseconds(date: Date, milliseconds: number) {
   return new Date(date.getTime() + milliseconds).toISOString();
+}
+
+function sanitizeUserAgent(value: string | undefined) {
+  return (value ?? "").replace(/[\u0000-\u001F\u007F]/gu, " ").trim().slice(0, 512);
 }
 
 export class AuthService {
@@ -143,6 +147,7 @@ export class AuthService {
     password: string;
     ip: string;
     turnstileToken?: string;
+    userAgent?: string;
   }) {
     const email = normalizeEmail(input.email);
     const user = await this.dependencies.repository.findUserByEmail(email);
@@ -172,6 +177,7 @@ export class AuthService {
       tokenHash,
       expiresAt: addMilliseconds(now, 30 * 24 * 60 * 60 * 1000),
       now: now.toISOString(),
+      userAgent: sanitizeUserAgent(input.userAgent),
     });
     return {
       sessionToken,

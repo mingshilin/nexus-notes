@@ -18,12 +18,14 @@ describe("v2 auth routes", () => {
 
     const response = await registry.fetch(new Request("https://beta.test/api/v2/auth/login", {
       method: "POST",
-      headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.2" },
+      headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.2", "user-agent": "Test Browser" },
       body: JSON.stringify({ email: "user@example.com", password: "long-enough-123" }),
     }), {});
 
     expect(response.status).toBe(200);
-    expect(service.login).toHaveBeenCalledWith(expect.objectContaining({ turnstileToken: undefined, ip: "203.0.113.2" }));
+    expect(service.login).toHaveBeenCalledWith(expect.objectContaining({
+      turnstileToken: undefined, ip: "203.0.113.2", userAgent: "Test Browser",
+    }));
     expect(response.headers.get("set-cookie")).toMatch(/^nexus_session=plain-session; Path=\/; HttpOnly; Secure; SameSite=Lax; Max-Age=/);
     expect(await response.json()).toMatchObject({ success: true, data: { user: { id: "user-1" } } });
   });

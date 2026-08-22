@@ -17,6 +17,7 @@ import { D1ReminderRepository } from "./knowledge/d1-reminder-repository";
 import { D1TaxonomyRepository } from "./knowledge/d1-taxonomy-repository";
 import { KnowledgeService } from "./knowledge/knowledge-service";
 import { registerAuthRoutes } from "./routes/auth";
+import { registerProfileRoutes } from "./routes/profile";
 import { healthRoute, type BetaWorkerEnv } from "./routes/health";
 import { registerKnowledgeRoutes } from "./routes/knowledge";
 import { registerNoteRoutes } from "./routes/notes";
@@ -41,6 +42,9 @@ import { createPresenceNotifier } from "./presence/presence-dispatcher";
 import { D1OperationsRepository } from "./operations/d1-operations-repository";
 import { OperationsOutboxDispatcher } from "./operations/operations-outbox-dispatcher";
 import { createObservability, type ObservabilityLogger, type ObservabilityAnalytics } from "./observability";
+import { D1ProfileRepository } from "./profile/d1-profile-repository";
+import { ProfileAvatarStore } from "./profile/profile-avatar-store";
+import { ProfileService } from "./profile/profile-service";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -104,6 +108,19 @@ function createAuthService(env: BetaWorkerEnv, logger?: ObservabilityLogger) {
     email: new ResendEmailSender(env.RESEND_API_KEY, env.EMAIL_FROM, env.APP_BASE_URL, fetch, logger),
     password: new WebCryptoPasswordHasher(),
     tokens: authTokens,
+    clock: () => new Date(),
+  });
+}
+
+function createProfileService(env: BetaWorkerEnv, logger?: ObservabilityLogger) {
+  return new ProfileService({
+    repository: new D1ProfileRepository(env.DB),
+    password: new WebCryptoPasswordHasher(),
+    tokens: secureTokens(env.RATE_LIMIT_SECRET, "auth"),
+    email: new ResendEmailSender(env.RESEND_API_KEY, env.EMAIL_FROM, env.APP_BASE_URL, fetch, logger),
+    avatars: new ProfileAvatarStore(env.FILES),
+    logger: logger ?? { log: () => undefined },
+    createId: () => crypto.randomUUID(),
     clock: () => new Date(),
   });
 }
@@ -252,6 +269,7 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
   });
   registry.register(healthRoute);
   registerAuthRoutes(registry, (env) => createAuthService(env, options.logger));
+  registerProfileRoutes(registry, (env) => createProfileService(env, options.logger));
   registerNoteRoutes(registry, createNoteService);
   registerKnowledgeRoutes(registry, createKnowledgeService);
   registerTaxonomyRoutes(registry, createKnowledgeService);

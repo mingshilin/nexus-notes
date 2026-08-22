@@ -164,11 +164,11 @@ export class D1AuthRepository implements AuthRepository {
     });
   }
 
-  async createSession(input: { userId: string; tokenHash: string; expiresAt: string; now: string }) {
+  async createSession(input: { userId: string; tokenHash: string; expiresAt: string; now: string; userAgent: string }) {
     await this.db.prepare(
-      `INSERT INTO sessions (id, user_id, token_hash, expires_at, last_seen_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).bind(this.createId(), input.userId, input.tokenHash, input.expiresAt, input.now, input.now).run();
+      `INSERT INTO sessions (id, user_id, token_hash, expires_at, last_seen_at, created_at, user_agent)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(this.createId(), input.userId, input.tokenHash, input.expiresAt, input.now, input.now, input.userAgent).run();
   }
 
   async createPasswordReset(input: { userId: string; tokenHash: string; expiresAt: string; now: string }) {

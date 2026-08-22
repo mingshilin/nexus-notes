@@ -11,6 +11,7 @@ export { AuthService, AuthServiceError } from "./auth/auth-service";
 export { WebCryptoPasswordHasher, SecureTokenService } from "./auth/crypto";
 export { D1AuthRepository } from "./auth/d1-auth-repository";
 export { D1ProfileRepository } from "./profile/d1-profile-repository";
+export { ProfileService } from "./profile/profile-service";
 export { ProfileServiceError } from "./profile/profile-model";
 export type { ProfileRepository, StoredProfile } from "./profile/profile-model";
 export { D1SessionAuthenticator, D1WorkspaceAuthorizer } from "./auth/session-tenancy";
@@ -51,6 +52,7 @@ export { OperationsOutboxDispatcher, nextOutboxRetryAt } from "./operations/oper
 export { OcrConsumer } from "./attachments/ocr-consumer";
 export { OcrOutboxDispatcher } from "./attachments/ocr-outbox-dispatcher";
 export { registerAuthRoutes } from "./routes/auth";
+export { registerProfileRoutes } from "./routes/profile";
 export { registerKnowledgeRoutes } from "./routes/knowledge";
 export { registerGraphRoutes } from "./routes/graph";
 export { registerReminderRoutes } from "./routes/reminders";
