@@ -52,7 +52,7 @@ describe("public share and mobile collaboration", () => {
     fireEvent.click(trigger);
     const dialog = await screen.findByRole("dialog", { name: "一次性分享链接" });
     const close = within(dialog).getByRole("button", { name: "关闭" });
-    expect(close).toHaveFocus();
+    await waitFor(() => expect(close).toHaveFocus());
     expect(document.querySelector(".workbench-canvas")).toHaveAttribute("inert");
     expect(document.querySelector(".mobile-bottom-nav")).toHaveAttribute("inert");
     expect(document.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(0);

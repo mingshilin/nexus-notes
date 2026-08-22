@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 export interface AccountMenuProps {
   user: AuthUserSummary;
   unreadCount: number;
+  notificationsEnabled: boolean;
   modalOpen?: boolean;
   logoutPending?: boolean;
   onPersonalCenter(): void;
@@ -16,6 +17,7 @@ export interface AccountMenuProps {
 export function AccountMenu({
   user,
   unreadCount,
+  notificationsEnabled,
   modalOpen = false,
   logoutPending = false,
   onPersonalCenter,
@@ -24,9 +26,13 @@ export function AccountMenu({
   onLogout,
 }: AccountMenuProps) {
   const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const enabledIndices = [0, ...(notificationsEnabled ? [1] : []), 2, ...(!logoutPending ? [3] : [])];
+  const rovingIndex = enabledIndices.includes(activeIndex) ? activeIndex : enabledIndices[0]!;
 
   const closeAndRestoreFocus = () => {
     setOpen(false);
@@ -35,7 +41,6 @@ export function AccountMenu({
 
   useEffect(() => {
     if (!open) return undefined;
-    menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -54,6 +59,10 @@ export function AccountMenu({
   }, [open]);
 
   useEffect(() => {
+    if (open) itemRefs.current[rovingIndex]?.focus();
+  }, [open, rovingIndex]);
+
+  useEffect(() => {
     if (modalOpen) setOpen(false);
   }, [modalOpen]);
 
@@ -63,19 +72,22 @@ export function AccountMenu({
   };
 
   const moveMenuFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Tab") {
+      event.preventDefault();
+      closeAndRestoreFocus();
+      return;
+    }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-    const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [])];
-    if (!items.length) return;
     event.preventDefault();
-    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const current = enabledIndices.indexOf(rovingIndex);
     const next = event.key === "Home"
-      ? 0
+      ? enabledIndices[0]!
       : event.key === "End"
-        ? items.length - 1
+        ? enabledIndices.at(-1)!
         : event.key === "ArrowDown"
-          ? (current + 1) % items.length
-          : (current - 1 + items.length) % items.length;
-    items[next]?.focus();
+          ? enabledIndices[(current + 1) % enabledIndices.length]!
+          : enabledIndices[(current - 1 + enabledIndices.length) % enabledIndices.length]!;
+    setActiveIndex(next);
   };
 
   return (
@@ -87,7 +99,11 @@ export function AccountMenu({
         aria-label="账户"
         aria-haspopup="menu"
         aria-expanded={open && !modalOpen}
-        onClick={() => { if (!modalOpen) setOpen((current) => !current); }}
+        onClick={() => {
+          if (modalOpen) return;
+          setActiveIndex(enabledIndices[0]!);
+          setOpen((current) => !current);
+        }}
       >
         <span className="account-avatar" aria-hidden="true">{(user.displayName || user.email).slice(0, 1).toUpperCase()}</span>
         <span className="account-name">{user.displayName || user.email}</span>
@@ -98,10 +114,10 @@ export function AccountMenu({
             <strong>{user.displayName || "Nexus 用户"}</strong>
             <span>{user.email}</span>
           </div>
-          <button type="button" role="menuitem" onClick={() => runAction(onPersonalCenter)}><UserRound aria-hidden="true" size={16} />个人中心</button>
-          <button type="button" role="menuitem" aria-label={`通知，${unreadCount} 条未读`} onClick={() => runAction(() => onNotifications(triggerRef.current!))}><Bell aria-hidden="true" size={16} />通知{unreadCount > 0 ? <span className="account-unread">{unreadCount}</span> : null}</button>
-          <button type="button" role="menuitem" onClick={() => runAction(onWorkspace)}><UsersRound aria-hidden="true" size={16} />工作区</button>
-          <button className="account-menu-logout" type="button" role="menuitem" disabled={logoutPending} onClick={() => runAction(onLogout)}><LogOut aria-hidden="true" size={16} />{logoutPending ? "正在退出…" : "退出登录"}</button>
+          <button ref={(element) => { itemRefs.current[0] = element; }} type="button" role="menuitem" tabIndex={rovingIndex === 0 ? 0 : -1} onFocus={() => setActiveIndex(0)} onClick={() => runAction(onPersonalCenter)}><UserRound aria-hidden="true" size={16} />个人中心</button>
+          <button ref={(element) => { itemRefs.current[1] = element; }} type="button" role="menuitem" tabIndex={notificationsEnabled && rovingIndex === 1 ? 0 : -1} aria-label={notificationsEnabled ? `通知，${unreadCount} 条未读` : "通知，当前不可用"} aria-disabled={!notificationsEnabled || undefined} disabled={!notificationsEnabled} onFocus={() => setActiveIndex(1)} onClick={() => { if (notificationsEnabled) runAction(() => onNotifications(triggerRef.current!)); }}><Bell aria-hidden="true" size={16} />通知{notificationsEnabled ? unreadCount > 0 ? <span className="account-unread">{unreadCount}</span> : null : <span className="account-unavailable">暂不可用</span>}</button>
+          <button ref={(element) => { itemRefs.current[2] = element; }} type="button" role="menuitem" tabIndex={rovingIndex === 2 ? 0 : -1} onFocus={() => setActiveIndex(2)} onClick={() => runAction(onWorkspace)}><UsersRound aria-hidden="true" size={16} />工作区</button>
+          <button ref={(element) => { itemRefs.current[3] = element; }} className="account-menu-logout" type="button" role="menuitem" tabIndex={!logoutPending && rovingIndex === 3 ? 0 : -1} aria-disabled={logoutPending || undefined} disabled={logoutPending} onFocus={() => setActiveIndex(3)} onClick={() => runAction(onLogout)}><LogOut aria-hidden="true" size={16} />{logoutPending ? "正在退出…" : "退出登录"}</button>
         </div>
       ) : null}
     </div>

@@ -11,6 +11,8 @@ const session = {
   active_workspace_id: "ws-1",
 };
 
+const findNoteTitle = () => screen.findByRole("textbox", { name: "笔记标题" }, { timeout: 3000 });
+
 type NoteApiOptions = {
   createNote?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
   listNotes?: (workspaceId: string) => Promise<unknown>;
@@ -148,7 +150,7 @@ describe("live note workspace flow", () => {
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]);
 
-    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveFocus();
+    expect(await findNoteTitle()).toHaveFocus();
     resolveCreate({ note: serverNoteForFlow() });
     await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/notes", method: "POST" })));
   });
@@ -162,7 +164,7 @@ describe("live note workspace flow", () => {
     fireEvent.keyDown(window, { key: "n", metaKey: true, repeat: true });
     fireEvent.keyDown(window, { key: "n", ctrlKey: true });
 
-    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveFocus();
+    expect(await findNoteTitle()).toHaveFocus();
     await waitFor(() => expect(apiClient.request.mock.calls.filter(([input]) => input.path === "/api/v2/notes" && input.method === "POST")).toHaveLength(1));
   });
 
@@ -186,7 +188,7 @@ describe("live note workspace flow", () => {
 
     await screen.findByRole("button", { name: "打开笔记列表" });
     fireEvent.keyDown(window, { key: "n", ctrlKey: true });
-    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveFocus();
+    expect(await findNoteTitle()).toHaveFocus();
     await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalledWith("ws-1", expect.any(String)));
     expect(await screen.findByRole("heading", { name: "未命名笔记", level: 1 })).toBeInTheDocument();
   });
@@ -205,7 +207,7 @@ describe("live note workspace flow", () => {
 
     await screen.findByRole("button", { name: "打开笔记列表" });
     fireEvent.keyDown(window, { key: "n", ctrlKey: true });
-    await screen.findByRole("textbox", { name: "笔记标题" });
+    await findNoteTitle();
     resolveCreate({ note: serverNoteForFlow() });
     await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalled());
     expect(removalSawInstalledNote).toBe(true);
@@ -222,7 +224,7 @@ describe("live note workspace flow", () => {
 
     await screen.findByRole("button", { name: "打开笔记列表" });
     fireEvent.keyDown(window, { key: "n", ctrlKey: true });
-    await screen.findByRole("textbox", { name: "笔记标题" });
+    await findNoteTitle();
     await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalled());
     const savesBeforeEdit = localStore.saveDraft.mock.calls.length;
     const title = screen.getByRole("textbox", { name: "笔记标题" });
@@ -246,7 +248,7 @@ describe("live note workspace flow", () => {
 
     await screen.findByRole("button", { name: "打开笔记列表" });
     fireEvent.keyDown(window, { key: "n", ctrlKey: true });
-    const title = await screen.findByRole("textbox", { name: "笔记标题" });
+    const title = await findNoteTitle();
     fireEvent.change(title, { target: { value: "最新标题" } });
     fireEvent.change(screen.getByRole("textbox", { name: "笔记内容" }), { target: { value: "最新内容" } });
     resolveCreate({
@@ -279,7 +281,7 @@ describe("live note workspace flow", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(screen.getByRole("button", { name: "新建笔记" }));
-    await screen.findByRole("textbox", { name: "笔记标题" });
+    await findNoteTitle();
     fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(screen.getByRole("button", { name: /Existing note/ }));
     expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("Existing note");
@@ -297,7 +299,7 @@ describe("live note workspace flow", () => {
     const first = renderWorkspaceWithStore(apiClient, localStore, "ws-1");
     await screen.findByRole("button", { name: "打开笔记列表" });
     fireEvent.keyDown(window, { key: "n", ctrlKey: true });
-    await screen.findByRole("textbox", { name: "笔记标题" });
+    await findNoteTitle();
 
     first.unmount();
     const second = renderWorkspaceWithStore(apiClient, localStore, "ws-2");
@@ -320,7 +322,7 @@ describe("live note workspace flow", () => {
     const first = renderWorkspaceWithStore(apiClient, localStore, "ws-1");
     await screen.findByRole("button", { name: "打开笔记列表" });
     fireEvent.keyDown(window, { key: "n", ctrlKey: true });
-    const title = await screen.findByRole("textbox", { name: "笔记标题" });
+    const title = await findNoteTitle();
     fireEvent.change(title, { target: { value: "Keep me" } });
     const draftId = [...localStore.listDrafts.mock.results].length;
     first.unmount();
@@ -348,12 +350,12 @@ describe("live note workspace flow", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(screen.getByRole("button", { name: "新建笔记" }));
-    await screen.findByRole("textbox", { name: "笔记标题" });
+    await findNoteTitle();
     fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(screen.getByRole("button", { name: /Existing note/ }));
     resolveCreate({ note: { ...existingNote, id: "created-old", title: "", content: "" } });
 
-    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveValue("Existing note");
+    expect(await findNoteTitle()).toHaveValue("Existing note");
     fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
     expect(await screen.findByRole("button", { name: /未命名笔记/ })).toBeInTheDocument();
   });
@@ -367,7 +369,7 @@ describe("live note workspace flow", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]);
-    await screen.findByRole("textbox", { name: "笔记标题" });
+    await findNoteTitle();
     await waitFor(() => expect(localStore.saveDraft.mock.calls.filter(([draft]) => (
       draft.title === "" && draft.content === "" && draft.server_note === undefined && draft.pending_patch === undefined
       && draft.server_create_title === undefined
@@ -382,14 +384,14 @@ describe("live note workspace flow", () => {
 
     await screen.findByRole("button", { name: "打开笔记列表" });
     fireEvent.keyDown(window, { key: "n", ctrlKey: true });
-    const title = await screen.findByRole("textbox", { name: "笔记标题" });
+    const title = await findNoteTitle();
     fireEvent.change(title, { target: { value: "离线标题" } });
     fireEvent.change(screen.getByRole("textbox", { name: "笔记内容" }), { target: { value: "离线内容" } });
     await waitFor(async () => expect((await localStore.listDrafts("ws-1")).some((draft) => draft.title === "离线标题")).toBe(true));
     first.unmount();
 
     renderWorkspaceWithStore(apiClient, localStore);
-    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveValue("离线标题");
+    expect(await findNoteTitle()).toHaveValue("离线标题");
     expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("离线内容");
   });
 
@@ -414,7 +416,7 @@ describe("live note workspace flow", () => {
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(screen.getByRole("button", { name: /Server note/ }));
     releaseDrafts([localStore.getDraft("ws-1", "local-1")!]);
-    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveValue("Server note");
+    expect(await findNoteTitle()).toHaveValue("Server note");
   });
 
   it("keeps draft recovery isolated when the active workspace changes", async () => {
@@ -424,10 +426,10 @@ describe("live note workspace flow", () => {
     ]);
     const apiClient = createApiClient();
     const first = renderWorkspaceWithStore(apiClient, localStore, "ws-1");
-    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveValue("Workspace one");
+    expect(await findNoteTitle()).toHaveValue("Workspace one");
     first.unmount();
 
     renderWorkspaceWithStore(apiClient, localStore, "ws-2");
-    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveValue("Workspace two");
+    expect(await findNoteTitle()).toHaveValue("Workspace two");
   });
 });

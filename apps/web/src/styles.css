@@ -61,6 +61,7 @@ button { color: inherit; }
 .account-menu button[role="menuitem"]:disabled { cursor: default; opacity: .48; }
 .account-menu-logout { color: hsl(var(--destructive)); }
 .account-unread { min-width: 19px; margin-left: auto; border-radius: 99px; padding: 2px 6px; color: white; text-align: center; background: #ff3b30; font-size: 9px; font-weight: 750; }
+.account-unavailable { margin-left: auto; color: hsl(var(--muted-foreground)); font-size: 9px; }
 .workbench-context { min-width: 0; overflow-y: auto; border-right: 1px solid var(--border-subtle); background: var(--surface-list); }
 .context-content { padding: 28px 18px; }
 .context-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
@@ -342,6 +343,11 @@ button { color: inherit; }
 .auth-bootstrap-error { align-content: center; gap: 16px; }
 .auth-bootstrap-error p { margin: 0; color: hsl(var(--foreground)); line-height: 1.6; }
 .auth-bootstrap-error button { border: 0; border-radius: 12px; padding: 9px 18px; color: white; background: var(--nexus-accent); cursor: pointer; font-weight: 650; }
+.logout-cleanup-page { display: grid; width: 100%; min-height: 100dvh; padding: 24px; place-items: center; background: radial-gradient(circle at 22% 18%, rgba(0,122,255,.13), transparent 32%), var(--surface-app); }
+.logout-cleanup-card { display: grid; width: min(520px, 100%); gap: 14px; padding: clamp(28px, 6vw, 48px); border: 1px solid var(--border-subtle); border-radius: 26px; background: var(--surface-overlay); box-shadow: var(--shadow-lg); backdrop-filter: blur(24px); }
+.logout-cleanup-card h1 { margin: 0; font-size: clamp(30px, 6vw, 44px); letter-spacing: -.035em; }
+.logout-cleanup-card p { margin: 0; color: hsl(var(--muted-foreground)); line-height: 1.7; }
+.logout-cleanup-card button { justify-self: start; border: 0; border-radius: 12px; padding: 10px 16px; color: white; background: var(--nexus-accent); cursor: pointer; font-weight: 700; }
 
 .adaptive-workbench[data-mode="tablet"] { grid-template-columns: 76px minmax(0, 1fr); }
 .adaptive-workbench[data-mode="tablet"] .workbench-context-drawer { position: absolute; inset: 0 auto 0 76px; z-index: 10; display: block; width: min(400px, calc(100% - 76px)); overflow-y: auto; border-right: 1px solid var(--border-subtle); background: var(--surface-list); box-shadow: var(--shadow-md); }

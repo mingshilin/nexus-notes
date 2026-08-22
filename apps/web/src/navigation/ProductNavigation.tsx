@@ -11,6 +11,7 @@ export interface ProductNavigationProps {
   user: AuthUserSummary;
   unreadCount: number;
   collaborationEnabled: boolean;
+  notificationsEnabled: boolean;
   mode?: "rail" | "mobile";
   modalOpen?: boolean;
   contextOpen?: boolean;
@@ -36,6 +37,7 @@ export function ProductNavigation({
   user,
   unreadCount,
   collaborationEnabled,
+  notificationsEnabled,
   mode = "rail",
   modalOpen,
   contextOpen = false,
@@ -50,7 +52,6 @@ export function ProductNavigation({
   const workbenchModalOpen = useWorkbenchModalOpen();
   const menuSuppressed = Boolean(modalOpen || workbenchModalOpen);
   const navigate = (domain: ProductDomain) => {
-    if (domain === "collaboration" && !collaborationEnabled) return;
     onChange(domain);
   };
 
@@ -65,7 +66,6 @@ export function ProductNavigation({
         aria-current={activeDestination ? "page" : undefined}
         aria-pressed={activeDestination}
         aria-disabled={unavailable || undefined}
-        disabled={unavailable}
         title={unavailable ? "协作功能当前不可用" : undefined}
         onClick={() => navigate(domain)}
       >
@@ -98,6 +98,7 @@ export function ProductNavigation({
         <AccountMenu
           user={user}
           unreadCount={unreadCount}
+          notificationsEnabled={notificationsEnabled}
           modalOpen={menuSuppressed}
           logoutPending={logoutPending}
           onPersonalCenter={onPersonalCenter}

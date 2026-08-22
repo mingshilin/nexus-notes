@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
+import type { LocalDraft } from "../src/data/local-store";
 import { AdaptiveWorkbench } from "../src/layout/AdaptiveWorkbench";
 import { ProductNavigation, type ProductDomain } from "../src/navigation/ProductNavigation";
 
@@ -13,12 +14,23 @@ function navigationProps(overrides: Partial<Parameters<typeof ProductNavigation>
     user,
     unreadCount: 0,
     collaborationEnabled: true,
+    notificationsEnabled: true,
     onChange: vi.fn(),
     onPersonalCenter: vi.fn(),
     onNotifications: vi.fn(),
     onWorkspace: vi.fn(),
     onLogout: vi.fn(),
     ...overrides,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  return {
+    promise: new Promise<T>((next, fail) => { resolve = next; reject = fail; }),
+    resolve,
+    reject,
   };
 }
 
@@ -47,6 +59,60 @@ function draftStore() {
     listDrafts: vi.fn(async () => []),
     removeDraft: vi.fn(async () => undefined),
     destroy: vi.fn(async () => undefined),
+  };
+}
+
+function note(overrides: Partial<{ id: string; title: string; content: string; revision: number }> = {}) {
+  return {
+    id: "server-1", workspace_id: "ws-1", folder_id: null, database_id: null, created_by: "u1", updated_by: "u1",
+    title: "", content: "", status: "active" as const, is_favorite: false, is_pinned: false, daily_date: null,
+    revision: 1, created_at: "2026-08-23T00:00:00.000Z", updated_at: "2026-08-23T00:00:00.000Z", ...overrides,
+  };
+}
+
+function durableDraftStore(order: string[] = []) {
+  const drafts = new Map<string, LocalDraft>();
+  let nextMutationGate: { promise: Promise<void>; completed(): void } | null = null;
+  const store = {
+    saveDraft: vi.fn(async (draft: LocalDraft) => { drafts.set(`${draft.workspace_id}:${draft.entity_id}`, { ...draft }); }),
+    mutateDraft: vi.fn(async (workspaceId: string, entityId: string, mutation: (current: LocalDraft | null) => LocalDraft | null | undefined) => {
+      const gate = nextMutationGate;
+      nextMutationGate = null;
+      if (gate) {
+        await gate.promise;
+        gate.completed();
+      }
+      const key = `${workspaceId}:${entityId}`;
+      const current = drafts.get(key) ?? null;
+      const next = mutation(current ? { ...current } : null);
+      if (next === undefined) return current ? { ...current } : null;
+      if (next === null) { drafts.delete(key); return null; }
+      drafts.set(key, { ...next });
+      return { ...next };
+    }),
+    getDraft: vi.fn(async (workspaceId: string, entityId: string) => drafts.get(`${workspaceId}:${entityId}`) ?? null),
+    listDrafts: vi.fn(async (workspaceId: string) => [...drafts.values()].filter((draft) => draft.workspace_id === workspaceId)),
+    removeDraft: vi.fn(async (workspaceId: string, entityId: string) => { drafts.delete(`${workspaceId}:${entityId}`); }),
+    destroy: vi.fn(async () => { order.push(screen.queryByRole("navigation") ? "destroy-visible" : "destroy-hidden"); }),
+    blockNextMutation(promise: Promise<void>) {
+      nextMutationGate = { promise, completed: () => order.push("write") };
+    },
+  };
+  return store;
+}
+
+function noteFlowApi(createNote: Promise<ReturnType<typeof note>>) {
+  return {
+    request: vi.fn(async (request: { path: string; method?: string; body?: Record<string, unknown> }) => {
+      if (request.path.startsWith("/api/v2/attachments") || request.path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
+      if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+      if (request.path === "/api/v2/notes?limit=50") return { items: [], next_cursor: null };
+      if (request.path === "/api/v2/notes" && request.method === "POST") return { note: await createNote };
+      if (request.path.startsWith("/api/v2/notes/") && request.method === "PATCH") {
+        return { note: note({ title: String(request.body?.title ?? ""), content: String(request.body?.content ?? ""), revision: 2 }) };
+      }
+      return { items: [], next_cursor: null };
+    }),
   };
 }
 
@@ -80,10 +146,56 @@ describe("ProductNavigation", () => {
     expect(screen.getByRole("button", { name: "知识整理" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "笔记" })).toHaveAttribute("aria-pressed", "false");
     const collaboration = screen.getByRole("button", { name: "协作" });
-    expect(collaboration).toBeDisabled();
+    expect(collaboration).not.toBeDisabled();
     expect(collaboration).toHaveAttribute("aria-disabled", "true");
     fireEvent.click(collaboration);
-    expect(props.onChange).not.toHaveBeenCalled();
+    expect(props.onChange).toHaveBeenCalledWith("collaboration");
+  });
+
+  it("disables unavailable notifications honestly and skips them in roving menu focus", () => {
+    const props = navigationProps({ notificationsEnabled: false });
+    render(<ProductNavigation {...props} />);
+    const trigger = screen.getByRole("button", { name: "账户" });
+    fireEvent.click(trigger);
+
+    const personal = screen.getByRole("menuitem", { name: "个人中心" });
+    const notifications = screen.getByRole("menuitem", { name: "通知，当前不可用" });
+    const workspace = screen.getByRole("menuitem", { name: "工作区" });
+    expect(notifications).toBeDisabled();
+    expect(notifications).toHaveAttribute("aria-disabled", "true");
+    expect(notifications).toHaveAttribute("tabindex", "-1");
+    expect(personal).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "ArrowDown" });
+    expect(workspace).toHaveFocus();
+    expect(workspace).toHaveAttribute("tabindex", "0");
+    expect(personal).toHaveAttribute("tabindex", "-1");
+    fireEvent.click(notifications);
+    expect(props.onNotifications).not.toHaveBeenCalled();
+  });
+
+  it("uses one roving tab stop and closes on Tab or Shift+Tab with trigger focus restored", () => {
+    const props = navigationProps();
+    render(<ProductNavigation {...props} />);
+    const trigger = screen.getByRole("button", { name: "账户" });
+    fireEvent.click(trigger);
+    const menu = screen.getByRole("menu");
+    const items = screen.getAllByRole("menuitem");
+    expect(items.filter((item) => item.tabIndex === 0)).toHaveLength(1);
+    expect(items[0]).toHaveFocus();
+
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(screen.getByRole("menuitem", { name: "退出登录" })).toHaveFocus();
+    expect(items.filter((item) => item.tabIndex === 0)).toHaveLength(1);
+    fireEvent.keyDown(menu, { key: "Home" });
+    expect(screen.getByRole("menuitem", { name: "个人中心" })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: "Tab" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.click(trigger);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Tab", shiftKey: true });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
   });
 
   it("labels unread notifications and dispatches account actions once", () => {
@@ -170,29 +282,63 @@ describe("App product navigation", () => {
     expect(screen.queryByRole("heading", { name: "Public Beta 重写计划" })).not.toBeInTheDocument();
   });
 
-  it("logs out through AuthClient, clears scoped state, and reboots AuthGate as anonymous", async () => {
+  it("renders honest unavailable collaboration and real available database/collaboration domains", async () => {
+    const noWorkspace = { user, workspaces: [], active_workspace_id: null };
+    const first = render(<App authClient={{ session: vi.fn(async () => noWorkspace) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+    fireEvent.click(await screen.findByRole("button", { name: "协作" }));
+    expect(screen.getByRole("heading", { name: "协作功能当前不可用" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Public Beta 重写计划" })).not.toBeInTheDocument();
+    first.unmount();
+
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+    fireEvent.click(await screen.findByRole("button", { name: "数据库" }));
+    expect(await screen.findByRole("heading", { name: "创建第一个数据库" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "协作" }));
+    expect(await screen.findByRole("heading", { name: "协作中心" })).toBeInTheDocument();
+  });
+
+  it("orders durable controller drain before one server logout, cleanup, and anonymous AuthGate", async () => {
     const signedOut = Object.assign(new Error("Not authenticated"), { code: "UNAUTHENTICATED", status: 401 });
+    const order: string[] = [];
+    const serverCreate = deferred<ReturnType<typeof note>>();
     const authClient = {
-      session: vi.fn().mockResolvedValueOnce(authenticatedSession()).mockRejectedValueOnce(signedOut),
-      logout: vi.fn(async () => ({ logged_out: true })),
+      session: vi.fn().mockResolvedValueOnce(authenticatedSession()).mockImplementationOnce(async () => { order.push("authgate"); throw signedOut; }),
+      logout: vi.fn(async () => { order.push("logout"); return { logged_out: true }; }),
       login: vi.fn(),
     };
-    const localStore = draftStore();
-    const storageRead = vi.spyOn(Storage.prototype, "getItem");
-    render(<App authClient={authClient as any} apiClient={appApiClient() as any} localStore={localStore as any} turnstileSiteKey="test" />);
+    const localStore = durableDraftStore(order);
+    const apiClient = noteFlowApi(serverCreate.promise);
+    localStorage.setItem("nexus:database-pagination:ws-1", "user-state");
+    render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={localStore as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    const title = await screen.findByRole("textbox", { name: "笔记标题" });
+    await waitFor(() => expect(apiClient.request.mock.calls.some(([request]) => request.path === "/api/v2/notes" && request.method === "POST")).toBe(true));
+    const write = deferred<void>();
+    localStore.blockNextMutation(write.promise);
+    fireEvent.change(title, { target: { value: "退出前持久化" } });
 
     fireEvent.click(await screen.findByRole("button", { name: "账户" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "退出登录" }));
+    await Promise.resolve();
+    expect(authClient.logout).not.toHaveBeenCalled();
+    expect(localStore.destroy).not.toHaveBeenCalled();
+
+    write.resolve();
+    await waitFor(() => expect(order).toContain("write"));
+    expect(authClient.logout).not.toHaveBeenCalled();
+    serverCreate.resolve(note());
 
     await waitFor(() => expect(authClient.logout).toHaveBeenCalledOnce());
     await waitFor(() => expect(localStore.destroy).toHaveBeenCalledOnce());
     await waitFor(() => expect(authClient.session).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole("main")).toHaveClass("auth-page");
-    expect(storageRead).not.toHaveBeenCalled();
-    storageRead.mockRestore();
+    expect(order).toEqual(["write", "logout", "destroy-hidden", "authgate"]);
+    expect(localStorage.getItem("nexus:database-pagination:ws-1")).toBeNull();
   });
 
-  it("keeps the authenticated workspace and exposes a recoverable logout error on failure", async () => {
+  it("resumes authenticated editing and exposes a recoverable error when server logout fails", async () => {
     const authClient = {
       session: vi.fn(async () => authenticatedSession()),
       logout: vi.fn(async () => { throw Object.assign(new Error("offline"), { code: "NETWORK_ERROR" }); }),
@@ -208,5 +354,55 @@ describe("App product navigation", () => {
     expect(screen.getByRole("heading", { name: "Public Beta 重写计划" })).toBeInTheDocument();
     expect(authClient.session).toHaveBeenCalledOnce();
     expect(localStore.destroy).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toBeEnabled();
+  });
+
+  it("keeps AuthGate hidden after cleanup failure and retries cleanup without a second logout", async () => {
+    const signedOut = Object.assign(new Error("Not authenticated"), { code: "UNAUTHENTICATED", status: 401 });
+    const authClient = {
+      session: vi.fn().mockResolvedValueOnce(authenticatedSession()).mockRejectedValueOnce(signedOut),
+      logout: vi.fn(async () => ({ logged_out: true })),
+      login: vi.fn(),
+    };
+    const localStore = draftStore();
+    localStore.destroy.mockRejectedValueOnce(new Error("IndexedDB blocked")).mockResolvedValueOnce(undefined);
+    localStorage.setItem("nexus:database-pagination:ws-1", "user-state");
+    render(<App authClient={authClient as any} apiClient={appApiClient() as any} localStore={localStore as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "退出登录" }));
+
+    expect(await screen.findByRole("heading", { name: "本地数据清理失败" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "登录" })).not.toBeInTheDocument();
+    expect(authClient.session).toHaveBeenCalledOnce();
+    expect(authClient.logout).toHaveBeenCalledOnce();
+    expect(localStore.destroy).toHaveBeenCalledOnce();
+    expect(localStorage.getItem("nexus:database-pagination:ws-1")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试清理本地数据" }));
+    await waitFor(() => expect(localStore.destroy).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(authClient.session).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("main")).toHaveClass("auth-page");
+    expect(authClient.logout).toHaveBeenCalledOnce();
+  });
+
+  it("deduplicates rapid logout activation to one server call", async () => {
+    const logout = deferred<{ logged_out: true }>();
+    const authClient = { session: vi.fn(async () => authenticatedSession()), logout: vi.fn(() => logout.promise) };
+    render(<App authClient={authClient as any} apiClient={appApiClient() as any} localStore={draftStore() as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "账户" }));
+    const logoutItem = screen.getByRole("menuitem", { name: "退出登录" });
+    act(() => {
+      logoutItem.click();
+      logoutItem.click();
+    });
+    await waitFor(() => expect(authClient.logout).toHaveBeenCalledOnce());
+    logout.reject(Object.assign(new Error("offline"), { code: "NETWORK_ERROR" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("退出登录失败");
   });
 });

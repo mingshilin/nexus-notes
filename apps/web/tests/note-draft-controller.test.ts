@@ -762,4 +762,87 @@ describe("NoteDraftController", () => {
     await expect(resumed.reconcile("ws-1", "local-1", resumedResult)).resolves.toBe(true);
     expect(create).toHaveBeenCalledOnce();
   });
+
+  it("quiesces before queued writes finish, rejects new lifecycle starts, and resumes safely", async () => {
+    const store = createStore();
+    const controller = new NoteDraftController(store, { createId: () => "local-1" });
+    await controller.create("ws-1");
+    const mutate = store.mutateDraft.getMockImplementation()!;
+    let releaseWrite!: () => void;
+    const writeBlocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    store.mutateDraft.mockImplementationOnce(async (...args: Parameters<typeof mutate>) => {
+      await writeBlocked;
+      return mutate(...args);
+    });
+
+    const saving = controller.save("ws-1", "local-1", "queued", "queued body");
+    const quiescing = controller.quiesce();
+    let drained = false;
+    void quiescing.then(() => { drained = true; });
+    await Promise.resolve();
+
+    expect(drained).toBe(false);
+    await expect(controller.create("ws-1")).rejects.toMatchObject({ code: "DRAFT_CONTROLLER_QUIESCED" });
+    await expect(controller.save("ws-1", "local-1", "late", "late body")).rejects.toMatchObject({ code: "DRAFT_CONTROLLER_QUIESCED" });
+    await expect(controller.sync("ws-1", "local-1", { create: vi.fn(), update: vi.fn() })).rejects.toMatchObject({ code: "DRAFT_CONTROLLER_QUIESCED" });
+    await expect(controller.reconcile("ws-1", "local-1")).rejects.toMatchObject({ code: "DRAFT_CONTROLLER_QUIESCED" });
+    await expect(controller.recover("ws-1")).rejects.toMatchObject({ code: "DRAFT_CONTROLLER_QUIESCED" });
+
+    releaseWrite();
+    await saving;
+    await quiescing;
+    expect(await store.getDraft("ws-1", "local-1")).toMatchObject({ title: "queued", content: "queued body" });
+
+    controller.resume();
+    await expect(controller.save("ws-1", "local-1", "resumed", "resumed body")).resolves.toMatchObject({ title: "resumed" });
+  });
+
+  it("waits for an in-flight sync lifecycle before quiesce resolves", async () => {
+    const store = createStore();
+    const controller = new NoteDraftController(store, { createId: () => "local-1" });
+    await controller.create("ws-1");
+    let releaseCreate!: () => void;
+    const createBlocked = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    const syncing = controller.sync("ws-1", "local-1", {
+      create: vi.fn(async () => {
+        await createBlocked;
+        return serverNote();
+      }),
+      update: vi.fn(async (_id: string, input: { title: string; content: string }) => serverNote(input)),
+    });
+    await vi.waitFor(async () => expect(store.getDraft).toHaveBeenCalled());
+    const quiescing = controller.quiesce();
+    let drained = false;
+    void quiescing.then(() => { drained = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(drained).toBe(false);
+
+    releaseCreate();
+    await syncing;
+    await quiescing;
+    expect(drained).toBe(true);
+  });
+
+  it("waits for an in-flight recovery read before quiesce resolves", async () => {
+    const store = createStore();
+    let releaseList!: () => void;
+    const listBlocked = new Promise<void>((resolve) => { releaseList = resolve; });
+    store.listDrafts.mockImplementationOnce(async () => {
+      await listBlocked;
+      return [];
+    });
+    const controller = new NoteDraftController(store);
+    const recovering = controller.recover("ws-1");
+    await vi.waitFor(() => expect(store.listDrafts).toHaveBeenCalledOnce());
+    const quiescing = controller.quiesce();
+    let drained = false;
+    void quiescing.then(() => { drained = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(drained).toBe(false);
+
+    releaseList();
+    await recovering;
+    await quiescing;
+    expect(drained).toBe(true);
+  });
 });

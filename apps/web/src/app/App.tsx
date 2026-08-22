@@ -44,6 +44,7 @@ type AppRoute =
   | { kind: "invite"; token: string }
   | { kind: "share"; token: string };
 type UserScopedLocalStore = NoteDraftStore & { destroy?(): Promise<void> };
+type LogoutPhase = "idle" | "quiescing" | "cleanup" | "cleanup-error";
 
 function clearUserScopedBrowserState() {
   if (typeof window === "undefined") return;
@@ -55,6 +56,23 @@ function clearUserScopedBrowserState() {
     }
     keys.forEach((key) => storage.removeItem(key));
   }
+}
+
+function LogoutCleanupRecovery({ failed, onRetry }: { failed: boolean; onRetry(): void }) {
+  return (
+    <main className="logout-cleanup-page">
+      <section className="logout-cleanup-card" aria-live="polite">
+        <p className="eyebrow">SECURE SIGN OUT</p>
+        <h1>{failed ? "本地数据清理失败" : "正在清理本地数据"}</h1>
+        {failed ? (
+          <>
+            <p role="alert">服务器会话已退出，但此设备上的离线数据尚未清理完成。完成清理前无法重新登录。</p>
+            <button type="button" onClick={onRetry}>重试清理本地数据</button>
+          </>
+        ) : <p role="status">正在移除此账户的离线数据，请勿关闭页面。</p>}
+      </section>
+    </main>
+  );
 }
 
 function resetTokenFromLocation() {
@@ -125,6 +143,7 @@ function AuthenticatedWorkspace({
   role,
   collaborationEnabled,
   localStore,
+  draftControllerRef,
   logoutPending,
   logoutError,
   onLogout,
@@ -137,6 +156,7 @@ function AuthenticatedWorkspace({
   role: WorkspaceRoleContract;
   collaborationEnabled: boolean;
   localStore: NoteDraftStore;
+  draftControllerRef: { current: NoteDraftController | null };
   logoutPending: boolean;
   logoutError: string | null;
   onLogout(): void;
@@ -219,6 +239,13 @@ function AuthenticatedWorkspace({
   const userId = user.id;
 
   useEffect(() => {
+    draftControllerRef.current = draftController;
+    return () => {
+      if (draftControllerRef.current === draftController) draftControllerRef.current = null;
+    };
+  }, [draftController, draftControllerRef]);
+
+  useEffect(() => {
     if (!inspectorOpen && inspectorOpenerRef.current) {
       inspectorOpenerRef.current.focus();
       inspectorOpenerRef.current = null;
@@ -238,7 +265,7 @@ function AuthenticatedWorkspace({
   };
 
   const startNewNote = () => {
-    if (!workspaceId || activationInFlight.current || activeDraftIdRef.current) return false;
+    if (logoutPending || !workspaceId || activationInFlight.current || activeDraftIdRef.current) return false;
     activationInFlight.current = true;
     userSelectedNote.current = true;
     setNoteError(null);
@@ -283,7 +310,7 @@ function AuthenticatedWorkspace({
   };
 
   const saveNote = () => {
-    if (!workspaceId || noteSaving) return;
+    if (logoutPending || !workspaceId || noteSaving) return;
     if (creatingNote && activeDraftId) {
       setServerRetryVersion((version) => version + 1);
       return;
@@ -314,6 +341,7 @@ function AuthenticatedWorkspace({
   };
 
   const updateActiveDraftInput = (title: string, content: string) => {
+    if (logoutPending) return;
     draftTitleRef.current = title;
     draftContentRef.current = content;
     setDraftTitle(title);
@@ -367,10 +395,10 @@ function AuthenticatedWorkspace({
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [workspaceId]);
+  }, [logoutPending, workspaceId]);
 
   useEffect(() => {
-    if (!workspaceId || !activeDraftId) return undefined;
+    if (logoutPending || !workspaceId || !activeDraftId) return undefined;
     const draftId = activeDraftId;
     let active = true;
     setNoteSaving(true);
@@ -388,10 +416,10 @@ function AuthenticatedWorkspace({
       active = false;
       void draftController.flush(workspaceId, draftId).catch(() => undefined);
     };
-  }, [activeDraftId, apiClient, draftController, serverRetryVersion, workspaceId]);
+  }, [activeDraftId, apiClient, draftController, logoutPending, serverRetryVersion, workspaceId]);
 
   useEffect(() => {
-    if (!pendingReconcile || !workspaceId || pendingReconcile.workspaceId !== workspaceId) return undefined;
+    if (logoutPending || !pendingReconcile || !workspaceId || pendingReconcile.workspaceId !== workspaceId) return undefined;
     if (!notes.some((note) => note.id === pendingReconcile.result.note.id)) return undefined;
     const { entityId, result } = pendingReconcile;
     let cancelled = false;
@@ -413,7 +441,7 @@ function AuthenticatedWorkspace({
       if (!cancelled) setNoteError("服务器已创建笔记，但本地草稿清理失败；内容仍已打开。请稍后重试。");
     });
     return () => { cancelled = true; };
-  }, [apiClient, draftController, notes, pendingReconcile, workspaceId]);
+  }, [apiClient, draftController, logoutPending, notes, pendingReconcile, workspaceId]);
 
   const abortRecoveryRequests = () => {
     requestControllers.current.forEach((controller) => controller.abort());
@@ -490,7 +518,7 @@ function AuthenticatedWorkspace({
   }, [apiClient, workspaceId]);
 
   useEffect(() => {
-    if (!workspaceId || notesLoading || activeDraftIdRef.current || userSelectedNote.current) return undefined;
+    if (logoutPending || !workspaceId || notesLoading || activeDraftIdRef.current || userSelectedNote.current) return undefined;
     let cancelled = false;
     void draftController.recover(workspaceId).then((draft) => {
       if (!draft || cancelled || activeDraftIdRef.current || userSelectedNote.current) return;
@@ -510,7 +538,7 @@ function AuthenticatedWorkspace({
       if (!cancelled) setNotesError("本地草稿恢复失败。你仍可以尝试新建笔记。");
     });
     return () => { cancelled = true; };
-  }, [draftController, notesLoading, workspaceId]);
+  }, [draftController, logoutPending, notesLoading, workspaceId]);
 
   useEffect(() => {
     if (creatingNote) return;
@@ -784,7 +812,6 @@ function AuthenticatedWorkspace({
   };
 
   const changeDomain = (domain: ProductDomain) => {
-    if (domain === "collaboration" && !collaborationEnabled) return;
     if (domain === "collaboration") setCollaborationInitialSection("people");
     setActiveDomain(domain);
     setActivePane("canvas");
@@ -798,6 +825,7 @@ function AuthenticatedWorkspace({
     user,
     unreadCount,
     collaborationEnabled,
+    notificationsEnabled: Boolean(collaborationEnabled && workspaceId),
     contextOpen: activePane === "context",
     logoutPending,
     onChange: changeDomain,
@@ -814,7 +842,7 @@ function AuthenticatedWorkspace({
     <div className="context-content">
       <div className="context-heading">
         <div><small>CREATE</small><h2>所有笔记</h2></div>
-        <button className="primary-create-note" type="button" aria-label="新建笔记" onClick={startNewNote}>
+        <button className="primary-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
           <Plus aria-hidden="true" size={17} />
           <span>新建笔记</span>
         </button>
@@ -825,7 +853,7 @@ function AuthenticatedWorkspace({
       {!notesLoading && notes.length === 0 ? (
         <div className="note-empty-state">
           <p className="database-empty">暂无笔记，开始记录你的想法。</p>
-          <button className="primary-create-note" type="button" aria-label="新建笔记" onClick={startNewNote}>
+          <button className="primary-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
             <Plus aria-hidden="true" size={17} />
             <span>新建笔记</span>
           </button>
@@ -933,6 +961,13 @@ function AuthenticatedWorkspace({
         <strong>{accountSubsection === "workspace" ? "工作区" : "个人中心"}</strong>
         <span>此区域由 Product Completion Tasks 9-10 补充。</span>
       </div>
+    </section>
+  );
+  const collaborationUnavailableCanvas = (
+    <section className="product-domain-page product-status-page">
+      <p className="eyebrow">COLLABORATION</p>
+      <h1>协作功能当前不可用</h1>
+      <p className="product-domain-lead">当前没有可用工作区或协作能力。选择其他产品区域不会更改你的笔记数据。</p>
     </section>
   );
 
@@ -1058,7 +1093,7 @@ function AuthenticatedWorkspace({
         onInspectorClose={closeInspector}
       >
         <>
-        {activeDomain === "collaboration" && collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : activeDomain === "databases" ? databaseCanvas : activeDomain === "knowledge" ? knowledgeCanvas : activeDomain === "ai" ? aiCanvas : activeDomain === "account" ? accountCanvas : selectedNote || creatingNote ? <article className="editor-document">
+        {activeDomain === "collaboration" ? collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : collaborationUnavailableCanvas : activeDomain === "databases" ? databaseCanvas : activeDomain === "knowledge" ? knowledgeCanvas : activeDomain === "ai" ? aiCanvas : activeDomain === "account" ? accountCanvas : selectedNote || creatingNote ? <article className="editor-document">
           <header className="editor-toolbar">
             <span className="saved-state"><span /> {noteSaving ? "保存中…" : noteMessage ?? "未保存更改"}</span>
             <div>
@@ -1069,10 +1104,10 @@ function AuthenticatedWorkspace({
           <div className="editor-copy">
             <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
             <h1>{draftTitle.trim() || "未命名笔记"}</h1>
-            <label className="note-editor-field">标题<input ref={titleInputRef} aria-label="笔记标题" value={draftTitle} onChange={(event) => updateActiveDraftInput(event.target.value, draftContentRef.current)} /></label>
-            <label className="note-editor-field">内容<textarea aria-label="笔记内容" value={draftContent} onChange={(event) => updateActiveDraftInput(draftTitleRef.current, event.target.value)} /></label>
+            <label className="note-editor-field">标题<input ref={titleInputRef} aria-label="笔记标题" disabled={logoutPending} value={draftTitle} onChange={(event) => updateActiveDraftInput(event.target.value, draftContentRef.current)} /></label>
+            <label className="note-editor-field">内容<textarea aria-label="笔记内容" disabled={logoutPending} value={draftContent} onChange={(event) => updateActiveDraftInput(draftTitleRef.current, event.target.value)} /></label>
             <div className="note-editor-actions">
-              <button type="button" disabled={noteSaving || (!creatingNote && !draftTitle.trim() && !draftContent.trim())} onClick={saveNote}>{creatingNote && noteError ? "重试同步" : "保存笔记"}</button>
+              <button type="button" disabled={logoutPending || noteSaving || (!creatingNote && !draftTitle.trim() && !draftContent.trim())} onClick={saveNote}>{creatingNote && noteError ? "重试同步" : "保存笔记"}</button>
               {noteMessage ? <p role="status">{noteMessage}</p> : null}
               {noteError ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
             </div>
@@ -1133,27 +1168,50 @@ export function App({
   const [route, setRoute] = useState<AppRoute>(() => routeFromLocation());
   const [authGateVersion, setAuthGateVersion] = useState(0);
   const [defaultLocalStore, setDefaultLocalStore] = useState<UserScopedLocalStore>(() => new BetaLocalStore());
-  const [logoutPending, setLogoutPending] = useState(false);
+  const [logoutPhase, setLogoutPhase] = useState<LogoutPhase>("idle");
   const [logoutError, setLogoutError] = useState<string | null>(null);
-  const logoutInFlight = useRef(false);
+  const logoutAttempted = useRef(false);
+  const cleanupInFlight = useRef(false);
+  const draftControllerRef = useRef<NoteDraftController | null>(null);
   const activeLocalStore = localStore ?? defaultLocalStore;
-  const logout = () => {
-    if (logoutInFlight.current) return;
-    logoutInFlight.current = true;
-    setLogoutPending(true);
-    setLogoutError(null);
-    void authClient.logout().then(async () => {
-      await Promise.allSettled([
-        Promise.resolve().then(clearUserScopedBrowserState),
-        Promise.resolve().then(() => activeLocalStore.destroy?.()),
-      ]);
+  const logoutPending = logoutPhase === "quiescing";
+  const requestCleanup = () => {
+    if (!cleanupInFlight.current) setLogoutPhase("cleanup");
+  };
+  useEffect(() => {
+    if (logoutPhase !== "cleanup" || cleanupInFlight.current) return;
+    cleanupInFlight.current = true;
+    void Promise.all([
+      Promise.resolve().then(clearUserScopedBrowserState),
+      Promise.resolve().then(() => activeLocalStore.destroy?.()),
+    ]).then(() => {
+      cleanupInFlight.current = false;
+      logoutAttempted.current = false;
       if (!localStore) setDefaultLocalStore(new BetaLocalStore());
-      logoutInFlight.current = false;
-      setLogoutPending(false);
+      setLogoutError(null);
+      setLogoutPhase("idle");
       setAuthGateVersion((version) => version + 1);
     }, () => {
-      logoutInFlight.current = false;
-      setLogoutPending(false);
+      cleanupInFlight.current = false;
+      setLogoutPhase("cleanup-error");
+    });
+  }, [activeLocalStore, localStore, logoutPhase]);
+  const logout = () => {
+    if (logoutAttempted.current || logoutPhase !== "idle") return;
+    const draftController = draftControllerRef.current;
+    if (!draftController) {
+      setLogoutError("暂时无法安全退出，请稍后重试。当前工作区仍保持登录状态。");
+      return;
+    }
+    logoutAttempted.current = true;
+    setLogoutPhase("quiescing");
+    setLogoutError(null);
+    void draftController.quiesce().then(() => authClient.logout()).then(() => {
+      requestCleanup();
+    }, () => {
+      draftController.resume();
+      logoutAttempted.current = false;
+      setLogoutPhase("idle");
       setLogoutError("退出登录失败，请检查网络后重试。当前工作区仍保持登录状态。");
     });
   };
@@ -1172,6 +1230,9 @@ export function App({
       }}
     />;
   }
+  if (logoutPhase === "cleanup" || logoutPhase === "cleanup-error") {
+    return <LogoutCleanupRecovery failed={logoutPhase === "cleanup-error"} onRetry={requestCleanup} />;
+  }
   return (
     <AuthGate key={authGateVersion} client={authClient} turnstileSiteKey={turnstileSiteKey} resetToken={resetToken}>
       {(session) => {
@@ -1187,6 +1248,7 @@ export function App({
             role={activeWorkspace?.role ?? "viewer"}
             collaborationEnabled={Boolean(activeWorkspace)}
             localStore={activeLocalStore}
+            draftControllerRef={draftControllerRef}
             logoutPending={logoutPending}
             logoutError={logoutError}
             onLogout={logout}

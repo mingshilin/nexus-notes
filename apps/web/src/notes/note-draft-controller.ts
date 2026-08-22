@@ -41,10 +41,22 @@ interface DraftLifecycle {
   syncPromise?: Promise<DraftSyncResult>;
 }
 
+export class NoteDraftControllerQuiescedError extends Error {
+  readonly code = "DRAFT_CONTROLLER_QUIESCED";
+
+  constructor() {
+    super("Draft controller is quiesced");
+    this.name = "NoteDraftControllerQuiescedError";
+  }
+}
+
 export class NoteDraftController {
   private readonly createId: () => string;
   private readonly clock: () => Date;
   private readonly lifecycles = new Map<string, DraftLifecycle>();
+  private readonly activeOperations = new Set<Promise<unknown>>();
+  private quiesced = false;
+  private quiescePromise?: Promise<void>;
 
   constructor(
     private readonly store: NoteDraftStore,
@@ -55,6 +67,7 @@ export class NoteDraftController {
   }
 
   async create(workspaceId: string): Promise<LocalDraft> {
+    this.assertActive();
     const draft: LocalDraft = {
       workspace_id: workspaceId,
       entity_id: this.createId(),
@@ -70,12 +83,20 @@ export class NoteDraftController {
   }
 
   async recover(workspaceId: string): Promise<LocalDraft | null> {
-    await this.flush(workspaceId);
-    const drafts = await this.store.listDrafts(workspaceId);
-    return drafts[0] ?? null;
+    this.assertActive();
+    return this.trackOperation((async () => {
+      await this.flush(workspaceId);
+      const drafts = await this.store.listDrafts(workspaceId);
+      return drafts[0] ?? null;
+    })());
   }
 
   save(workspaceId: string, entityId: string, title: string, content: string) {
+    try {
+      this.assertActive();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     return this.enqueue(this.key(workspaceId, entityId), async () => {
       return this.store.mutateDraft(workspaceId, entityId, (current) => {
         if (!current) return undefined;
@@ -92,8 +113,10 @@ export class NoteDraftController {
 
   async sync(workspaceId: string, entityId: string, client: DraftServerClient): Promise<DraftSyncResult> {
     const key = this.key(workspaceId, entityId);
-    const lifecycle = this.lifecycle(key);
-    if (lifecycle.syncPromise) return lifecycle.syncPromise;
+    const existing = this.lifecycles.get(key);
+    if (existing?.syncPromise) return existing.syncPromise;
+    this.assertActive();
+    const lifecycle = existing ?? this.lifecycle(key);
     const promise = this.syncDraft(workspaceId, entityId, client).finally(() => {
       if (lifecycle.syncPromise === promise) lifecycle.syncPromise = undefined;
     });
@@ -107,8 +130,10 @@ export class NoteDraftController {
     expected?: DraftReconcileExpectation | DraftSyncResult,
   ): Promise<boolean> {
     const key = this.key(workspaceId, entityId);
-    const lifecycle = this.lifecycle(key);
-    if (lifecycle.reconcilePromise) return lifecycle.reconcilePromise;
+    const existing = this.lifecycles.get(key);
+    if (existing?.reconcilePromise) return existing.reconcilePromise;
+    this.assertActive();
+    const lifecycle = existing ?? this.lifecycle(key);
     const expectation = expected ? this.expectation(expected) : undefined;
 
     // Tombstone synchronously, before taking the current tail snapshot.
@@ -156,6 +181,18 @@ export class NoteDraftController {
       .filter(([key]) => !workspaceId
         || (entityId !== undefined ? key === this.key(workspaceId, entityId) : key.startsWith(`${workspaceId}:`)));
     await Promise.all(entries.map(([, lifecycle]) => lifecycle.tail));
+  }
+
+  quiesce(): Promise<void> {
+    if (this.quiescePromise) return this.quiescePromise;
+    this.quiesced = true;
+    this.quiescePromise = this.drainLifecycles();
+    return this.quiescePromise;
+  }
+
+  resume() {
+    this.quiesced = false;
+    this.quiescePromise = undefined;
   }
 
   private async syncDraft(workspaceId: string, entityId: string, client: DraftServerClient): Promise<DraftSyncResult> {
@@ -305,6 +342,35 @@ export class NoteDraftController {
     const run = prior.then(() => operation());
     lifecycle.tail = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  private async drainLifecycles() {
+    for (;;) {
+      const pending = this.pendingLifecycles();
+      await Promise.allSettled(pending);
+      const next = this.pendingLifecycles();
+      if (next.every((promise) => pending.includes(promise))) return;
+    }
+  }
+
+  private pendingLifecycles() {
+    const pending = new Set<Promise<unknown>>(this.activeOperations);
+    for (const lifecycle of this.lifecycles.values()) {
+      pending.add(lifecycle.tail);
+      if (lifecycle.syncPromise) pending.add(lifecycle.syncPromise);
+      if (lifecycle.reconcilePromise) pending.add(lifecycle.reconcilePromise);
+    }
+    return [...pending];
+  }
+
+  private trackOperation<T>(operation: Promise<T>) {
+    const tracked = operation.finally(() => this.activeOperations.delete(tracked));
+    this.activeOperations.add(tracked);
+    return tracked;
+  }
+
+  private assertActive() {
+    if (this.quiesced) throw new NoteDraftControllerQuiescedError();
   }
 
   private lifecycle(key: string) {
