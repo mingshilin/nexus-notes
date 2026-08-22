@@ -5,6 +5,7 @@ import type { AuthClient, AuthUser } from "./auth-client";
 import { TurnstileWidget } from "./TurnstileWidget";
 
 type AuthMode = "login" | "register" | "verify" | "forgot" | "reset";
+const TURNSTILE_RETRY_ERROR = "本次人机验证已失效，请重新验证后再提交。";
 
 function errorCode(error: unknown) {
   return (error as Partial<ApiClientError>)?.code;
@@ -71,7 +72,11 @@ export function AuthPanel({
       await client.resendVerification({ email, turnstileToken });
       setMessage("如果该邮箱需要验证，新的验证码会很快送达。");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "验证码发送失败，请稍后重试。");
+      setError(errorCode(caught) === "CHALLENGE_FAILED"
+        ? TURNSTILE_RETRY_ERROR
+        : caught instanceof Error
+          ? caught.message
+          : "验证码发送失败，请稍后重试。");
     } finally {
       setTurnstileToken("");
       setTurnstileVersion((version) => version + 1);
@@ -107,6 +112,8 @@ export function AuthPanel({
       if (mode === "login" && errorCode(caught) === "CHALLENGE_REQUIRED") {
         setLoginChallenge(true);
         setError("此登录需要完成人机验证后重试。");
+      } else if (needsTurnstile && errorCode(caught) === "CHALLENGE_FAILED") {
+        setError(TURNSTILE_RETRY_ERROR);
       } else if (mode === "login" && errorCode(caught) === "EMAIL_NOT_VERIFIED") {
         setMode("verify");
         setError("邮箱尚未验证，请输入邮件中的验证码。");
@@ -164,7 +171,12 @@ export function AuthPanel({
               key={`${mode}:${turnstileVersion}`}
               siteKey={turnstileSiteKey}
               action={action}
-              onToken={setTurnstileToken}
+              onToken={(token) => {
+                setTurnstileToken(token);
+                if (token) {
+                  setError((current) => current === TURNSTILE_RETRY_ERROR ? "" : current);
+                }
+              }}
             />
           ) : null}
           {error ? <p className="auth-error" role="alert">{error}</p> : null}
