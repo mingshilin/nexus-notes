@@ -66,6 +66,20 @@ describe("NotesClient", () => {
     }));
   });
 
+  it("accepts an explicit idempotency key for retried create and update commands", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ note: { ...note, revision: 2 } })) };
+    const client = new data.NotesClient(api, "ws-1");
+
+    await client.create({ title: "Draft", content: "Body" }, { idempotencyKey: "draft-local-1" });
+    await client.update("note-1", { base_revision: 1, title: "Latest", source: "manual" }, { idempotencyKey: "draft-local-1:update:1" });
+
+    expect(api.request.mock.calls.map(([options]) => options.policy.idempotencyKey)).toEqual([
+      "draft-local-1",
+      "draft-local-1:update:1",
+    ]);
+  });
+
   it("maps create, detail, capture, revision, and restore endpoints", async () => {
     const data = await loadData();
     const api = {

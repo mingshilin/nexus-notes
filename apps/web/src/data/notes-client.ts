@@ -13,6 +13,10 @@ export interface NotesClientOptions {
   createId(): string;
 }
 
+export interface NoteCommandOptions {
+  idempotencyKey?: string;
+}
+
 export class NotesClient {
   private readonly createId: () => string;
 
@@ -57,12 +61,12 @@ export class NotesClient {
     }).then(({ note }) => note);
   }
 
-  create(input: CreateNoteInput) {
-    return this.noteCommand("/api/v2/notes", "POST", input);
+  create(input: CreateNoteInput, options: NoteCommandOptions = {}) {
+    return this.noteCommand("/api/v2/notes", "POST", input, options.idempotencyKey);
   }
 
-  update(noteId: string, input: UpdateNoteInput) {
-    return this.noteCommand(`/api/v2/notes/${encodeURIComponent(noteId)}`, "PATCH", input);
+  update(noteId: string, input: UpdateNoteInput, options: NoteCommandOptions = {}) {
+    return this.noteCommand(`/api/v2/notes/${encodeURIComponent(noteId)}`, "PATCH", input, options.idempotencyKey);
   }
 
   quickCapture(input: QuickCaptureInput) {
@@ -91,7 +95,7 @@ export class NotesClient {
     );
   }
 
-  private noteCommand(path: string, method: "POST" | "PATCH", body: unknown) {
+  private noteCommand(path: string, method: "POST" | "PATCH", body: unknown, idempotencyKey?: string) {
     return this.client.request<{ note: Note }>({
       path,
       method,
@@ -101,7 +105,7 @@ export class NotesClient {
       policy: {
         timeoutMs: 10_000,
         retry: 0,
-        idempotencyKey: this.createId(),
+        idempotencyKey: idempotencyKey ?? this.createId(),
       },
     }).then(({ note }) => note);
   }

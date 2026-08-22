@@ -154,7 +154,6 @@ function AuthenticatedWorkspace({
   const [noteError, setNoteError] = useState<string | null>(null);
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
   const [serverRetryVersion, setServerRetryVersion] = useState(0);
-  const [reconciliation, setReconciliation] = useState<{ workspaceId: string; entityId: string } | null>(null);
   const [selectedDatabaseRecordId, setSelectedDatabaseRecordId] = useState<string | null>(null);
   const [selectedCommentId, setSelectedCommentId] = useState<string | null>(null);
   const [collaborationInitialSection, setCollaborationInitialSection] = useState<"people" | "comments">("people");
@@ -196,13 +195,11 @@ function AuthenticatedWorkspace({
   });
   const activeDraftIdRef = useRef<string | null>(null);
   const activationInFlight = useRef(false);
-  const serverCreationInFlight = useRef(false);
   const userSelectedNote = useRef(false);
   const draftTitleRef = useRef("");
   const draftContentRef = useRef("");
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const mountedRef = useRef(true);
-  const serverNotesByDraft = useRef(new Map<string, Note>());
   const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
   const noteTargets = notes.map((note) => ({
     type: "note" as const,
@@ -259,6 +256,7 @@ function AuthenticatedWorkspace({
     activeDraftIdRef.current = null;
     setActiveDraftId(null);
     userSelectedNote.current = true;
+    setNoteSaving(false);
     setSelectedNoteId(note.id);
     setCreatingNote(false);
     setDraftTitle(note.title);
@@ -304,6 +302,21 @@ function AuthenticatedWorkspace({
     }).finally(() => setNoteSaving(false));
   };
 
+  const updateActiveDraftInput = (title: string, content: string) => {
+    draftTitleRef.current = title;
+    draftContentRef.current = content;
+    setDraftTitle(title);
+    setDraftContent(content);
+    setNoteMessage(null);
+    if (workspaceId && activeDraftIdRef.current) {
+      void draftController.save(workspaceId, activeDraftIdRef.current, title, content).catch(() => {
+        if (mountedRef.current && activeDraftIdRef.current) {
+          setNoteError("本地草稿保存失败，当前内容仍保留在编辑器中。请重试。");
+        }
+      });
+    }
+  };
+
   useEffect(() => () => {
     mountedRef.current = false;
     void draftController.flush().catch(() => undefined);
@@ -338,34 +351,12 @@ function AuthenticatedWorkspace({
 
   useEffect(() => {
     if (!workspaceId || !activeDraftId) return undefined;
-    if (serverCreationInFlight.current) return undefined;
     const draftId = activeDraftId;
-    let cancelled = false;
-    serverCreationInFlight.current = true;
+    let active = true;
     setNoteSaving(true);
     setNoteError(null);
-    const client = new NotesClient(apiClient, workspaceId);
-    const createOrResume = async () => {
-      let saved = serverNotesByDraft.current.get(draftId);
-      if (!saved) {
-        saved = await client.create({ title: draftTitleRef.current, content: draftContentRef.current });
-        serverNotesByDraft.current.set(draftId, saved);
-      }
-      while (saved.title !== draftTitleRef.current || saved.content !== draftContentRef.current) {
-        const title = draftTitleRef.current;
-        const content = draftContentRef.current;
-        saved = await client.update(saved.id, {
-          base_revision: saved.revision,
-          title,
-          content,
-          source: "manual",
-        });
-        serverNotesByDraft.current.set(draftId, saved);
-      }
-      return saved;
-    };
-    void createOrResume().then((saved) => {
-      if (cancelled || !mountedRef.current || activeDraftIdRef.current !== draftId) return;
+    void draftController.sync(workspaceId, draftId, new NotesClient(apiClient, workspaceId)).then((saved) => {
+      if (!active || !mountedRef.current || activeDraftIdRef.current !== draftId) return;
       setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
       setSelectedNoteId(saved.id);
       setCreatingNote(false);
@@ -376,34 +367,18 @@ function AuthenticatedWorkspace({
       draftTitleRef.current = saved.title;
       draftContentRef.current = saved.content;
       setNoteMessage("已保存");
-      setReconciliation({ workspaceId, entityId: draftId });
-      serverNotesByDraft.current.delete(draftId);
     }).catch(() => {
-      if (!cancelled && mountedRef.current && activeDraftIdRef.current === draftId) {
+      if (active && mountedRef.current && activeDraftIdRef.current === draftId) {
         setNoteError("笔记同步失败，草稿仍保留在本地。请重试。");
       }
     }).finally(() => {
-      if (!cancelled) {
-        serverCreationInFlight.current = false;
-        if (mountedRef.current) setNoteSaving(false);
-      }
+      if (active && mountedRef.current) setNoteSaving(false);
     });
     return () => {
-      cancelled = true;
+      active = false;
       void draftController.flush(workspaceId, draftId).catch(() => undefined);
     };
   }, [activeDraftId, apiClient, draftController, serverRetryVersion, workspaceId]);
-
-  useEffect(() => {
-    if (!reconciliation) return undefined;
-    let cancelled = false;
-    void draftController.reconcile(reconciliation.workspaceId, reconciliation.entityId).then(() => {
-      if (!cancelled) setReconciliation(null);
-    }).catch(() => {
-      if (!cancelled) setNoteError("服务器已创建笔记，但本地草稿清理失败；内容仍已打开。");
-    });
-    return () => { cancelled = true; };
-  }, [draftController, reconciliation]);
 
   const abortRecoveryRequests = () => {
     requestControllers.current.forEach((controller) => controller.abort());
@@ -1024,8 +999,8 @@ function AuthenticatedWorkspace({
           <div className="editor-copy">
             <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
             <h1>{draftTitle.trim() || "未命名笔记"}</h1>
-            <label className="note-editor-field">标题<input ref={titleInputRef} aria-label="笔记标题" value={draftTitle} onChange={(event) => { draftTitleRef.current = event.target.value; setDraftTitle(event.target.value); setNoteMessage(null); }} /></label>
-            <label className="note-editor-field">内容<textarea aria-label="笔记内容" value={draftContent} onChange={(event) => { draftContentRef.current = event.target.value; setDraftContent(event.target.value); setNoteMessage(null); }} /></label>
+            <label className="note-editor-field">标题<input ref={titleInputRef} aria-label="笔记标题" value={draftTitle} onChange={(event) => updateActiveDraftInput(event.target.value, draftContentRef.current)} /></label>
+            <label className="note-editor-field">内容<textarea aria-label="笔记内容" value={draftContent} onChange={(event) => updateActiveDraftInput(draftTitleRef.current, event.target.value)} /></label>
             <div className="note-editor-actions">
               <button type="button" disabled={noteSaving || (!creatingNote && !draftTitle.trim() && !draftContent.trim())} onClick={saveNote}>{creatingNote && noteError ? "重试同步" : "保存笔记"}</button>
               {noteMessage ? <p role="status">{noteMessage}</p> : null}

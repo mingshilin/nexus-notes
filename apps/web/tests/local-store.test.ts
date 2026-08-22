@@ -14,6 +14,21 @@ afterEach(async () => {
 });
 
 describe("BetaLocalStore", () => {
+  it("reports unavailable IndexedDB as a recoverable persistence failure", async () => {
+    const web = await loadWeb();
+    const Store = web.BetaLocalStore as new (options: Record<string, unknown>) => {
+      listDrafts(workspaceId: string): Promise<Array<Record<string, unknown>>>;
+    };
+    const originalIndexedDb = globalThis.indexedDB;
+    Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: undefined });
+    try {
+      const store = new Store({ databaseName: `nexus-test-${crypto.randomUUID()}` });
+      await expect(store.listDrafts("ws-1")).rejects.toThrow("IndexedDB is unavailable");
+    } finally {
+      Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: originalIndexedDb });
+    }
+  });
+
   it("persists drafts, ordered operations, and sync cursors", async () => {
     const web = await loadWeb();
     expect(web.BetaLocalStore).toBeTypeOf("function");
@@ -55,9 +70,11 @@ describe("BetaLocalStore", () => {
 
     await store.saveDraft({ workspace_id: "ws-1", entity_id: "shared-id", title: "Older", content: "one", updated_at: "2026-08-22T00:00:00.000Z" });
     await store.saveDraft({ workspace_id: "ws-1", entity_id: "newest", title: "Newest", content: "two", updated_at: "2026-08-22T00:02:00.000Z" });
+    await store.saveDraft({ workspace_id: "ws-1", entity_id: "tie-z", title: "Tie Z", content: "four", updated_at: "2026-08-22T00:04:00.000Z" });
+    await store.saveDraft({ workspace_id: "ws-1", entity_id: "tie-a", title: "Tie A", content: "five", updated_at: "2026-08-22T00:04:00.000Z" });
     await store.saveDraft({ workspace_id: "ws-2", entity_id: "shared-id", title: "Other workspace", content: "three", updated_at: "2026-08-22T00:03:00.000Z" });
 
-    expect((await store.listDrafts("ws-1")).map((draft) => draft.entity_id)).toEqual(["newest", "shared-id"]);
+    expect((await store.listDrafts("ws-1")).map((draft) => draft.entity_id)).toEqual(["tie-z", "tie-a", "newest", "shared-id"]);
 
     await store.removeDraft("ws-1", "shared-id");
 

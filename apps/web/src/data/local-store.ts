@@ -10,6 +10,16 @@ export interface LocalDraft {
   title: string;
   content: string;
   updated_at: string;
+  server_note_id?: string;
+  server_revision?: number;
+  server_updated_at?: string;
+  server_update_key?: string;
+  server_update_generation?: number;
+  server_create_title?: string;
+  server_create_content?: string;
+  server_update_title?: string;
+  server_update_content?: string;
+  server_update_base_revision?: number;
 }
 
 export interface QuerySnapshot {
@@ -46,11 +56,10 @@ function transactionDone(transaction: IDBTransaction) {
 
 export class BetaLocalStore {
   private readonly databaseName: string;
-  private readonly database: Promise<IDBDatabase>;
+  private databasePromise?: Promise<IDBDatabase>;
 
   constructor(options: { databaseName?: string } = {}) {
     this.databaseName = options.databaseName ?? "nexus-notes-beta";
-    this.database = this.open();
   }
 
   async saveDraft(draft: LocalDraft) {
@@ -62,18 +71,18 @@ export class BetaLocalStore {
   }
 
   async listDrafts(workspaceId: string): Promise<LocalDraft[]> {
-    const database = await this.database;
+    const database = await this.getDatabase();
     const transaction = database.transaction("drafts", "readonly");
     const done = transactionDone(transaction);
     const drafts = await requestResult(transaction.objectStore("drafts").getAll()) as LocalDraft[];
     await done;
     return drafts
       .filter((draft) => draft.workspace_id === workspaceId)
-      .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+      .sort((left, right) => right.updated_at.localeCompare(left.updated_at) || right.entity_id.localeCompare(left.entity_id));
   }
 
   async removeDraft(workspaceId: string, entityId: string) {
-    const database = await this.database;
+    const database = await this.getDatabase();
     const transaction = database.transaction("drafts", "readwrite");
     const done = transactionDone(transaction);
     transaction.objectStore("drafts").delete(this.entityKey(workspaceId, entityId));
@@ -97,7 +106,7 @@ export class BetaLocalStore {
   }
 
   async listOperations(workspaceId: string): Promise<SyncOperation[]> {
-    const database = await this.database;
+    const database = await this.getDatabase();
     const transaction = database.transaction("operations", "readonly");
     const done = transactionDone(transaction);
     const all = await requestResult(transaction.objectStore("operations").getAll()) as SyncOperation[];
@@ -108,7 +117,7 @@ export class BetaLocalStore {
   }
 
   async removeOperation(operationId: string) {
-    const database = await this.database;
+    const database = await this.getDatabase();
     const transaction = database.transaction("operations", "readwrite");
     const done = transactionDone(transaction);
     transaction.objectStore("operations").delete(operationId);
@@ -125,7 +134,7 @@ export class BetaLocalStore {
   }
 
   async destroy() {
-    const database = await this.database;
+    const database = await this.getDatabase();
     database.close();
     await new Promise<void>((resolve, reject) => {
       const request = indexedDB.deleteDatabase(this.databaseName);
@@ -136,6 +145,7 @@ export class BetaLocalStore {
   }
 
   private async open() {
+    if (typeof indexedDB === "undefined") throw new Error("IndexedDB is unavailable");
     return new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open(this.databaseName, DATABASE_VERSION);
       request.onerror = () => reject(request.error ?? new Error("Failed to open IndexedDB"));
@@ -152,7 +162,7 @@ export class BetaLocalStore {
   }
 
   private async put(storeName: StoreName, value: unknown) {
-    const database = await this.database;
+    const database = await this.getDatabase();
     const transaction = database.transaction(storeName, "readwrite");
     const done = transactionDone(transaction);
     transaction.objectStore(storeName).put(value);
@@ -160,7 +170,7 @@ export class BetaLocalStore {
   }
 
   private async get<T>(storeName: StoreName, key: IDBValidKey): Promise<T | null> {
-    const database = await this.database;
+    const database = await this.getDatabase();
     const transaction = database.transaction(storeName, "readonly");
     const done = transactionDone(transaction);
     const value = await requestResult(transaction.objectStore(storeName).get(key));
@@ -170,5 +180,9 @@ export class BetaLocalStore {
 
   private entityKey(workspaceId: string, entityId: string) {
     return `${workspaceId}:${entityId}`;
+  }
+
+  private getDatabase() {
+    return this.databasePromise ??= this.open();
   }
 }
