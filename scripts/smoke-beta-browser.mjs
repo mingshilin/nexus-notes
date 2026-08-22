@@ -1,7 +1,8 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_URL = process.env.NEXUS_NOTES_BETA_URL ?? "http://127.0.0.1:4173/";
 const DATABASE_NAME = "nexus-notes-beta";
@@ -12,17 +13,20 @@ function parseArgs(argv) {
   const options = {
     url: DEFAULT_URL,
     headed: false,
-    requireAuth: process.env.NEXUS_NOTES_BETA_REQUIRE_AUTH === "1",
+    publicShell: false,
+    requireAuth: process.env.NEXUS_NOTES_BETA_REQUIRE_AUTH !== "0",
     userDataDir: process.env[PROFILE_ENV],
     avatarFile: process.env[AVATAR_ENV],
   };
   for (const arg of argv) {
     if (arg === "--headed") options.headed = true;
     else if (arg === "--require-auth") options.requireAuth = true;
+    else if (arg === "--public-shell") options.publicShell = true;
     else if (arg.startsWith("--url=")) options.url = arg.slice("--url=".length);
     else if (arg.startsWith("--user-data-dir=")) options.userDataDir = arg.slice("--user-data-dir=".length);
     else if (arg.startsWith("--avatar-file=")) options.avatarFile = arg.slice("--avatar-file=".length);
   }
+  if (options.publicShell) options.requireAuth = false;
   return options;
 }
 
@@ -58,12 +62,33 @@ function port() {
   return 43000 + Math.floor(Math.random() * 5000);
 }
 
-function externalPath(value, label) {
+function pathInside(parent, candidate) {
+  const remainder = relative(parent, candidate);
+  return !remainder || (!isAbsolute(remainder) && !remainder.startsWith(".." + (process.platform === "win32" ? "\\" : "/")) && remainder !== "..");
+}
+
+function assertOutsideRepository(candidate, label) {
+  const repository = realpathSync.native(resolve(process.cwd()));
+  if (pathInside(repository, candidate)) throw new Error(label + " must be outside the repository");
+}
+
+export function externalPath(value, label, kind = "file") {
   const candidate = resolve(value);
-  const remainder = relative(resolve(process.cwd()), candidate);
-  const inside = !remainder || (!remainder.startsWith(".." + (process.platform === "win32" ? "\\" : "/")) && remainder !== "..");
-  if (inside) throw new Error(label + " must be outside the repository");
-  return candidate;
+  assertOutsideRepository(candidate, label);
+  if (!existsSync(candidate)) throw new Error(label + " does not exist");
+
+  const canonical = realpathSync.native(candidate);
+  const canonicalParents = [
+    realpathSync.native(dirname(candidate)),
+    realpathSync.native(dirname(canonical)),
+  ];
+  assertOutsideRepository(canonical, label);
+  canonicalParents.forEach((parent) => assertOutsideRepository(parent, label + " parent"));
+
+  const stats = statSync(canonical);
+  if (kind === "directory" && !stats.isDirectory()) throw new Error(label + " must be a directory");
+  if (kind === "file" && !stats.isFile()) throw new Error(label + " must be a file");
+  return canonical;
 }
 
 function printSkip(reason) {
@@ -143,7 +168,8 @@ async function evaluate(cdp, expression) {
 async function waitFor(cdp, expression, label, timeoutMs = 15_000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    if (await evaluate(cdp, expression)) return true;
+    const value = await evaluate(cdp, expression);
+    if (value) return value;
     await new Promise((resolveResult) => setTimeout(resolveResult, 200));
   }
   throw new Error(label + " timed out");
@@ -159,22 +185,37 @@ async function waitForNode(predicate, label, timeoutMs = 15_000) {
 }
 
 const accessibleName = "(node) => { const ids = node.getAttribute('aria-labelledby')?.split(/\\s+/) ?? []; const labelled = ids.map((id) => document.getElementById(id)?.textContent ?? '').join(' '); return (node.getAttribute('aria-label') || labelled || node.getAttribute('title') || node.textContent || '').replace(/\\s+/g, ' ').trim(); }";
+const visibleNode = "(node) => { const style=getComputedStyle(node); const rect=node.getBoundingClientRect(); return style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none' && rect.width > 0 && rect.height > 0; }";
 
 // CDP locators mirror the required page.getByRole/getByLabel/getByText contract without storing a Playwright profile.
 function getByRole(cdp, role, name) {
   const selector = role === "button" ? "button,[role='button']" : "[role='" + role + "']";
   const lookup = "(node) => " + accessibleName + "(node) === " + JSON.stringify(name);
-  const expression = (action) => "(() => { const node = [...document.querySelectorAll(" + JSON.stringify(selector) + ")].find(" + lookup + "); if (!node) return false; " + action + " })()";
+  const nodeExpression = "[...document.querySelectorAll(" + JSON.stringify(selector) + ")].find((candidate) => (" + lookup + ")(candidate) && (" + visibleNode + ")(candidate))";
+  const expression = (action) => "(() => { const node = " + nodeExpression + "; if (!node) return false; " + action + " })()";
   return {
     async waitFor() {
       return waitFor(cdp, expression("const rect=node.getBoundingClientRect(); const style=getComputedStyle(node); return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;"), "role " + role + " " + name);
     },
-    async click() { return waitFor(cdp, expression("node.click(); return true;"), "click role " + role + " " + name); },
+    async click() {
+      const pointExpression = "(() => { const node = " + nodeExpression + "; if (!node) return false; const rect=node.getBoundingClientRect(); const x=rect.left + rect.width / 2; const y=rect.top + rect.height / 2; const hit=document.elementFromPoint(x,y); return hit && (hit === node || node.contains(hit)) ? { x, y } : false; })()";
+      const point = await waitFor(cdp, pointExpression, "hit-test role " + role + " " + name);
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, x: point.x, y: point.y });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, x: point.x, y: point.y });
+      return true;
+    },
     async focus() { return waitFor(cdp, expression("node.focus(); return document.activeElement === node;"), "focus role " + role + " " + name); },
     async press(key) {
-      await evaluate(cdp, "(() => { const node = [...document.querySelectorAll(" + JSON.stringify(selector) + ")].find(" + lookup + "); if (!node) throw new Error('locator not found'); node.dispatchEvent(new KeyboardEvent('keydown', { key: " + JSON.stringify(key) + ", bubbles: true })); node.dispatchEvent(new KeyboardEvent('keyup', { key: " + JSON.stringify(key) + ", bubbles: true })); return true; })()");
+      await this.focus();
+      await pressKey(cdp, key);
     },
   };
+}
+
+async function pressKey(cdp, key) {
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key, code: key.startsWith("Arrow") ? key : key === "Escape" ? "Escape" : undefined });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key.startsWith("Arrow") ? key : key === "Escape" ? "Escape" : undefined });
 }
 
 function getByLabel(cdp, name) {
@@ -211,12 +252,22 @@ function networkEvidence(cdp) {
   cdp.on("Network.requestWillBeSent", (event) => {
     const url = new URL(event.request.url);
     if (url.pathname.includes("/api/v2/notes") || url.pathname.includes("/api/v2/profile")) {
-      requests.push({ id: event.requestId, url: url.pathname, method: event.request.method, headers: event.request.headers, postData: event.request.postData });
+      requests.push({
+        id: event.requestId,
+        loaderId: event.loaderId,
+        url: url.pathname,
+        method: event.request.method,
+        headers: event.request.headers,
+        hasPostData: event.request.hasPostData === true,
+        postData: event.request.postData,
+      });
     }
   });
   cdp.on("Network.responseReceived", (event) => {
     const url = new URL(event.response.url);
-    if (url.pathname.includes("/api/v2/profile")) responses.push({ url: url.pathname, status: event.response.status, headers: event.response.headers });
+    if (url.pathname.includes("/api/v2/profile")) {
+      responses.push({ id: event.requestId, url: url.pathname, status: event.response.status, headers: event.response.headers });
+    }
   });
   return { requests, responses };
 }
@@ -230,19 +281,80 @@ async function readDraft(cdp, title) {
   return evaluate(cdp, expression);
 }
 
+async function navigateToNewDocument(cdp, url) {
+  const previousTimeOrigin = await evaluate(cdp, "performance.timeOrigin");
+  const frameNavigation = new Promise((resolveResult, reject) => {
+    const timeout = setTimeout(() => {
+      removeListener();
+      reject(new Error("new document navigation timed out"));
+    }, 30_000);
+    const removeListener = cdp.on("Page.frameNavigated", (event) => {
+      if (event.frame.parentId) return;
+      clearTimeout(timeout);
+      removeListener();
+      resolveResult(event.frame);
+    });
+  });
+  const navigation = await cdp.send("Page.navigate", { url });
+  const frame = await frameNavigation;
+  await waitFor(cdp, "document.readyState === 'complete' && performance.timeOrigin !== " + JSON.stringify(previousTimeOrigin), "new loader/document");
+  return {
+    loaderId: navigation.loaderId ?? frame.loaderId,
+    previousTimeOrigin,
+    timeOrigin: await evaluate(cdp, "performance.timeOrigin"),
+  };
+}
+
 async function installLostResponseFault(cdp) {
-  const state = { responseFailed: false };
+  const state = { responseFailed: false, faultedRequest: null, error: null };
   const removeListener = cdp.on("Fetch.requestPaused", async (event) => {
     const url = new URL(event.request.url);
     const write = ["POST", "PATCH", "PUT"].includes(event.request.method) && url.pathname.includes("/api/v2/notes");
     if (write && event.responseStatusCode !== undefined && !state.responseFailed) {
       state.responseFailed = true;
+      const idempotencyKey = header(event.request.headers, "idempotency-key");
+      state.faultedRequest = {
+        id: event.networkId ?? null,
+        fetchId: event.requestId,
+        idempotencyKey,
+        url: url.pathname,
+      };
+      if (!idempotencyKey) state.error = new Error("Faulted note write did not carry an idempotency key");
       await cdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "Failed" });
       return;
     }
     await cdp.send("Fetch.continueRequest", { requestId: event.requestId });
   });
   await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "*/*", requestStage: "Request" }, { urlPattern: "*/*", requestStage: "Response" }] });
+  return { state, async close() { removeListener(); await cdp.send("Fetch.disable"); } };
+}
+
+async function installRawAvatarCapture(cdp) {
+  const state = { request: null };
+  const removeListener = cdp.on("Fetch.requestPaused", async (event) => {
+    const url = new URL(event.request.url);
+    if (url.pathname === "/api/v2/profile/avatar" && event.request.method === "POST") {
+      let postData = event.request.postData;
+      if (!postData && event.request.hasPostData) {
+        try {
+          postData = (await cdp.send("Fetch.getRequestPostData", { requestId: event.requestId })).postData;
+        } catch {
+          postData = undefined;
+        }
+      }
+      state.request = {
+        id: event.networkId ?? null,
+        fetchId: event.requestId,
+        url: url.pathname,
+        method: event.request.method,
+        headers: event.request.headers,
+        hasPostData: event.request.hasPostData === true,
+        postData,
+      };
+    }
+    await cdp.send("Fetch.continueRequest", { requestId: event.requestId });
+  });
+  await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "*/api/v2/profile/avatar", requestStage: "Request" }] });
   return { state, async close() { removeListener(); await cdp.send("Fetch.disable"); } };
 }
 
@@ -262,10 +374,26 @@ async function runPublicShell(cdp) {
   return result;
 }
 
+async function runZoomHitTest(cdp) {
+  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await waitFor(cdp, "window.visualViewport?.scale >= 1.99", "200% page zoom");
+  const geometryExpression = `(() => { const rect=(node)=>{const value=node?.getBoundingClientRect(); return value ? {left:value.left,top:value.top,right:value.right,bottom:value.bottom,width:value.width,height:value.height} : null;}; const visible=(node)=>node && getComputedStyle(node).display!=='none' && getComputedStyle(node).visibility!=='hidden' && getComputedStyle(node).pointerEvents!=='none' && node.getBoundingClientRect().width>0 && node.getBoundingClientRect().height>0; const named=(name)=>[...document.querySelectorAll('button,[role=button]')].find((node)=>visible(node) && (node.getAttribute('aria-label') || node.textContent || '').replace(/\\s+/g,' ').trim()===name); const editorNodes=[...document.querySelectorAll('input[aria-label="笔记标题"],textarea[aria-label="笔记内容"]')].filter(visible); const editorRects=editorNodes.map(rect); const overlaps=(left,right)=>Boolean(left && right && left.left < right.right && left.right > right.left && left.top < right.bottom && left.bottom > right.top); const hit=(node)=>{if(!node) return false; const value=node.getBoundingClientRect(); const target=document.elementFromPoint(value.left+value.width/2,value.top+value.height/2); return Boolean(target && (target===node || node.contains(target)));}; const create=named('新建笔记'); const account=named('账户'); return {scale:window.visualViewport?.scale ?? 0,create:rect(create),account:rect(account),editor:editorRects,createHits:hit(create),accountHits:hit(account),createOverlapsEditor:editorRects.some((item)=>overlaps(rect(create),item)),accountOverlapsEditor:editorRects.some((item)=>overlaps(rect(account),item))}; })()`;
+  const geometry = await evaluate(cdp, geometryExpression);
+  const failures = [];
+  if (geometry.scale < 1.99) failures.push("visual viewport scale is below 200%");
+  if (!geometry.create || !geometry.account || geometry.editor.length === 0) failures.push("create/account/editor geometry is incomplete");
+  if (!geometry.createHits || !geometry.accountHits) failures.push("create/account center failed real hit testing");
+  if (geometry.createOverlapsEditor || geometry.accountOverlapsEditor) failures.push("create/account control overlaps editor input");
+  if (failures.length) throw new Error("200% zoom geometry gate failed: " + failures.join("; "));
+  return geometry;
+}
+
 async function runAuthenticated(cdp, debugPort, options, evidence) {
   await getByRole(cdp, "button", "新建笔记").waitFor();
   await getByRole(cdp, "button", "新建笔记").click();
   const title = "Phase 1 " + Date.now();
+  await getByLabel(cdp, "笔记标题").waitFor();
   await getByLabel(cdp, "笔记标题").fill(title);
   await getByLabel(cdp, "笔记内容").fill("IndexedDB recovery " + title);
   const fault = await installLostResponseFault(cdp);
@@ -274,20 +402,29 @@ async function runAuthenticated(cdp, debugPort, options, evidence) {
   } finally {
     await fault.close();
   }
+  if (fault.state.error) throw fault.state.error;
   await waitForNode(async () => Boolean(await readDraft(cdp, title)), "IndexedDB draft persistence", 20_000);
   const draft = await readDraft(cdp, title);
   if (!draft) throw new Error("IndexedDB draft was not found after failed save");
-  await cdp.send("Page.reload", { ignoreCache: true });
-  await waitFor(cdp, "document.readyState === 'complete'", "reload after failed save");
+  await evaluate(cdp, "document.activeElement?.blur(); document.body.focus(); true");
+  const zoom = await runZoomHitTest(cdp);
+  await getByRole(cdp, "button", "账户").click();
+  await pressKey(cdp, "Escape");
+  await getByRole(cdp, "button", "新建笔记").click();
+  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+  const reloadEvidence = await navigateToNewDocument(cdp, await evaluate(cdp, "location.href"));
   await waitFor(cdp, "document.querySelector(\"input[aria-label='笔记标题']\")?.value === " + JSON.stringify(title), "IndexedDB draft reload", 30_000);
 
-  const keys = new Map();
-  for (const request of evidence.requests.filter(({ url, method }) => url.includes("/api/v2/notes") && ["POST", "PATCH", "PUT"].includes(method))) {
-    const key = header(request.headers, "idempotency-key");
-    if (key) keys.set(key, (keys.get(key) ?? 0) + 1);
-  }
-  const replay = [...keys.entries()].find(([, count]) => count >= 2);
-  if (!replay) throw new Error("Live idempotency crash/replay evidence missing");
+  const faultedKey = fault.state.faultedRequest?.idempotencyKey;
+  const faultedNetworkId = fault.state.faultedRequest?.id;
+  if (!faultedKey) throw new Error("Faulted note write idempotency key was not captured");
+  const replay = await waitForNode(() => {
+    const exact = evidence.requests.filter(({ url, method, headers }) => url.includes("/api/v2/notes") && ["POST", "PATCH", "PUT"].includes(method) && header(headers, "idempotency-key") === faultedKey);
+    return exact.length >= 2 && exact.some(({ loaderId }) => loaderId === reloadEvidence.loaderId) ? exact : false;
+  }, "post-reload replay with the faulted idempotency key", 30_000);
+  const faultedEvidence = evidence.requests.find(({ id }) => id === faultedNetworkId)
+    ?? evidence.requests.find(({ headers }) => header(headers, "idempotency-key") === faultedKey && header(headers, "idempotency-key") !== "");
+  if (!faultedEvidence || faultedEvidence.loaderId === reloadEvidence.loaderId) throw new Error("Faulted and replayed requests did not cross a document loader boundary");
 
   await getByRole(cdp, "button", "账户").click();
   await getByRole(cdp, "menuitem", "个人中心").click();
@@ -295,35 +432,52 @@ async function runAuthenticated(cdp, debugPort, options, evidence) {
   await getByLabel(cdp, "昵称").fill(title);
   await getByRole(cdp, "button", "保存个人资料").click();
   await waitForNode(() => evidence.requests.some(({ url, method }) => url === "/api/v2/profile" && method === "PATCH"), "profile update request", 20_000);
-  await cdp.send("Page.reload", { ignoreCache: true });
-  await waitFor(cdp, "document.readyState === 'complete'", "profile reload");
+  const profileReload = await navigateToNewDocument(cdp, await evaluate(cdp, "location.href"));
   await getByRole(cdp, "button", "账户").click();
   await getByRole(cdp, "menuitem", "个人中心").click();
   await getByRole(cdp, "tab", "个人资料").waitFor();
-  await Promise.race([getByText(cdp, title).waitFor(), getByLabel(cdp, "昵称").waitFor()]);
+  await waitForNode(async () => (await getByLabel(cdp, "昵称").value()) === title, "profile nickname persistence after confirmed reload", 30_000);
 
+  const avatarCapture = await installRawAvatarCapture(cdp);
   await setFileInput(cdp, externalPath(options.avatarFile, AVATAR_ENV));
   await getByRole(cdp, "button", "上传头像").click();
-  await waitForNode(() => evidence.requests.some(({ url, method }) => url.includes("/profile/avatar") && method === "POST"), "raw avatar request", 20_000);
-  const avatarRequest = evidence.requests.find(({ url, method }) => url.includes("/profile/avatar") && method === "POST");
-  const avatarResponse = evidence.responses.find(({ url }) => url.includes("/profile/avatar"));
-  if (!avatarRequest || !/^image\/(png|jpeg|webp)$/i.test(header(avatarRequest.headers, "content-type"))) throw new Error("Avatar request was not raw image File transport");
-  if (avatarRequest.postData?.startsWith("data:") || avatarRequest.postData?.includes("base64")) throw new Error("Avatar request used a base64 substitute");
-  if (!avatarResponse || !/(private|no-store)/i.test(header(avatarResponse.headers, "cache-control"))) throw new Error("Avatar response is missing private/no-store cache control");
+  try {
+    await waitForNode(() => avatarCapture.state.request !== null, "raw avatar request", 20_000);
+    await waitForNode(() => {
+      const requestId = avatarCapture.state.request?.id;
+      return Boolean(requestId && evidence.responses.some(({ id, url }) => url.includes("/profile/avatar") && id === requestId));
+    }, "correlated avatar response", 20_000);
+  } finally {
+    await avatarCapture.close();
+  }
+  const avatarRequest = avatarCapture.state.request;
+  const avatarResponse = evidence.responses.find(({ id, url }) => url.includes("/profile/avatar") && id === avatarRequest?.id);
+  if (!avatarRequest?.id || !avatarResponse) throw new Error("Avatar request and response did not share a network request identity");
+  if (avatarResponse.status < 200 || avatarResponse.status >= 300) throw new Error("Avatar response was not 2xx: " + avatarResponse.status);
+  if (!avatarRequest.hasPostData || typeof avatarRequest.postData !== "string" || avatarRequest.postData.length === 0) throw new Error("Avatar request did not expose a raw body");
+  if (!/^image\/(png|jpeg|webp)$/i.test(header(avatarRequest.headers, "content-type"))) throw new Error("Avatar request was not raw image File transport");
+  if (/^data:/i.test(avatarRequest.postData) || /base64/i.test(avatarRequest.postData)) throw new Error("Avatar request used a base64 substitute");
+  if (!/(private|no-store)/i.test(header(avatarResponse.headers, "cache-control"))) throw new Error("Avatar response is missing private/no-store cache control");
 
   await getByRole(cdp, "tab", "个人资料").focus();
   await getByRole(cdp, "tab", "个人资料").press("ArrowRight");
-  if (!await evaluate(cdp, "document.activeElement?.textContent?.trim() === '安全'")) throw new Error("Account tab focus did not move with ArrowRight");
+  if (!await evaluate(cdp, "document.activeElement?.id === 'account-tab-security'")) throw new Error("Account tab focus did not move with ArrowRight");
   await getByRole(cdp, "button", "账户").click();
-  await evaluate(cdp, "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true");
+  await pressKey(cdp, "Escape");
   if (!await evaluate(cdp, "document.activeElement?.getAttribute('aria-label') === '账户' && document.querySelector('[role=menu]') === null")) throw new Error("Account menu focus was not restored after Escape");
 
-  if (await evaluate(cdp, "Boolean(document.querySelector('button[aria-label=\\\"打开检查器\\\"]'))")) {
-    await getByRole(cdp, "button", "打开检查器").click();
-    await getByRole(cdp, "dialog", "检查器").waitFor();
-    await getByRole(cdp, "button", "关闭检查器").click();
-    if (await evaluate(cdp, "Boolean(document.querySelector('[role=dialog][aria-label=\\\"检查器\\\"]'))")) throw new Error("Inspector modal did not close");
-  }
+  await getByRole(cdp, "button", "笔记").waitFor();
+  await getByRole(cdp, "button", "笔记").click();
+  const inspectorOpener = getByRole(cdp, "button", "打开检查器");
+  await inspectorOpener.waitFor();
+  await inspectorOpener.click();
+  await getByRole(cdp, "dialog", "检查器").waitFor();
+  const inspectorFocus = await evaluate(cdp, "(() => { const dialog=document.querySelector('[role=dialog][aria-label=\\\"检查器\\\"]'); return { contained:Boolean(dialog && dialog.contains(document.activeElement)), active:document.activeElement?.getAttribute('aria-label') ?? document.activeElement?.tagName ?? null }; })()");
+  if (!inspectorFocus.contained) throw new Error("Inspector modal did not contain focus");
+  await pressKey(cdp, "Escape");
+  await waitFor(cdp, "!document.querySelector('[role=dialog][aria-label=\\\"检查器\\\"]')", "inspector Escape close");
+  if (!await evaluate(cdp, "document.activeElement === document.querySelector('button[aria-label=\\\"打开检查器\\\"]')")) throw new Error("Inspector opener focus was not restored");
+
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 500, deviceScaleFactor: 2, mobile: true });
   const editor = getByLabel(cdp, "笔记内容");
   await editor.waitFor();
@@ -335,19 +489,38 @@ async function runAuthenticated(cdp, debugPort, options, evidence) {
 
   const secondTarget = await openTarget(debugPort, options.url);
   const second = connect(secondTarget.webSocketDebuggerUrl);
+  let blocked;
   try {
+    await second.send("Page.enable");
     await second.send("Runtime.enable");
     await waitFor(second, "document.readyState === 'complete'", "second tab");
-    const blockedName = "task12-multitab-" + Date.now();
-    await evaluate(second, "window.__task12Db=await new Promise((resolveResult,reject)=>{const request=indexedDB.open(" + JSON.stringify(blockedName) + ",1);request.onerror=()=>reject(request.error);request.onsuccess=()=>resolveResult(request.result);});true");
-    await evaluate(cdp, "window.__task12Delete={blocked:false,done:false};const request=indexedDB.deleteDatabase(" + JSON.stringify(blockedName) + ");request.onblocked=()=>window.__task12Delete.blocked=true;request.onsuccess=()=>window.__task12Delete.done=true;true");
-    await waitFor(cdp, "window.__task12Delete?.blocked===true", "blocked IndexedDB deletion");
-    await evaluate(second, "window.__task12Db.close();true");
-    await waitFor(cdp, "window.__task12Delete?.done===true", "IndexedDB deletion recovery");
+    await getByRole(second, "button", "新建笔记").click();
+    const heldTitle = "Task 12 held " + Date.now();
+    await getByLabel(second, "笔记标题").fill(heldTitle);
+    await waitForNode(async () => Boolean(await readDraft(second, heldTitle)), "second tab real local-store connection", 20_000);
+    await getByRole(cdp, "button", "账户").click();
+    await getByRole(cdp, "menuitem", "退出登录").click();
+    await getByText(cdp, "本地数据清理失败").waitFor();
+    blocked = { database: DATABASE_NAME, path: "App logout -> BetaLocalStore.destroy()", remoteAccountDeleted: false };
+    const released = await navigateToNewDocument(second, "about:blank");
+    await getByRole(cdp, "button", "重试清理本地数据").click();
+    await waitFor(cdp, "Boolean(document.querySelector('[aria-label=\\\"账户认证\\\"]'))", "local cleanup retry recovery", 30_000);
+    blocked.releasedLoaderId = released.loaderId;
+    blocked.recovered = true;
   } finally {
     second.close();
   }
-  return { title, draft, replay: { idempotencyKey: replay[0], attempts: replay[1] }, avatar: { endpoint: avatarRequest.url, contentType: header(avatarRequest.headers, "content-type"), cacheControl: header(avatarResponse.headers, "cache-control") }, mobile, indexedDb: { blocked: true, recovered: true } };
+  return {
+    title,
+    draft,
+    replay: { idempotencyKey: faultedKey, attempts: replay.length, postReloadAttempts: replay.filter(({ loaderId }) => loaderId === reloadEvidence.loaderId).length, reload: reloadEvidence },
+    profile: { reload: profileReload, nickname: title },
+    avatar: { endpoint: avatarRequest.url, requestId: avatarRequest.id, responseId: avatarResponse.id, status: avatarResponse.status, contentType: header(avatarRequest.headers, "content-type"), rawBodyBytes: avatarRequest.postData.length, cacheControl: header(avatarResponse.headers, "cache-control") },
+    zoom,
+    mobile,
+    inspector: { focusContained: inspectorFocus.contained, escapeClosed: true, openerRestored: true },
+    indexedDb: blocked,
+  };
 }
 
 async function stop(browser) {
@@ -362,13 +535,13 @@ async function stop(browser) {
 async function run() {
   const options = parseArgs(process.argv.slice(2));
   const authReady = Boolean(options.userDataDir && options.avatarFile);
-  if (options.requireAuth && !authReady) {
+  if (!options.publicShell && !authReady) {
     printSkip(options.userDataDir ? "AVATAR_FIXTURE_UNSET" : "AUTH_FIXTURE_UNSET");
     process.exitCode = 2;
     return;
   }
-  if (options.userDataDir) options.userDataDir = externalPath(options.userDataDir, PROFILE_ENV);
-  if (options.avatarFile && !existsSync(resolve(options.avatarFile))) throw new Error(AVATAR_ENV + " does not exist");
+  if (options.userDataDir) options.userDataDir = externalPath(options.userDataDir, PROFILE_ENV, "directory");
+  if (options.avatarFile) options.avatarFile = externalPath(options.avatarFile, AVATAR_ENV, "file");
   const browserPath = await findBrowser();
   const debugPort = port();
   const temporaryProfile = options.userDataDir ? null : mkdtempSync(join(tmpdir(), "nexus-beta-browser-"));
@@ -395,11 +568,7 @@ async function run() {
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
     const evidence = networkEvidence(cdp);
     console.log(JSON.stringify({ status: "PASS", scenario: "public-shell", evidence: await runPublicShell(cdp) }));
-    if (!authReady) {
-      printSkip("AUTH_FIXTURE_UNSET");
-      if (options.requireAuth) process.exitCode = 2;
-      return;
-    }
+    if (options.publicShell) return;
     console.log(JSON.stringify({ status: "PASS", scenario: "authenticated-phase1", evidence: await runAuthenticated(cdp, debugPort, options, evidence) }));
   } finally {
     cdp?.close();
@@ -411,7 +580,9 @@ async function run() {
   }
 }
 
-run().catch((error) => {
-  console.error(JSON.stringify({ status: "FAIL", reason: error instanceof Error ? error.message : String(error) }));
-  process.exit(1);
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  run().catch((error) => {
+    console.error(JSON.stringify({ status: "FAIL", reason: error instanceof Error ? error.message : String(error) }));
+    process.exit(1);
+  });
+}

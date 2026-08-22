@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { checkRemoteDeploy } from "../../scripts/verify-deploy-readiness.mjs";
+import {
+  checkRemoteDeploy,
+  INITIAL_CHUNK_BUDGET_BYTES,
+} from "../../scripts/verify-deploy-readiness.mjs";
 
 const baseUrl = "https://beta.example";
 const securityHeaders = {
@@ -15,6 +18,10 @@ const securityHeaders = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("online deploy readiness", () => {
+  it("uses the exact decimal Vite warning threshold", () => {
+    expect(INITIAL_CHUNK_BUDGET_BYTES).toBe(500_000);
+  });
+
   it("accepts the Beta health route and verifies browser security headers", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

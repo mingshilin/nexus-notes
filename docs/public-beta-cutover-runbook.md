@@ -7,7 +7,7 @@ Task 12 is complete only when the following evidence is attached to the release 
 1. Create a separate Cloudflare D1, R2 bucket, Queue, Durable Object deployment, and Analytics Engine dataset for the preview name in `apps/worker/wrangler.preview.example.toml`.
 2. Replace only the preview D1 placeholder and preview URL in a local, untracked Wrangler file. Keep all secrets in `wrangler secret put` or the Cloudflare dashboard; never put them in TOML, Git, or the web bundle.
 3. Apply migrations to the preview database, deploy the preview Worker, and record the deployment version. Do not reuse the production D1 ID or R2 bucket.
-4. Run `npm run verify:preview`, `npm run verify:deploy:online -- --url=<preview-url>`, `npm run test:e2e`, `npm run test:a11y`, and `npm run test:load` against the preview URL.
+4. Run `npm run verify:preview`, `npm run verify:deploy:online -- --url=<preview-url>`, the authenticated `npm run test:e2e` and `npm run test:a11y` gates, and `npm run test:load` against the preview URL.
 
 ## Task 12 Browser Evidence
 
@@ -22,7 +22,7 @@ npm run test:e2e -- --require-auth
 npm run test:a11y -- --require-auth
 ```
 
-The script never accepts a repository-local profile or fixture. It does not write cookies, passwords, verification codes, browser profiles, screenshots, or credentials. Without both external variables it emits JSON `status=SKIP` with a machine-readable reason and exits `2`; this is blocked evidence, not a passed authenticated gate. An authenticated run must record the following evidence from the script output:
+The package scripts always pass `--require-auth`; the explicit `--require-auth` above documents the same fail-closed behavior when invoking the script through npm. The script never accepts a repository-local profile or fixture. It does not write cookies, passwords, verification codes, browser profiles, screenshots, or credentials. Without both external variables it emits JSON `status=SKIP` with a machine-readable reason and exits `2`; this is blocked evidence, not a passed authenticated gate. An authenticated run must record the following evidence from the script output:
 
 1. At 390 px and 200% device scale, “新建笔记” and “账户” are visible and do not cover the editor; mobile keyboard input keeps focus in the editor and the editor remains within the reduced viewport.
 2. A new note survives a deliberately failed save and full reload through real IndexedDB recovery. The run records a live idempotency-key crash/replay with the same key observed on both attempts.
@@ -31,7 +31,7 @@ The script never accepts a repository-local profile or fixture. It does not writ
 5. Profile update survives a reload; the full Preview pass also checks that password change preserves the current session and revokes other sessions.
 6. The full Preview pass checks that email change is atomic and one-time, account deletion clears the session and local data, and initial HTML does not preload Markdown, OCR, or AI chunks.
 
-The public unauthenticated shell may be run locally with `npm run test:e2e -- --url=http://127.0.0.1:<port>` and is separate from the authenticated release decision. A Preview deployment remains a separate authorization checkpoint. Do not add a production deploy command, perform a remote migration, configure production secrets, switch domains, push, merge, or tag as part of Task 12.
+The public unauthenticated shell may be run locally with `npm run test:browser-shell -- --url=http://127.0.0.1:<port>` and is separate from the authenticated release decision. A Preview deployment remains a separate authorization checkpoint. Do not add a production deploy command, perform a remote migration, configure production secrets, switch domains, push, merge, or tag as part of Task 12.
 
 ## Local Verification Matrix
 
@@ -45,15 +45,16 @@ npm run test:worker
 npm run beta:lint
 npm run beta:test
 npm run beta:build
-npm run test:e2e -- --url=http://127.0.0.1:<local-preview-port>
-npm run test:a11y -- --url=http://127.0.0.1:<local-preview-port>
+npm run test:browser-shell -- --url=http://127.0.0.1:<local-preview-port>
+npm run test:e2e
+npm run test:a11y
 npm run test:perf
 npm run build
 npm audit --omit=dev
 npm run verify:deploy
 ```
 
-The readiness output must show no initial `markdown-vendor`, `ocr-vendor`, or `ai-vendor` preload and no JavaScript chunk over the 500 kB Vite warning budget. `npm run verify:deploy` is local/read-only; `verify:deploy:online`, Preview deployment, Preview migration, and authenticated browser execution against Preview are separate operator-authorized checkpoints.
+The readiness output must show no initial `markdown-vendor`, `ocr-vendor`, or `ai-vendor` preload and no JavaScript chunk over the exact decimal Vite warning budget of `500,000 bytes` (500 kB). `npm run verify:deploy` is local/read-only; `verify:deploy:online`, Preview deployment, Preview migration, and authenticated browser execution against Preview are separate operator-authorized checkpoints.
 
 ## Backup and Restore Drill
 
