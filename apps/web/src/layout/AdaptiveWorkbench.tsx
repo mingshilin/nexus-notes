@@ -137,7 +137,7 @@ export function AdaptiveWorkbench({
       ) : null}
 
       {mobile ? (
-        <nav className="mobile-bottom-nav" data-visible={mobileChromeVisible} aria-label="移动端主导航" aria-hidden={!mobileChromeVisible || undefined} inert={!mobileChromeVisible || undefined} style={!mobileChromeVisible ? { visibility: "hidden", pointerEvents: "none" } : undefined}>
+        <nav className="mobile-bottom-nav" data-visible={mobileChromeVisible} aria-label="移动端主导航" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined} style={!mobileChromeVisible ? { visibility: "hidden", pointerEvents: "none" } : undefined}>
           {mobileNavigation ?? <>
             <button type="button" onClick={() => onActivePaneChange?.("canvas")}>首页</button>
             <button type="button">搜索</button>

@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 
 const DEFAULT_DIST_DIR = "dist";
 const INITIAL_CHUNK_BUDGET_BYTES = 500 * 1024;
-const FORBIDDEN_INITIAL_CHUNKS = ["markdown-vendor", "ocr-vendor"];
+const FORBIDDEN_INITIAL_CHUNKS = ["markdown-vendor", "ocr-vendor", "ai-vendor"];
 const TURNSTILE_SITE_KEY_PATTERN = /0x4[A-Za-z0-9_-]{20,}/g;
 const REQUIRED_SECURITY_HEADERS = [
   "content-security-policy",
@@ -124,13 +124,27 @@ function resolveRemoteAssetUrl(reference, assetUrl) {
 
 function checkInitialAssetNames(assets, sourceLabel) {
   const offenders = assets.initialJs.filter((asset) =>
-    FORBIDDEN_INITIAL_CHUNKS.some((chunkName) => asset.includes(chunkName)),
+    FORBIDDEN_INITIAL_CHUNKS.some((chunkName) => asset.toLowerCase().includes(chunkName)),
   );
 
   assertReadiness(
     offenders.length === 0,
     `${sourceLabel}: forbidden lazy chunks are initial assets: ${offenders.join(", ")}`,
   );
+}
+
+function checkJavaScriptChunkSizes(distDir, sourceLabel) {
+  const files = collectLocalJavaScriptFiles(distDir)
+    .filter(({ path }) => path.startsWith("assets/") && path.endsWith(".js"));
+  const oversized = files
+    .map(({ path }) => ({ path, size: statSync(join(process.cwd(), distDir, path)).size }))
+    .filter(({ size }) => size > INITIAL_CHUNK_BUDGET_BYTES);
+
+  assertReadiness(
+    oversized.length === 0,
+    `${sourceLabel}: Vite chunk warning budget exceeded: ${oversized.map(({ path, size }) => `${path}=${size}`).join(", ")}`,
+  );
+  return { checkedChunks: files.length };
 }
 
 function checkSecurityHeaders(response, sourceLabel) {
@@ -162,6 +176,7 @@ export function checkLocalDist(distDir = DEFAULT_DIST_DIR, { turnstileSiteKey } 
   assertReadiness(assets.scripts.length > 0, "local: index.html has no module entry script");
   checkInitialAssetNames(assets, "local");
   checkLocalAssetSizes(distDir, assets, "local");
+  const chunkBudget = checkJavaScriptChunkSizes(distDir, "local");
   if (turnstileSiteKey) {
     assertTurnstileBundle(collectLocalJavaScriptFiles(distDir), turnstileSiteKey, "local");
   }
@@ -169,6 +184,7 @@ export function checkLocalDist(distDir = DEFAULT_DIST_DIR, { turnstileSiteKey } 
   return {
     label: "local",
     checkedAssets: assets.initialJs,
+    ...chunkBudget,
   };
 }
 
@@ -314,6 +330,7 @@ export async function checkRemoteDeploy(baseUrl, { turnstileSiteKey } = {}) {
   return {
     label: "online",
     checkedAssets: assets.initialJs,
+    checkedChunks: undefined,
     healthPath,
     ...healthDetails,
   };

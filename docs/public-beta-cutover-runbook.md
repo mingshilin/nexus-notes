@@ -9,6 +9,52 @@ Task 12 is complete only when the following evidence is attached to the release 
 3. Apply migrations to the preview database, deploy the preview Worker, and record the deployment version. Do not reuse the production D1 ID or R2 bucket.
 4. Run `npm run verify:preview`, `npm run verify:deploy:online -- --url=<preview-url>`, `npm run test:e2e`, `npm run test:a11y`, and `npm run test:load` against the preview URL.
 
+## Task 12 Browser Evidence
+
+Run the authenticated browser checks only against the independently authorized Beta Preview or a local `apps/web` preview. The browser profile and avatar fixture must be created and maintained outside this repository:
+
+```powershell
+$env:NEXUS_NOTES_BETA_URL = "<preview-url>"
+$env:NEXUS_NOTES_BETA_USER_DATA_DIR = "C:\external\nexus-beta-auth-profile"
+$env:NEXUS_NOTES_BETA_AVATAR_FILE = "C:\external\fixtures\avatar.png"
+$env:NEXUS_NOTES_BETA_REQUIRE_AUTH = "1"
+npm run test:e2e -- --require-auth
+npm run test:a11y -- --require-auth
+```
+
+The script never accepts a repository-local profile or fixture. It does not write cookies, passwords, verification codes, browser profiles, screenshots, or credentials. Without both external variables it emits JSON `status=SKIP` with a machine-readable reason and exits `2`; this is blocked evidence, not a passed authenticated gate. An authenticated run must record the following evidence from the script output:
+
+1. At 390 px and 200% device scale, “新建笔记” and “账户” are visible and do not cover the editor; mobile keyboard input keeps focus in the editor and the editor remains within the reduced viewport.
+2. A new note survives a deliberately failed save and full reload through real IndexedDB recovery. The run records a live idempotency-key crash/replay with the same key observed on both attempts.
+3. The avatar upload uses the browser-selected raw `File` at the authenticated avatar endpoint. The request has an image content type and contains no base64/data-URI substitute; the avatar response is `private` or `no-store`.
+4. A second browser tab holds an IndexedDB connection, deletion reaches `blocked`, and closing the second tab connection allows deletion to complete. Account menu Escape focus restoration, account tab keyboard focus, and inspector modal open/close behavior are recorded.
+5. Profile update survives a reload; the full Preview pass also checks that password change preserves the current session and revokes other sessions.
+6. The full Preview pass checks that email change is atomic and one-time, account deletion clears the session and local data, and initial HTML does not preload Markdown, OCR, or AI chunks.
+
+The public unauthenticated shell may be run locally with `npm run test:e2e -- --url=http://127.0.0.1:<port>` and is separate from the authenticated release decision. A Preview deployment remains a separate authorization checkpoint. Do not add a production deploy command, perform a remote migration, configure production secrets, switch domains, push, merge, or tag as part of Task 12.
+
+## Local Verification Matrix
+
+Record the exact command and exit status for each command. The workspace matrix covers Web, Worker, contracts, domain, UI, and their typechecks/builds; the root matrix covers the legacy shell/API compatibility gates.
+
+```powershell
+npm run lint
+npm run test:unit
+npm run test:integration
+npm run test:worker
+npm run beta:lint
+npm run beta:test
+npm run beta:build
+npm run test:e2e -- --url=http://127.0.0.1:<local-preview-port>
+npm run test:a11y -- --url=http://127.0.0.1:<local-preview-port>
+npm run test:perf
+npm run build
+npm audit --omit=dev
+npm run verify:deploy
+```
+
+The readiness output must show no initial `markdown-vendor`, `ocr-vendor`, or `ai-vendor` preload and no JavaScript chunk over the 500 kB Vite warning budget. `npm run verify:deploy` is local/read-only; `verify:deploy:online`, Preview deployment, Preview migration, and authenticated browser execution against Preview are separate operator-authorized checkpoints.
+
 ## Backup and Restore Drill
 
 Backups must be outside the repository and encrypted by the operator. This schema contains an FTS5 virtual table, so a bare `wrangler d1 export` is not a valid backup command: Wrangler rejects databases containing virtual tables. Export the ordinary application-table data only, and recreate the schema from the checked-in migrations during restore. Exclude FTS5 shadow tables, Cloudflare's `_cf_KV`/`d1_migrations` tables, and migration-seeded singleton rows such as `collaboration_operation_guard`.
