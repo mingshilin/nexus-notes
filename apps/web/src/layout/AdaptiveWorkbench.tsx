@@ -22,6 +22,7 @@ export interface AdaptiveWorkbenchProps {
 
 const WorkbenchModalContext = createContext<(open: boolean) => void>(() => undefined);
 const WorkbenchModalOpenContext = createContext(false);
+const focusableSelector = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
 export function useWorkbenchModalState() {
   return useContext(WorkbenchModalContext);
@@ -127,6 +128,22 @@ export function AdaptiveWorkbench({
             data-scroll-owner="inspector"
             tabIndex={-1}
             onMouseDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key !== "Tab") return;
+              const focusable = [...event.currentTarget.querySelectorAll<HTMLElement>(focusableSelector)];
+              if (focusable.length === 0) {
+                event.preventDefault();
+                return;
+              }
+              const first = focusable[0]!;
+              const last = focusable.at(-1)!;
+              const activeIndex = focusable.indexOf(document.activeElement as HTMLElement);
+              const nextIndex = event.shiftKey
+                ? activeIndex <= 0 ? focusable.length - 1 : activeIndex - 1
+                : activeIndex < 0 || activeIndex === focusable.length - 1 ? 0 : activeIndex + 1;
+              event.preventDefault();
+              (focusable[nextIndex] ?? first).focus();
+            }}
           >
             <button ref={closeButtonRef} className="inspector-close" type="button" aria-label="关闭检查器" onClick={onInspectorClose}>
               <X aria-hidden="true" size={17} />

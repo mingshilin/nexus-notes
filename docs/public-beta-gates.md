@@ -18,7 +18,7 @@ npm run verify:deploy
 npm run verify:preview
 ```
 
-`test:browser-shell` uses a real Chrome or Edge process through the Node CDP client for the unauthenticated shell. The authenticated `test:e2e` and `test:a11y` gates fail closed without the external profile/avatar fixture. Run the public shell against a local preview in a second terminal:
+`test:browser-shell` uses a real Chrome or Edge process through the Node CDP client for the unauthenticated shell. The authenticated `test:e2e` and `test:a11y` gates fail closed without the external profile/avatar fixture, preserve the source session, and are safe to run sequentially. `test:e2e:cleanup-recovery` is a separate session-consuming gate and must run last. Run the public shell against a local preview in a second terminal:
 
 ```text
 npm run beta:build

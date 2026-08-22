@@ -8,23 +8,37 @@ const DEFAULT_URL = process.env.NEXUS_NOTES_BETA_URL ?? "http://127.0.0.1:4173/"
 const DATABASE_NAME = "nexus-notes-beta";
 const PROFILE_ENV = "NEXUS_NOTES_BETA_USER_DATA_DIR";
 const AVATAR_ENV = "NEXUS_NOTES_BETA_AVATAR_FILE";
+export const INSPECTOR_INERT_NAVIGATION_SELECTOR = "nav[aria-label='移动端主导航'][inert], nav[aria-label='主导航'][inert], [role='navigation'][inert]";
+const MOBILE_LAYOUT_METRICS = { width: 390, height: 844, deviceScaleFactor: 2, mobile: true };
+const MOBILE_KEYBOARD_METRICS = { ...MOBILE_LAYOUT_METRICS, viewport: { x: 0, y: 0, width: 390, height: 500, scale: 1 } };
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const options = {
     url: DEFAULT_URL,
     headed: false,
     publicShell: false,
+    authenticated: false,
+    cleanupRecovery: false,
+    authModeExplicit: process.env.NEXUS_NOTES_BETA_REQUIRE_AUTH === "1",
     requireAuth: process.env.NEXUS_NOTES_BETA_REQUIRE_AUTH !== "0",
     userDataDir: process.env[PROFILE_ENV],
     avatarFile: process.env[AVATAR_ENV],
   };
   for (const arg of argv) {
     if (arg === "--headed") options.headed = true;
-    else if (arg === "--require-auth") options.requireAuth = true;
+    else if (arg === "--require-auth") { options.requireAuth = true; options.authModeExplicit = true; }
+    else if (arg === "--authenticated") { options.authenticated = true; options.requireAuth = true; options.authModeExplicit = true; }
+    else if (arg === "--cleanup-recovery") { options.cleanupRecovery = true; options.authenticated = true; options.requireAuth = true; options.authModeExplicit = true; }
     else if (arg === "--public-shell") options.publicShell = true;
     else if (arg.startsWith("--url=")) options.url = arg.slice("--url=".length);
     else if (arg.startsWith("--user-data-dir=")) options.userDataDir = arg.slice("--user-data-dir=".length);
     else if (arg.startsWith("--avatar-file=")) options.avatarFile = arg.slice("--avatar-file=".length);
+  }
+  if (options.publicShell && options.authModeExplicit) {
+    throw new Error("Conflicting browser smoke modes: --public-shell cannot be combined with authenticated mode");
+  }
+  if (options.cleanupRecovery && options.publicShell) {
+    throw new Error("Conflicting browser smoke modes: --cleanup-recovery requires authenticated mode");
   }
   if (options.publicShell) options.requireAuth = false;
   return options;
@@ -213,9 +227,31 @@ function getByRole(cdp, role, name) {
   };
 }
 
-async function pressKey(cdp, key) {
-  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key, code: key.startsWith("Arrow") ? key : key === "Escape" ? "Escape" : undefined });
-  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key.startsWith("Arrow") ? key : key === "Escape" ? "Escape" : undefined });
+export async function pressKey(cdp, key, modifiers = 0) {
+  const virtualKeyCode = key === "Tab" ? 9
+    : key === "Escape" ? 27
+      : key === "ArrowLeft" ? 37
+        : key === "ArrowUp" ? 38
+          : key === "ArrowRight" ? 39
+            : key === "ArrowDown" ? 40
+              : undefined;
+  const event = {
+    key,
+    modifiers,
+    code: key === "Tab" || key === "Escape" || key.startsWith("Arrow") ? key : undefined,
+    windowsVirtualKeyCode: virtualKeyCode,
+    nativeVirtualKeyCode: virtualKeyCode,
+  };
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", ...event });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...event });
+}
+
+export async function enterKeyboardViewport(cdp) {
+  await cdp.send("Emulation.setDeviceMetricsOverride", MOBILE_KEYBOARD_METRICS);
+}
+
+export async function restoreMobileGeometry(cdp) {
+  await cdp.send("Emulation.setDeviceMetricsOverride", MOBILE_LAYOUT_METRICS);
 }
 
 function getByLabel(cdp, name) {
@@ -389,7 +425,7 @@ async function runZoomHitTest(cdp) {
   return geometry;
 }
 
-async function runAuthenticated(cdp, debugPort, options, evidence) {
+export async function runAuthenticated(cdp, options, evidence) {
   await getByRole(cdp, "button", "新建笔记").waitFor();
   await getByRole(cdp, "button", "新建笔记").click();
   const title = "Phase 1 " + Date.now();
@@ -472,24 +508,47 @@ async function runAuthenticated(cdp, debugPort, options, evidence) {
   await inspectorOpener.waitFor();
   await inspectorOpener.click();
   await getByRole(cdp, "dialog", "检查器").waitFor();
-  const inspectorFocus = await evaluate(cdp, "(() => { const dialog=document.querySelector('[role=dialog][aria-label=\\\"检查器\\\"]'); return { contained:Boolean(dialog && dialog.contains(document.activeElement)), active:document.activeElement?.getAttribute('aria-label') ?? document.activeElement?.tagName ?? null }; })()");
-  if (!inspectorFocus.contained) throw new Error("Inspector modal did not contain focus");
+  const inspectorFocus = await evaluate(cdp, "(() => { const dialog=document.querySelector('[role=dialog][aria-label=\\\"检查器\\\"]'); const backgroundInert=Boolean(document.querySelector('.workbench-canvas[inert]')) && Boolean(document.querySelector(" + JSON.stringify(INSPECTOR_INERT_NAVIGATION_SELECTOR) + ")); return { contained:Boolean(dialog && dialog.contains(document.activeElement)), backgroundInert, active:document.activeElement?.getAttribute('aria-label') ?? document.activeElement?.tagName ?? null }; })()");
+  if (!inspectorFocus.contained || !inspectorFocus.backgroundInert) throw new Error("Inspector modal did not contain focus or inert the background");
+  await pressKey(cdp, "Tab");
+  const tabContained = await evaluate(cdp, "Boolean(document.querySelector('[role=dialog][aria-label=\\\"检查器\\\"]')?.contains(document.activeElement))");
+  await pressKey(cdp, "Tab", 8);
+  const shiftTabContained = await evaluate(cdp, "Boolean(document.querySelector('[role=dialog][aria-label=\\\"检查器\\\"]')?.contains(document.activeElement))");
+  if (!tabContained || !shiftTabContained) throw new Error("Inspector Tab/Shift+Tab focus escaped the dialog");
   await pressKey(cdp, "Escape");
   await waitFor(cdp, "!document.querySelector('[role=dialog][aria-label=\\\"检查器\\\"]')", "inspector Escape close");
   if (!await evaluate(cdp, "document.activeElement === document.querySelector('button[aria-label=\\\"打开检查器\\\"]')")) throw new Error("Inspector opener focus was not restored");
 
-  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 500, deviceScaleFactor: 2, mobile: true });
   const editor = getByLabel(cdp, "笔记内容");
   await editor.waitFor();
   await editor.focus();
-  await cdp.send("Input.insertText", { text: " mobile keyboard" });
-  const mobile = await evaluate(cdp, "(() => { const node=document.querySelector(\"textarea[aria-label='笔记内容']\"); const rect=node?.getBoundingClientRect(); return {focused:document.activeElement===node,inserted:node?.value.includes('mobile keyboard')===true,bottom:rect?.bottom??0,viewport:window.innerHeight}; })()");
-  if (!mobile.focused || !mobile.inserted || mobile.bottom > mobile.viewport) throw new Error("Mobile keyboard/focus gate failed: " + JSON.stringify(mobile));
-  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await enterKeyboardViewport(cdp);
+  let mobile;
+  try {
+    await waitFor(cdp, "window.visualViewport && window.visualViewport.height < window.innerHeight && Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--keyboard-inset')) > 0", "real visual viewport keyboard inset", 15_000);
+    await cdp.send("Input.insertText", { text: " mobile keyboard" });
+    mobile = await evaluate(cdp, "(() => { const node=document.querySelector(\"textarea[aria-label='笔记内容']\"); const rect=node?.getBoundingClientRect(); const visualHeight=window.visualViewport?.height ?? 0; const layoutHeight=window.innerHeight; const keyboardInset=Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--keyboard-inset')) || 0; return {focused:document.activeElement===node,inserted:node?.value.includes('mobile keyboard')===true,bottom:rect?.bottom??0,visualViewportHeight:visualHeight,layoutViewportHeight:layoutHeight,keyboardInset}; })()");
+    if (!mobile.focused || !mobile.inserted || mobile.visualViewportHeight >= mobile.layoutViewportHeight || mobile.keyboardInset <= 0 || mobile.bottom > mobile.visualViewportHeight) throw new Error("Mobile keyboard/focus gate failed: " + JSON.stringify(mobile));
+  } finally {
+    await restoreMobileGeometry(cdp);
+  }
+  return {
+    title,
+    draft,
+    replay: { idempotencyKey: faultedKey, attempts: replay.length, postReloadAttempts: replay.filter(({ loaderId }) => loaderId === reloadEvidence.loaderId).length, reload: reloadEvidence },
+    profile: { reload: profileReload, nickname: title },
+    avatar: { endpoint: avatarRequest.url, requestId: avatarRequest.id, responseId: avatarResponse.id, status: avatarResponse.status, contentType: header(avatarRequest.headers, "content-type"), rawBodyBytes: avatarRequest.postData.length, cacheControl: header(avatarResponse.headers, "cache-control") },
+    zoom,
+    mobile,
+    inspector: { focusContained: inspectorFocus.contained, backgroundInert: inspectorFocus.backgroundInert, tabContained, shiftTabContained, escapeClosed: true, openerRestored: true },
+  };
+}
 
+async function runCleanupRecovery(cdp, debugPort, options) {
+  await evaluate(cdp, "document.activeElement?.blur(); document.body.focus(); true");
+  await getByRole(cdp, "button", "账户").waitFor();
   const secondTarget = await openTarget(debugPort, options.url);
   const second = connect(secondTarget.webSocketDebuggerUrl);
-  let blocked;
   try {
     await second.send("Page.enable");
     await second.send("Runtime.enable");
@@ -501,26 +560,14 @@ async function runAuthenticated(cdp, debugPort, options, evidence) {
     await getByRole(cdp, "button", "账户").click();
     await getByRole(cdp, "menuitem", "退出登录").click();
     await getByText(cdp, "本地数据清理失败").waitFor();
-    blocked = { database: DATABASE_NAME, path: "App logout -> BetaLocalStore.destroy()", remoteAccountDeleted: false };
+    const blocked = { database: DATABASE_NAME, path: "App logout -> BetaLocalStore.destroy()", remoteAccountDeleted: false };
     const released = await navigateToNewDocument(second, "about:blank");
     await getByRole(cdp, "button", "重试清理本地数据").click();
     await waitFor(cdp, "Boolean(document.querySelector('[aria-label=\\\"账户认证\\\"]'))", "local cleanup retry recovery", 30_000);
-    blocked.releasedLoaderId = released.loaderId;
-    blocked.recovered = true;
+    return { ...blocked, releasedLoaderId: released.loaderId, recovered: true };
   } finally {
     second.close();
   }
-  return {
-    title,
-    draft,
-    replay: { idempotencyKey: faultedKey, attempts: replay.length, postReloadAttempts: replay.filter(({ loaderId }) => loaderId === reloadEvidence.loaderId).length, reload: reloadEvidence },
-    profile: { reload: profileReload, nickname: title },
-    avatar: { endpoint: avatarRequest.url, requestId: avatarRequest.id, responseId: avatarResponse.id, status: avatarResponse.status, contentType: header(avatarRequest.headers, "content-type"), rawBodyBytes: avatarRequest.postData.length, cacheControl: header(avatarResponse.headers, "cache-control") },
-    zoom,
-    mobile,
-    inspector: { focusContained: inspectorFocus.contained, escapeClosed: true, openerRestored: true },
-    indexedDb: blocked,
-  };
 }
 
 async function stop(browser) {
@@ -569,7 +616,10 @@ async function run() {
     const evidence = networkEvidence(cdp);
     console.log(JSON.stringify({ status: "PASS", scenario: "public-shell", evidence: await runPublicShell(cdp) }));
     if (options.publicShell) return;
-    console.log(JSON.stringify({ status: "PASS", scenario: "authenticated-phase1", evidence: await runAuthenticated(cdp, debugPort, options, evidence) }));
+    console.log(JSON.stringify({ status: "PASS", scenario: "authenticated-phase1", evidence: await runAuthenticated(cdp, options, evidence) }));
+    if (options.cleanupRecovery) {
+      console.log(JSON.stringify({ status: "PASS", scenario: "authenticated-cleanup-recovery", evidence: await runCleanupRecovery(cdp, debugPort, options) }));
+    }
   } finally {
     cdp?.close();
     await stop(browser);

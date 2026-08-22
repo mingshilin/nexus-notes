@@ -178,4 +178,33 @@ describe("adaptive workbench", () => {
     fireEvent.click(screen.getByRole("button", { name: "关闭检查器" }));
     expect(close).toHaveBeenCalledOnce();
   });
+
+  it("contains Tab and Shift+Tab inside the inspector while the background is inert", async () => {
+    const web = await loadWeb();
+    const AdaptiveWorkbench = web.AdaptiveWorkbench as ComponentType<WorkbenchProps>;
+    const close = vi.fn();
+    const { container } = render(createElement(AdaptiveWorkbench, {
+      mode: "desktop",
+      navigation: "Navigation",
+      contextualList: "Notes",
+      inspector: createElement("button", { type: "button" }, "检查器动作"),
+      inspectorOpen: true,
+      onInspectorClose: close,
+    }, "Editor"));
+
+    const dialog = screen.getByRole("dialog", { name: "检查器" });
+    const closeButton = screen.getByRole("button", { name: "关闭检查器" });
+    const action = screen.getByRole("button", { name: "检查器动作" });
+    expect(document.activeElement).toBe(closeButton);
+    expect(document.querySelector(".workbench-canvas")).toHaveAttribute("inert");
+    expect(container.querySelector('nav[aria-label="主导航"]')).toHaveAttribute("inert");
+
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(document.activeElement).toBe(action);
+    expect(dialog).toContainElement(document.activeElement);
+
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(closeButton);
+    expect(dialog).toContainElement(document.activeElement);
+  });
 });
