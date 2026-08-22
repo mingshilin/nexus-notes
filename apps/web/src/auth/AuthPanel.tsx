@@ -1,5 +1,5 @@
 import { ArrowRight, KeyRound, Mail, ShieldCheck, Sparkles } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import type { ApiClientError } from "../data/api-client";
 import type { AuthClient, AuthUser } from "./auth-client";
 import { TurnstileWidget } from "./TurnstileWidget";
@@ -32,6 +32,19 @@ export function AuthPanel({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const requestInFlightRef = useRef(false);
+
+  const beginRequest = () => {
+    if (requestInFlightRef.current) return false;
+    requestInFlightRef.current = true;
+    setBusy(true);
+    return true;
+  };
+
+  const finishRequest = () => {
+    requestInFlightRef.current = false;
+    setBusy(false);
+  };
 
   const selectMode = (next: AuthMode) => {
     setMode(next);
@@ -51,7 +64,7 @@ export function AuthPanel({
         : "register";
 
   const resendVerification = async () => {
-    setBusy(true);
+    if (!beginRequest()) return;
     setError("");
     setMessage("");
     try {
@@ -62,13 +75,13 @@ export function AuthPanel({
     } finally {
       setTurnstileToken("");
       setTurnstileVersion((version) => version + 1);
-      setBusy(false);
+      finishRequest();
     }
   };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    setBusy(true);
+    if (!beginRequest()) return;
     setError("");
     try {
       if (mode === "login") {
@@ -105,7 +118,7 @@ export function AuthPanel({
         setTurnstileToken("");
         setTurnstileVersion((version) => version + 1);
       }
-      setBusy(false);
+      finishRequest();
     }
   };
 
