@@ -261,7 +261,15 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
       });
       let response: Response;
       try {
-        response = await createSecureGateway({ allowedOrigins: allowedOrigins(env), handler: registry }).fetch(request, env);
+        response = await createSecureGateway({
+          allowedOrigins: allowedOrigins(env),
+          handler: async (assetRequest: Request, assetEnv: BetaWorkerEnv) => {
+            if (!new URL(assetRequest.url).pathname.startsWith("/api/") && assetEnv.ASSETS) {
+              return assetEnv.ASSETS.fetch(assetRequest);
+            }
+            return registry.fetch(assetRequest, assetEnv);
+          },
+        }).fetch(request, env);
       } catch (error) {
         await observability.recordHttp({
           requestId: "unavailable",

@@ -5,6 +5,14 @@ import { join, resolve } from "node:path";
 const DEFAULT_DIST_DIR = "dist";
 const INITIAL_CHUNK_BUDGET_BYTES = 500 * 1024;
 const FORBIDDEN_INITIAL_CHUNKS = ["markdown-vendor", "ocr-vendor"];
+const REQUIRED_SECURITY_HEADERS = [
+  "content-security-policy",
+  "strict-transport-security",
+  "x-content-type-options",
+  "referrer-policy",
+  "permissions-policy",
+  "x-frame-options",
+];
 
 function parseArgs(argv) {
   const options = {
@@ -58,6 +66,12 @@ function checkInitialAssetNames(assets, sourceLabel) {
     offenders.length === 0,
     `${sourceLabel}: forbidden lazy chunks are initial assets: ${offenders.join(", ")}`,
   );
+}
+
+function checkSecurityHeaders(response, sourceLabel) {
+  for (const name of REQUIRED_SECURITY_HEADERS) {
+    assertReadiness(response.headers.get(name), `${sourceLabel}: missing security header ${name}`);
+  }
 }
 
 function checkLocalAssetSizes(distDir, assets, sourceLabel) {
@@ -126,6 +140,7 @@ export async function checkRemoteDeploy(baseUrl) {
   const normalizedBaseUrl = new URL(baseUrl);
   const htmlResponse = await fetchWithTimeout(normalizedBaseUrl);
   assertReadiness(htmlResponse.ok, `online: failed to fetch ${normalizedBaseUrl} (${htmlResponse.status})`);
+  checkSecurityHeaders(htmlResponse, "online");
   const html = await htmlResponse.text();
   const assets = extractInitialAssets(html);
 
@@ -133,17 +148,33 @@ export async function checkRemoteDeploy(baseUrl) {
   checkInitialAssetNames(assets, "online");
   await checkRemoteAssetSizes(normalizedBaseUrl, assets, "online");
 
-  const healthUrl = new URL("/api/health/turnstile", normalizedBaseUrl);
-  const healthResponse = await fetchWithTimeout(healthUrl);
-  assertReadiness(healthResponse.ok, `online: health endpoint failed (${healthResponse.status})`);
+  const healthCandidates = ["/api/v2/health", "/api/health/turnstile"];
+  let healthPath;
+  let healthResponse;
+  for (const candidate of healthCandidates) {
+    const response = await fetchWithTimeout(new URL(candidate, normalizedBaseUrl));
+    if (response.ok) {
+      healthPath = candidate;
+      healthResponse = response;
+      break;
+    }
+  }
+  assertReadiness(healthResponse, `online: health endpoint failed (${healthCandidates.join(" or ")})`);
+  checkSecurityHeaders(healthResponse, "online");
   const health = await healthResponse.json();
   assertReadiness(health?.success === true, "online: health endpoint did not return success=true");
-  assertReadiness(typeof health?.data?.configured === "boolean", "online: health endpoint missing configured flag");
+  if (healthPath === "/api/v2/health") {
+    assertReadiness(health?.data?.status === "ok", "online: Beta health endpoint did not report status=ok");
+  } else {
+    assertReadiness(typeof health?.data?.configured === "boolean", "online: health endpoint missing configured flag");
+  }
 
   return {
     label: "online",
     checkedAssets: assets.initialJs,
-    healthConfigured: health.data.configured,
+    healthPath,
+    healthConfigured: health.data.configured === true,
+    healthStatus: health.data.status ?? undefined,
   };
 }
 
@@ -161,7 +192,7 @@ async function main() {
     console.log(`${result.label}: deploy readiness checks passed`);
     console.log(assets);
     if ("healthConfigured" in result) {
-      console.log(`  - /api/health/turnstile configured=${result.healthConfigured}`);
+      console.log(`  - ${result.healthPath} configured=${result.healthConfigured}${result.healthStatus ? ` status=${result.healthStatus}` : ""}`);
     }
   }
 }

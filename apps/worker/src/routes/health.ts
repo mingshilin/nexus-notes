@@ -5,6 +5,7 @@ import type { ObservabilityAnalytics } from "../observability";
 
 export interface BetaWorkerEnv {
   DB: D1Database;
+  ASSETS?: Fetcher;
   FILES?: R2Bucket;
   AI?: OcrAiBinding;
   JOBS?: Queue<QueueJob>;
