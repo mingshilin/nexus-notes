@@ -34,5 +34,5 @@
 - [x] Task 8: Deliver workspace collaboration, sharing, notifications, audit, and Durable Object presence.
 - [x] Task 9: Deliver R2 files, queued OCR/index/import/export/email jobs, status, feedback, and administration.
 - [x] Task 10: Add structured observability, partial failure handling, and recovery workflows.
-- [ ] Task 11: Close unit, integration, contract, browser, accessibility, performance, load, security, and fault gates.
+- [x] Task 11: Close unit, integration, contract, browser, accessibility, performance, load, security, and fault gates.
 - [ ] Task 12: Prepare preview readiness, backup/restore evidence, cutover checklist, and rollback evidence; stop before production actions.
