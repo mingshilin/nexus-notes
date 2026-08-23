@@ -26,7 +26,7 @@ import { NoteDraftController, type DraftSyncResult, type NoteDraftStore } from "
 import { NormalizedCache } from "../data/normalized-cache";
 import { ProductNavigation, type AccountSubsection, type ProductDomain } from "../navigation/ProductNavigation";
 import { QuickCapturePanel } from "../notes/QuickCapturePanel";
-import { CreateCenter } from "../create";
+import { CreateCenter, type CreateActionResult } from "../create";
 import { FeatureHub } from "../features";
 import {
   CollaborationCenter,
@@ -53,6 +53,7 @@ type AppRoute =
   | { kind: "share"; token: string };
 type NoteListView = "all" | "inbox" | "today" | "trash";
 type WorkspaceRouteAuthority = { userId: string; workspaceId: string };
+type WorkspaceModal = "create" | "quick-capture" | "permanent-delete";
 type UserScopedLocalStore = NoteDraftStore & { destroy(): Promise<void> };
 type LogoutPhase = "idle" | "quiescing" | "cleanup" | "cleanup-error";
 
@@ -266,8 +267,28 @@ function AuthenticatedWorkspace({
   const [notesLoading, setNotesLoading] = useState(Boolean(workspaceId));
   const [notesError, setNotesError] = useState<string | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
-  const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
-  const [createCenterOpen, setCreateCenterOpen] = useState(false);
+  const [workspaceModal, setWorkspaceModal] = useState<WorkspaceModal | null>(null);
+  const createCenterOpen = workspaceModal === "create";
+  const quickCaptureOpen = workspaceModal === "quick-capture";
+  const permanentDeleteOpen = workspaceModal === "permanent-delete";
+  const setCreateCenterOpen = useCallback((open: boolean) => {
+    setWorkspaceModal((current) => open
+      ? current === null || current === "create" ? "create" : current
+      : current === "create" ? null : current);
+  }, []);
+  const setQuickCaptureOpen = useCallback((open: boolean) => {
+    setWorkspaceModal((current) => open
+      ? current === null || current === "quick-capture" ? "quick-capture" : current
+      : current === "quick-capture" ? null : current);
+  }, []);
+  const setPermanentDeleteOpen = useCallback((open: boolean) => {
+    setWorkspaceModal((current) => open
+      ? current === null || current === "permanent-delete" ? "permanent-delete" : current
+      : current === "permanent-delete" ? null : current);
+  }, []);
+  const replaceWorkspaceModal = useCallback((modal: WorkspaceModal | null) => {
+    setWorkspaceModal(modal);
+  }, []);
   const [featureMapOpen, setFeatureMapOpen] = useState(false);
   const [noteListView, setNoteListView] = useState<NoteListView>("all");
   const [creatingNote, setCreatingNote] = useState(false);
@@ -277,7 +298,6 @@ function AuthenticatedWorkspace({
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteMessage, setNoteMessage] = useState<string | null>(null);
   const [noteError, setNoteError] = useState<string | null>(null);
-  const [permanentDeleteOpen, setPermanentDeleteOpen] = useState(false);
   const [permanentDeletePending, setPermanentDeletePending] = useState(false);
   const [permanentDeleteError, setPermanentDeleteError] = useState<string | null>(null);
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
@@ -419,13 +439,18 @@ function AuthenticatedWorkspace({
     setNotificationOpen((open) => !open);
   };
 
-  const startNewNote = () => {
-    if (logoutPending || !workspaceId || activationInFlight.current || activeDraftIdRef.current) return false;
+  const startNewNote = async (): Promise<CreateActionResult> => {
+    if (logoutPending) return { status: "rejected", message: "正在退出登录，请稍候。" };
+    if (!workspaceId) return { status: "rejected", message: "当前没有可用工作区，暂时无法新建笔记。" };
+    if (activationInFlight.current || activeDraftIdRef.current) {
+      return { status: "rejected", message: "未能开始新建笔记。当前已有未完成的新建操作，请完成后再试。" };
+    }
     activationInFlight.current = true;
     userSelectedNote.current = true;
     setFeatureMapOpen(false);
     setNoteError(null);
-    void draftController.create(workspaceId).then((draft) => {
+    try {
+      const draft = await draftController.create(workspaceId);
       activeDraftIdRef.current = draft.entity_id;
       draftTitleRef.current = draft.title;
       draftContentRef.current = draft.content;
@@ -438,12 +463,17 @@ function AuthenticatedWorkspace({
       setNoteError(null);
       setActiveDomain("notes");
       setActivePane("canvas");
-    }).catch(() => {
-      setNotesError("本地草稿保存失败，未创建临时笔记。请重试。");
-    }).finally(() => {
+      return { status: "completed" };
+    } catch {
+      const message = "本地草稿保存失败，未创建临时笔记。请重试。";
+      setNotesError(message);
+      setNoteError(message);
+      setActiveDomain("notes");
+      setActivePane("canvas");
+      return { status: "rejected", message };
+    } finally {
       activationInFlight.current = false;
-    });
-    return true;
+    }
   };
 
   const selectNote = (note: Note) => {
@@ -466,32 +496,37 @@ function AuthenticatedWorkspace({
     setActivePane("canvas");
   };
 
-  const openTodayNote = () => {
-    if (logoutPending || !workspaceId || dailyNoteOpeningRef.current) return false;
+  const openTodayNote = async (): Promise<CreateActionResult> => {
+    if (logoutPending) return { status: "rejected", message: "正在退出登录，请稍候。" };
+    if (!workspaceId) return { status: "rejected", message: "当前没有可用工作区，暂时无法打开今日笔记。" };
+    if (dailyNoteOpeningRef.current) return { status: "rejected", message: "今日笔记正在打开，请稍候。" };
     const dailyDate = localDateKey();
     const existing = notes.find((note) => note.status === "active" && note.daily_date === dailyDate);
     if (existing) {
       focusInstalledNoteRef.current = true;
       selectNote(existing);
       queueMicrotask(() => titleInputRef.current?.focus());
-      return true;
+      return { status: "completed" };
     }
 
     dailyNoteOpeningRef.current = true;
     setDailyNoteOpening(true);
     setNoteError(null);
-    void new NotesClient(apiClient, workspaceId).openOrCreateDaily(dailyDate).then((note) => {
+    try {
+      const note = await new NotesClient(apiClient, workspaceId).openOrCreateDaily(dailyDate);
       installedNotesRef.current.set(note.id, note);
       focusInstalledNoteRef.current = true;
       setNotes((current) => [note, ...current.filter((item) => item.id !== note.id)]);
       selectNote(note);
-    }).catch(() => {
-      setNoteError("今日笔记暂时无法打开，可重试。当前选择和草稿内容已保留。");
-    }).finally(() => {
+      return { status: "completed" };
+    } catch {
+      const message = "今日笔记暂时无法打开，可重试。当前选择和草稿内容已保留。";
+      setNoteError(message);
+      return { status: "rejected", message };
+    } finally {
       dailyNoteOpeningRef.current = false;
       setDailyNoteOpening(false);
-    });
-    return true;
+    }
   };
 
   const handleQuickCapture = (note: Note) => {
@@ -658,7 +693,8 @@ function AuthenticatedWorkspace({
     const handleShortcut = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() !== "n" || (!event.ctrlKey && !event.metaKey) || event.repeat || isEditableTarget(event.target)) return;
       if (permanentDeleteOpen) return;
-      if (startNewNote()) event.preventDefault();
+      event.preventDefault();
+      void startNewNote();
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
@@ -1166,9 +1202,15 @@ function AuthenticatedWorkspace({
       onOpenChange={setCreateCenterOpen}
       disabled={logoutPending}
       onCreateNote={workspaceId ? startNewNote : undefined}
-      onQuickCapture={workspaceId ? () => setQuickCaptureOpen(true) : undefined}
+      onQuickCapture={workspaceId ? () => {
+        replaceWorkspaceModal("quick-capture");
+        return { status: "completed" };
+      } : undefined}
       onTodayNote={workspaceId ? openTodayNote : undefined}
-      onCreateDatabase={workspaceId ? openDatabaseCreation : undefined}
+      onCreateDatabase={workspaceId ? () => {
+        openDatabaseCreation();
+        return { status: "completed" };
+      } : undefined}
     />
   );
   const featureMapAction = (
@@ -1404,6 +1446,7 @@ function AuthenticatedWorkspace({
         <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
         <h1 ref={permanentDeleteFallbackRef} tabIndex={-1}>Public Beta 重写计划</h1>
         <p className="lead">一个稳定、响应迅速、离线可恢复的知识工作台。</p>
+        {noteError && activePane !== "context" ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
         <hr />
         <h2>自适应工作台</h2>
         <p>导航保持轻量，列表按需出现，主画布获得最多空间，检查器不再永久挤压编辑区域。</p>
@@ -1509,7 +1552,7 @@ function AuthenticatedWorkspace({
 
   return (
     <>
-      <div className="workspace-modal-background" data-testid="workspace-modal-background" inert={createCenterOpen || undefined}>
+      <div className="workspace-modal-background" data-testid="workspace-modal-background" aria-hidden={workspaceModal !== null || undefined} inert={workspaceModal !== null || undefined}>
       {serviceWorkerUpdate ? (
         <div className="update-banner" role="status">
           <span>新版本已准备好。</span>
@@ -1533,7 +1576,7 @@ function AuthenticatedWorkspace({
         contextualList={activeDomain === "databases" ? databaseContextualList : activeDomain === "notes" ? contextualList : undefined}
         inspector={<div className="inspector-content"><small>页面信息</small><h3>{inspectorTitle}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
         inspectorOpen={inspectorOpen}
-        externalModalOpen={permanentDeleteOpen || createCenterOpen}
+        externalModalOpen={workspaceModal !== null}
         activePane={activePane}
         onActivePaneChange={setActivePane}
         onInspectorOpen={openInspector}
@@ -1585,14 +1628,14 @@ function AuthenticatedWorkspace({
       </AdaptiveWorkbench>
       </div>
       {quickCaptureOpen && workspaceId ? (
-        <div className="quick-capture-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickCaptureOpen(false); }}>
+        <div className="quick-capture-backdrop" role="presentation" aria-hidden={workspaceModal !== "quick-capture" || undefined} inert={workspaceModal !== "quick-capture" || undefined} onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickCaptureOpen(false); }}>
           <div className="quick-capture-dialog" role="dialog" aria-modal="true" aria-labelledby="quick-capture-title" onMouseDown={(event) => event.stopPropagation()}>
             <QuickCapturePanel client={new NotesClient(apiClient, workspaceId)} onClose={() => setQuickCaptureOpen(false)} onCaptured={handleQuickCapture} />
           </div>
         </div>
       ) : null}
       {permanentDeleteOpen && selectedNote ? (
-        <div className="account-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !permanentDeletePending) closePermanentDeleteDialog(); }}>
+        <div className="account-dialog-backdrop" role="presentation" aria-hidden={workspaceModal !== "permanent-delete" || undefined} inert={workspaceModal !== "permanent-delete" || undefined} onMouseDown={(event) => { if (event.target === event.currentTarget && !permanentDeletePending) closePermanentDeleteDialog(); }}>
           <div ref={permanentDeleteDialogRef} className="account-confirm-dialog" role="dialog" aria-modal="true" aria-label="永久删除笔记" tabIndex={-1}>
             <h3>永久删除笔记</h3>
             <p>此操作不可撤销。笔记、其评论和公开分享链接将被永久删除。</p>

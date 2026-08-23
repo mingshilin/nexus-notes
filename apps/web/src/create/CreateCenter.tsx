@@ -3,7 +3,11 @@ import { createPortal } from "react-dom";
 import { useEffect, useId, useRef, useState } from "react";
 import { useWorkbenchModalState } from "../layout/AdaptiveWorkbench";
 
-export type CreateActionResult = void | boolean;
+export type CreateActionResult =
+  | void
+  | boolean
+  | { status: "completed" }
+  | { status: "rejected"; message: string };
 export type CreateActionHandler = () => CreateActionResult | Promise<CreateActionResult>;
 
 export interface CreateCenterProps {
@@ -94,10 +98,14 @@ export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNot
     return () => window.clearTimeout(timer);
   }, [open]);
 
-  const finishAction = (id: CreateAction["id"], label: string, result: CreateActionResult) => {
+  const finishAction = (label: string, result: CreateActionResult) => {
     setPendingAction(null);
     if (result === false) {
       setActionError(`未能开始${label}。当前可能已有未完成操作，请完成后再试。`);
+      return;
+    }
+    if (result && typeof result === "object" && result.status === "rejected") {
+      setActionError(result.message);
       return;
     }
     setActionError(null);
@@ -111,13 +119,13 @@ export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNot
     try {
       const result = run();
       if (result instanceof Promise) {
-        void result.then((value) => finishAction(id, label, value)).catch(() => {
+        void result.then((value) => finishAction(label, value)).catch(() => {
           setPendingAction(null);
           setActionError(`${label}启动失败，请稍后重试。`);
         });
         return;
       }
-      finishAction(id, label, result);
+      finishAction(label, result);
     } catch {
       setPendingAction(null);
       setActionError(`${label}启动失败，请稍后重试。`);

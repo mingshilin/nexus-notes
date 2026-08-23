@@ -4,17 +4,29 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 import { CreateCenter } from "../src/create/CreateCenter";
 
+type CreateOutcome = { status: "completed" } | { status: "rejected"; message: string };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function CreateCenterHarness({ onCreateNote = vi.fn(), onQuickCapture = vi.fn() }: {
-  onCreateNote?: () => void | boolean | Promise<void | boolean>;
-  onQuickCapture?: () => void | boolean | Promise<void | boolean>;
+  onCreateNote?: () => CreateOutcome | Promise<CreateOutcome>;
+  onQuickCapture?: () => CreateOutcome | Promise<CreateOutcome>;
 }) {
   const [open, setOpen] = useState(false);
   return (
     <CreateCenter
       open={open}
       onOpenChange={setOpen}
-      onCreateNote={onCreateNote}
-      onQuickCapture={onQuickCapture}
+      onCreateNote={onCreateNote as any}
+      onQuickCapture={onQuickCapture as any}
       onTodayNote={vi.fn()}
       onCreateDatabase={vi.fn()}
     />
@@ -47,7 +59,8 @@ function authenticatedSession() {
   };
 }
 
-function appApiClient(notes = [] as typeof existingNote[], pendingCreate?: Promise<unknown>) {
+function appApiClient(notes = [] as typeof existingNote[], createNoteGate?: Promise<unknown>) {
+  const createdNote = { ...existingNote, id: "server-created", title: "", content: "" };
   return {
     request: vi.fn(async (request: { path: string; method?: string }) => {
       if (request.path === "/api/v2/profile") {
@@ -58,17 +71,20 @@ function appApiClient(notes = [] as typeof existingNote[], pendingCreate?: Promi
       if (request.path === "/api/v2/operations/status") return { queue: "ready", storage: "ready", ocr: "ready", version: "test" };
       if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
       if (request.path === "/api/v2/notes?status=active&limit=50") return { items: notes, next_cursor: null };
-      if (request.path === "/api/v2/notes" && request.method === "POST" && pendingCreate) return pendingCreate;
+      if (request.path === "/api/v2/notes" && request.method === "POST") return createNoteGate ?? { note: createdNote };
       return { items: [], next_cursor: null };
     }),
   };
 }
 
-function memoryDraftStore() {
-  const drafts = new Map<string, any>();
+function memoryDraftStore(saveDraftGate?: Promise<void>, initialDrafts: any[] = []) {
   const key = (workspaceId: string, entityId: string) => `${workspaceId}:${entityId}`;
+  const drafts = new Map<string, any>(initialDrafts.map((draft) => [key(draft.workspace_id, draft.entity_id), { ...draft }]));
   return {
-    saveDraft: vi.fn(async (draft: any) => { drafts.set(key(draft.workspace_id, draft.entity_id), { ...draft }); }),
+    saveDraft: vi.fn(async (draft: any) => {
+      if (saveDraftGate) await saveDraftGate;
+      drafts.set(key(draft.workspace_id, draft.entity_id), { ...draft });
+    }),
     mutateDraft: vi.fn(async (workspaceId: string, entityId: string, mutation: (current: any) => any) => {
       const draftKey = key(workspaceId, entityId);
       const next = mutation(drafts.get(draftKey) ?? null);
@@ -111,7 +127,7 @@ describe("CreateCenter", () => {
   });
 
   it("keeps the dialog open and explains a rejected create action", async () => {
-    const onCreateNote = vi.fn(() => false);
+    const onCreateNote = vi.fn(() => ({ status: "rejected" as const, message: "已有未完成操作，请完成后再试。" }));
     render(<CreateCenterHarness onCreateNote={onCreateNote} />);
     fireEvent.click(screen.getByRole("button", { name: "创建内容" }));
 
@@ -119,7 +135,24 @@ describe("CreateCenter", () => {
 
     expect(onCreateNote).toHaveBeenCalledOnce();
     expect(screen.getByRole("dialog", { name: "创建内容" })).toBeInTheDocument();
-    expect(await screen.findByRole("alert")).toHaveTextContent("未能开始新建笔记");
+    expect(await screen.findByRole("alert")).toHaveTextContent("已有未完成操作");
+  });
+
+  it("keeps the action pending until a deferred create completes", async () => {
+    const create = deferred<CreateOutcome>();
+    const onCreateNote = vi.fn(() => create.promise);
+    render(<CreateCenterHarness onCreateNote={onCreateNote} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "创建内容" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建笔记" }));
+
+    const pending = screen.getByRole("button", { name: "新建笔记，处理中" });
+    expect(pending).toBeDisabled();
+    fireEvent.click(pending);
+    expect(onCreateNote).toHaveBeenCalledOnce();
+
+    create.resolve({ status: "completed" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "创建内容" })).not.toBeInTheDocument());
   });
 
   it("does not steal focus on mount and restores it only after closing", async () => {
@@ -166,17 +199,63 @@ describe("CreateCenter", () => {
   });
 
   it("keeps the create center open when the App already has an active draft", async () => {
-    const pendingCreate = new Promise<unknown>(() => undefined);
-    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient([], pendingCreate) as any} localStore={memoryDraftStore() as any} turnstileSiteKey="test" />);
+    const serverCreate = deferred<{ note: typeof existingNote }>();
+    const apiClient = appApiClient([], serverCreate.promise);
+    const activeDraft = {
+      workspace_id: "ws-1",
+      entity_id: "draft-existing",
+      title: "",
+      content: "",
+      updated_at: "2026-08-23T00:00:00.000Z",
+      draft_generation: 0,
+      next_patch_generation: 1,
+    };
+    const localStore = memoryDraftStore(undefined, [activeDraft]);
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={apiClient as any} localStore={localStore as any} turnstileSiteKey="test" />);
 
-    const newNoteButtons = await screen.findAllByRole("button", { name: "新建笔记" });
-    fireEvent.click(newNoteButtons[0]!);
     expect(await screen.findByRole("textbox", { name: "笔记标题" })).toBeInTheDocument();
+    await waitFor(() => expect(localStore.listDrafts).toHaveBeenCalledWith("ws-1"));
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/notes", method: "POST" })));
     fireEvent.click(screen.getByRole("button", { name: "创建内容" }));
     fireEvent.click(screen.getByRole("button", { name: "新建笔记" }));
 
     expect(screen.getByRole("dialog", { name: "创建内容" })).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent("未能开始新建笔记");
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("未能开始新建笔记"));
+    serverCreate.resolve({ note: { ...existingNote, id: "server-created", title: "", content: "" } });
+  });
+
+  it("keeps the App create center pending and prevents a second draft request", async () => {
+    const saveDraft = deferred<void>();
+    const localStore = memoryDraftStore(saveDraft.promise);
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} localStore={localStore as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建内容" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建笔记" }));
+    await waitFor(() => expect(localStore.saveDraft).toHaveBeenCalledOnce());
+
+    const pending = screen.getByRole("button", { name: "新建笔记，处理中" });
+    expect(pending).toBeDisabled();
+    fireEvent.click(pending);
+    expect(localStore.saveDraft).toHaveBeenCalledOnce();
+
+    saveDraft.resolve();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "创建内容" })).not.toBeInTheDocument());
+    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toBeInTheDocument();
+  });
+
+  it("keeps the App create center open and exposes a safe error after draft creation fails", async () => {
+    const saveDraft = deferred<void>();
+    const localStore = memoryDraftStore(saveDraft.promise);
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} localStore={localStore as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建内容" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建笔记" }));
+    await waitFor(() => expect(localStore.saveDraft).toHaveBeenCalledOnce());
+
+    saveDraft.reject(new Error("storage unavailable"));
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "创建内容" })).toBeInTheDocument());
+    expect(screen.getByRole("alert")).toHaveTextContent("本地草稿保存失败");
+    expect(screen.getAllByRole("alert").some((alert) => alert.textContent?.includes("本地草稿保存失败"))).toBe(true);
   });
 
   it("opens personal profile from the feature map after visiting workspace settings", async () => {
@@ -207,5 +286,23 @@ describe("CreateCenter", () => {
     fireEvent.click(screen.getByRole("button", { name: "关闭创建内容" }));
     await waitFor(() => expect(background).not.toHaveAttribute("inert"));
     await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("isolates quick capture from the workspace and sibling create dialog", async () => {
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: "快速捕获" }));
+    const quickDialog = await screen.findByRole("dialog", { name: "快速捕获" });
+    const background = screen.getByTestId("workspace-modal-background");
+    expect(background).toHaveAttribute("inert");
+    expect(background).toHaveAttribute("aria-hidden", "true");
+    expect(quickDialog).not.toHaveAttribute("inert");
+    const backgroundCreateTrigger = background.querySelector('button[aria-label="创建内容"]');
+    expect(backgroundCreateTrigger).not.toBeNull();
+    expect(backgroundCreateTrigger?.closest(".workspace-modal-background")).toBe(background);
+    expect(backgroundCreateTrigger?.closest("[inert]")).not.toBeNull();
+    expect(screen.queryByRole("dialog", { name: "创建内容" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "快速捕获" })).toBeInTheDocument();
   });
 });
