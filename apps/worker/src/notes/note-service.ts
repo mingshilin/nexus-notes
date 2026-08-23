@@ -1,5 +1,6 @@
 import type {
   CreateNoteInput,
+  DailyNoteInput,
   DeleteNoteInput,
   Note,
   NoteRevision,
@@ -32,6 +33,7 @@ export interface CreateNoteRecordInput {
 
 export interface NoteRepository {
   createNote(input: CreateNoteRecordInput): Promise<Note>;
+  openOrCreateDaily(input: CreateNoteRecordInput): Promise<Note>;
   getNote(workspaceId: string, noteId: string): Promise<Note | null>;
   listNotes(input: {
     workspaceId: string;
@@ -131,6 +133,24 @@ export class NoteService {
       dailyDate: input.daily_date ?? null,
       isFavorite: input.is_favorite ?? false,
       isPinned: input.is_pinned ?? false,
+      source: "manual",
+      now: this.options.clock().toISOString(),
+      requestId: context.requestId,
+    });
+  }
+
+  openOrCreateDaily(context: NoteActorContext, input: DailyNoteInput) {
+    return this.repository.openOrCreateDaily({
+      id: this.options.createId(),
+      workspaceId: context.workspaceId,
+      userId: context.userId,
+      title: `Daily Note ${input.daily_date}`,
+      content: "",
+      folderId: null,
+      databaseId: null,
+      dailyDate: input.daily_date,
+      isFavorite: false,
+      isPinned: false,
       source: "manual",
       now: this.options.clock().toISOString(),
       requestId: context.requestId,

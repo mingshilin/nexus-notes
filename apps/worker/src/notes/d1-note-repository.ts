@@ -138,6 +138,20 @@ export class D1NoteRepository implements NoteRepository {
     return note;
   }
 
+  async openOrCreateDaily(input: CreateNoteRecordInput) {
+    const existing = await this.activeDailyNote(input.workspaceId, input.dailyDate);
+    if (existing) return existing;
+
+    try {
+      return await this.createNote(input);
+    } catch (error) {
+      // The migration trigger serializes concurrent creators. Re-read its winner.
+      const winner = await this.activeDailyNote(input.workspaceId, input.dailyDate);
+      if (winner) return winner;
+      throw error;
+    }
+  }
+
   getNote(workspaceId: string, noteId: string) {
     return this.db.prepare(
       `SELECT ${NOTE_COLUMNS}
@@ -145,6 +159,17 @@ export class D1NoteRepository implements NoteRepository {
        WHERE workspace_id = ? AND id = ? AND deleted_at IS NULL
        LIMIT 1`,
     ).bind(workspaceId, noteId).first<NoteRow>().then((row) => row ? toNote(row) : null);
+  }
+
+  private activeDailyNote(workspaceId: string, dailyDate: string | null) {
+    if (!dailyDate) return Promise.resolve(null);
+    return this.db.prepare(
+      `SELECT ${NOTE_COLUMNS}
+       FROM notes
+       WHERE workspace_id = ? AND daily_date = ? AND status = 'active' AND deleted_at IS NULL
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 1`,
+    ).bind(workspaceId, dailyDate).first<NoteRow>().then((row) => row ? toNote(row) : null);
   }
 
   async listNotes(input: { workspaceId: string; cursor?: string; limit: number; status?: Note["status"]; folderId?: string | null; dailyDate?: string }) {

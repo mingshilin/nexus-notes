@@ -29,6 +29,23 @@ afterEach(() => {
 });
 
 describe("NotesClient", () => {
+  it("opens or creates a daily note as a non-retryable idempotent command", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ note: { ...note, daily_date: "2026-08-23" } })) };
+    const client = new data.NotesClient(api, "ws-1", { createId: () => "daily-operation-1" });
+
+    await expect(client.openOrCreateDaily("2026-08-23")).resolves.toMatchObject({ daily_date: "2026-08-23" });
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/daily",
+      method: "POST",
+      body: { daily_date: "2026-08-23" },
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "command",
+      policy: expect.objectContaining({ retry: 0, idempotencyKey: "daily-operation-1" }),
+    }));
+  });
+
   it("adds workspace context and cancellable dedupe policy to list requests", async () => {
     const data = await loadData();
     expect(data.NotesClient).toBeTypeOf("function");

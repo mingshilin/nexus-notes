@@ -266,6 +266,7 @@ function AuthenticatedWorkspace({
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const [noteListView, setNoteListView] = useState<NoteListView>("all");
   const [creatingNote, setCreatingNote] = useState(false);
+  const [dailyNoteOpening, setDailyNoteOpening] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftContent, setDraftContent] = useState("");
   const [noteSaving, setNoteSaving] = useState(false);
@@ -319,6 +320,7 @@ function AuthenticatedWorkspace({
   });
   const activeDraftIdRef = useRef<string | null>(null);
   const activationInFlight = useRef(false);
+  const dailyNoteOpeningRef = useRef(false);
   const userSelectedNote = useRef(false);
   const draftTitleRef = useRef("");
   const draftContentRef = useRef("");
@@ -455,6 +457,33 @@ function AuthenticatedWorkspace({
     setSelectedCommentId(null);
     setResolvedNotificationRecord(null);
     setActivePane("canvas");
+  };
+
+  const openTodayNote = () => {
+    if (logoutPending || !workspaceId || dailyNoteOpeningRef.current) return;
+    const dailyDate = localDateKey();
+    const existing = notes.find((note) => note.status === "active" && note.daily_date === dailyDate);
+    if (existing) {
+      focusInstalledNoteRef.current = true;
+      selectNote(existing);
+      queueMicrotask(() => titleInputRef.current?.focus());
+      return;
+    }
+
+    dailyNoteOpeningRef.current = true;
+    setDailyNoteOpening(true);
+    setNoteError(null);
+    void new NotesClient(apiClient, workspaceId).openOrCreateDaily(dailyDate).then((note) => {
+      installedNotesRef.current.set(note.id, note);
+      focusInstalledNoteRef.current = true;
+      setNotes((current) => [note, ...current.filter((item) => item.id !== note.id)]);
+      selectNote(note);
+    }).catch(() => {
+      setNoteError("今日笔记暂时无法打开，可重试。当前选择和草稿内容已保留。");
+    }).finally(() => {
+      dailyNoteOpeningRef.current = false;
+      setDailyNoteOpening(false);
+    });
   };
 
   const handleQuickCapture = (note: Note) => {
@@ -1140,6 +1169,12 @@ function AuthenticatedWorkspace({
           <button key={view} type="button" aria-pressed={noteListView === view} className={noteListView === view ? "active" : ""} onClick={() => changeNoteListView(view)}>{label}</button>
         ))}
       </nav>
+      {noteListView === "today" ? (
+        <button className="primary-create-note note-empty-create-note" type="button" disabled={logoutPending || dailyNoteOpening} onClick={openTodayNote}>
+          {dailyNoteOpening ? "正在打开今日笔记…" : "打开今日笔记"}
+        </button>
+      ) : null}
+      {noteListView === "today" && noteError && !selectedNote && !creatingNote ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
       <label className="search-field"><Search size={15} /><input aria-label="搜索笔记" placeholder="搜索笔记" /></label>
       {notesLoading ? <p className="database-empty" role="status">正在加载笔记…</p> : null}
       {notesError ? <p className="database-operation-error" role="alert">{notesError}</p> : null}

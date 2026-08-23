@@ -54,6 +54,12 @@ export const CreateNoteInputSchema = z.object({
 
 export type CreateNoteInput = z.infer<typeof CreateNoteInputSchema>;
 
+export const DailyNoteInputSchema = z.object({
+  daily_date: DailyDateSchema,
+}).strict();
+
+export type DailyNoteInput = z.infer<typeof DailyNoteInputSchema>;
+
 export const UpdateNoteInputSchema = z.object({
   base_revision: z.number().int().positive(),
   title: NoteTitleSchema.optional(),

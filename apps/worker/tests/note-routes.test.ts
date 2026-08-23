@@ -42,6 +42,7 @@ function serviceDouble() {
   return {
     list: vi.fn(async () => ({ items: [note], next_cursor: null })),
     create: vi.fn(async () => note),
+    openOrCreateDaily: vi.fn(async () => ({ ...note, daily_date: "2026-08-23" })),
     get: vi.fn(async () => note),
     update: vi.fn(async () => ({ ...note, revision: 2 })),
     listRevisions: vi.fn(async () => []),
@@ -52,6 +53,48 @@ function serviceDouble() {
 }
 
 describe("v2 note routes", () => {
+  it("opens a daily note for editors and validates its strict request body", async () => {
+    const worker = await loadWorker();
+    const service = serviceDouble();
+    const registry = (worker.createRouteRegistry as any)({
+      requestId: () => "req-daily",
+      authenticate: vi.fn(async () => ({ userId: "user-1", sessionId: "session-1" })),
+      authorizeWorkspace: vi.fn(async () => workspace),
+    });
+    (worker.registerNoteRoutes as any)(registry, () => service);
+
+    const success = await registry.fetch(request("/api/v2/notes/daily", {
+      method: "POST", body: JSON.stringify({ daily_date: "2026-08-23" }),
+    }), {});
+    expect(success.status).toBe(200);
+    expect(await success.json()).toEqual({
+      success: true,
+      data: { note: expect.objectContaining({ daily_date: "2026-08-23" }) },
+      request_id: "req-daily",
+    });
+    expect(service.openOrCreateDaily).toHaveBeenCalledWith(
+      { ...workspace, requestId: "req-daily" },
+      { daily_date: "2026-08-23" },
+    );
+
+    const invalid = await registry.fetch(request("/api/v2/notes/daily", {
+      method: "POST", body: JSON.stringify({ daily_date: "2026-8-23", title: "not allowed" }),
+    }), {});
+    expect(invalid.status).toBe(400);
+    expect(service.openOrCreateDaily).toHaveBeenCalledOnce();
+
+    const viewerRegistry = (worker.createRouteRegistry as any)({
+      requestId: () => "req-daily-viewer",
+      authenticate: vi.fn(async () => ({ userId: "user-1" })),
+      authorizeWorkspace: vi.fn(async () => ({ ...workspace, role: "viewer" })),
+    });
+    (worker.registerNoteRoutes as any)(viewerRegistry, () => service);
+    const denied = await viewerRegistry.fetch(request("/api/v2/notes/daily", {
+      method: "POST", body: JSON.stringify({ daily_date: "2026-08-23" }),
+    }), {});
+    expect(denied.status).toBe(403);
+  });
+
   it("registers tenant-scoped CRUD, capture, and revision routes", async () => {
     const worker = await loadWorker();
     expect(worker.registerNoteRoutes).toBeTypeOf("function");

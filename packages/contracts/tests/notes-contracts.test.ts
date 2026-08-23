@@ -25,6 +25,16 @@ const note = {
 };
 
 describe("note contracts", () => {
+  it("accepts only a calendar date when opening a daily note", async () => {
+    const contracts = await loadContracts();
+    expect(contracts.DailyNoteInputSchema).toBeDefined();
+    const schema = contracts.DailyNoteInputSchema as { safeParse(value: unknown): { success: boolean } };
+
+    expect(schema.safeParse({ daily_date: "2026-08-23" }).success).toBe(true);
+    expect(schema.safeParse({ daily_date: "2026-8-23" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2026-08-23", title: "ignored" }).success).toBe(false);
+  });
+
   it("validates tenant-scoped notes and immutable revision snapshots", async () => {
     const contracts = await loadContracts();
     expect(contracts.NoteSchema).toBeDefined();

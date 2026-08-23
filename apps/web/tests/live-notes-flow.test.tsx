@@ -16,7 +16,9 @@ const findNoteTitle = () => screen.findByRole("textbox", { name: "笔记标题" 
 
 type NoteApiOptions = {
   createNote?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
+  openOrCreateDaily?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
   listNotes?: (workspaceId: string) => Promise<unknown>;
+  listToday?: (workspaceId: string) => Promise<unknown>;
   listTrash?: (workspaceId: string) => Promise<unknown>;
   deletePermanently?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
 };
@@ -69,6 +71,11 @@ function createApiClient(options: NoteApiOptions = {}) {
     if (input.path.startsWith("/api/v2/notifications/unread")) return { unread_count: 0 };
     if (input.path === "/api/v2/notes?status=active&limit=50") return options.listNotes?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
     if (input.path === "/api/v2/notes?status=trashed&limit=50") return options.listTrash?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
+    if (input.path.startsWith("/api/v2/notes?status=active&daily_date=")) return options.listToday?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
+    if (input.path === "/api/v2/notes/daily" && input.method === "POST") {
+      if (options.openOrCreateDaily) return options.openOrCreateDaily(input);
+      return { note: { ...serverNoteForFlow(), id: `daily-${nextNoteId++}`, title: `Daily Note ${input.body?.daily_date ?? ""}`, daily_date: input.body?.daily_date ?? null } };
+    }
     if (input.path.startsWith("/api/v2/notes/") && input.method === "DELETE") {
       if (options.deletePermanently) return options.deletePermanently(input);
       return { deleted: true };
@@ -148,6 +155,65 @@ function renderWorkspaceWithStore(
 }
 
 describe("live note workspace flow", () => {
+  it("opens an existing Today note locally without another create request", async () => {
+    const date = [new Date().getFullYear(), String(new Date().getMonth() + 1).padStart(2, "0"), String(new Date().getDate()).padStart(2, "0")].join("-");
+    const daily = { ...serverNoteForFlow(), id: "daily-existing", title: "Existing daily", daily_date: date };
+    const apiClient = createApiClient({ listToday: async () => ({ items: [daily], next_cursor: null }) });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "今日" }));
+    await screen.findByRole("button", { name: /Existing daily/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开今日笔记" }));
+
+    expect(await findNoteTitle()).toHaveValue("Existing daily");
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveFocus());
+    expect(apiClient.request.mock.calls.filter(([request]) => request.path === "/api/v2/notes/daily" && request.method === "POST")).toHaveLength(0);
+  });
+
+  it("creates, selects, and focuses a missing Today note while preventing duplicate requests", async () => {
+    let resolveDaily!: (value: unknown) => void;
+    const dailyBlocked = new Promise((resolve) => { resolveDaily = resolve; });
+    const apiClient = createApiClient({ listToday: async () => ({ items: [], next_cursor: null }), openOrCreateDaily: async () => dailyBlocked });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "今日" }));
+    const openDaily = await screen.findByRole("button", { name: "打开今日笔记" });
+    fireEvent.click(openDaily);
+    fireEvent.click(openDaily);
+    await waitFor(() => expect(apiClient.request.mock.calls.filter(([request]) => request.path === "/api/v2/notes/daily" && request.method === "POST")).toHaveLength(1));
+    expect(openDaily).toBeDisabled();
+
+    const request = apiClient.request.mock.calls.find(([input]) => input.path === "/api/v2/notes/daily")![0];
+    resolveDaily({ note: { ...serverNoteForFlow(), id: "daily-created", title: `Daily Note ${request.body!.daily_date}`, daily_date: request.body!.daily_date } });
+    expect(await findNoteTitle()).toHaveValue(`Daily Note ${request.body!.daily_date}`);
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveFocus());
+  });
+
+  it("keeps the current draft and Today view when opening today's note fails", async () => {
+    let resolveCreate!: (value: unknown) => void;
+    const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });
+    const apiClient = createApiClient({
+      createNote: async () => createBlocked,
+      listToday: async () => ({ items: [], next_cursor: null }),
+      openOrCreateDaily: async () => { throw new ApiClientError({ code: "NETWORK_ERROR", message: "offline", retryable: true }); },
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    fireEvent.change(await findNoteTitle(), { target: { value: "保留的草稿" } });
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "今日" }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开今日笔记" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("今日笔记暂时无法打开，可重试。当前选择和草稿内容已保留。");
+    expect(screen.getByRole("button", { name: "今日" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("保留的草稿");
+    resolveCreate({ note: serverNoteForFlow() });
+  });
+
   it.each([
     ["conflict", new ApiClientError({ code: "NOTE_CONFLICT", message: "Conflict", request_id: "req-conflict", retryable: false }), "笔记已发生变化", "req-conflict"],
     ["not trashed", new ApiClientError({ code: "NOTE_NOT_TRASHED", message: "Not trashed", request_id: "req-not-trashed", retryable: false }), "已不在回收站", "req-not-trashed"],

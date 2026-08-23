@@ -1,5 +1,6 @@
 import type {
   CreateNoteInput,
+  DailyNoteInput,
   DeleteNoteInput,
   Note,
   NoteRevision,
@@ -77,6 +78,10 @@ export class NotesClient {
 
   create(input: CreateNoteInput, options: NoteCommandOptions = {}) {
     return this.noteCommand<Note>("/api/v2/notes", "POST", input, options.idempotencyKey);
+  }
+
+  openOrCreateDaily(dailyDate: DailyNoteInput["daily_date"]) {
+    return this.noteCommand<Note>("/api/v2/notes/daily", "POST", { daily_date: dailyDate });
   }
 
   update(noteId: string, input: UpdateNoteInput, options: NoteCommandOptions = {}) {

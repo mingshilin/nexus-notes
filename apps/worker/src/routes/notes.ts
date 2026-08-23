@@ -1,5 +1,6 @@
 import {
   CreateNoteInputSchema,
+  DailyNoteInputSchema,
   DeleteNoteInputSchema,
   QuickCaptureInputSchema,
   NoteStatusSchema,
@@ -16,7 +17,7 @@ interface NoteRegistry<TEnv> {
 
 type NoteRouteService = Pick<
   NoteService,
-  "list" | "create" | "get" | "update" | "listRevisions" | "restore" | "deletePermanently" | "quickCapture"
+  "list" | "create" | "openOrCreateDaily" | "get" | "update" | "listRevisions" | "restore" | "deletePermanently" | "quickCapture"
 >;
 
 function listOptions(request: Request) {
@@ -58,6 +59,18 @@ export function registerNoteRoutes<TEnv>(
     auth: "workspace",
     handler: async ({ request, env, workspace }) => ({
       data: await createService(env).list(workspace!, listOptions(request)),
+    }),
+  });
+
+  registry.register({
+    method: "POST",
+    path: "/api/v2/notes/daily",
+    auth: "workspace",
+    minimumRole: "editor",
+    quota: "notes",
+    body: DailyNoteInputSchema,
+    handler: async ({ env, workspace, body, requestId }) => ({
+      data: { note: await createService(env).openOrCreateDaily(mutationContext(workspace!, requestId), body) },
     }),
   });
 

@@ -27,6 +27,7 @@ const serverNote = {
 function createRepository(overrides: Record<string, unknown> = {}) {
   return {
     createNote: vi.fn(async (input) => ({ ...serverNote, ...input, revision: 1 })),
+    openOrCreateDaily: vi.fn(async (input) => ({ ...serverNote, ...input, daily_date: input.dailyDate, revision: 1 })),
     getNote: vi.fn(async () => serverNote),
     listNotes: vi.fn(async () => ({ items: [serverNote], nextCursor: null })),
     updateNote: vi.fn(async () => ({ note: { ...serverNote, revision: 4 }, current: null })),
@@ -38,6 +39,33 @@ function createRepository(overrides: Record<string, unknown> = {}) {
 }
 
 describe("NoteService", () => {
+  it("maps a daily date to the repository operation without falling back to normal creation", async () => {
+    const worker = await loadWorker();
+    const repository = createRepository();
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository, {
+      createId: () => "daily-note",
+      clock: () => new Date("2026-08-23T00:00:00.000Z"),
+    });
+
+    await expect(service.openOrCreateDaily(
+      { workspaceId: "ws-1", userId: "user-1", requestId: "req-daily" },
+      { daily_date: "2026-08-23" },
+    )).resolves.toMatchObject({ daily_date: "2026-08-23", revision: 1 });
+
+    expect(repository.openOrCreateDaily).toHaveBeenCalledWith(expect.objectContaining({
+      id: "daily-note",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      dailyDate: "2026-08-23",
+      title: expect.stringContaining("2026-08-23"),
+      content: "",
+      source: "manual",
+      requestId: "req-daily",
+    }));
+    expect(repository.createNote).not.toHaveBeenCalled();
+  });
+
   it("creates tenant-scoped notes and derives readable quick-capture titles", async () => {
     const worker = await loadWorker();
     expect(worker.NoteService).toBeTypeOf("function");

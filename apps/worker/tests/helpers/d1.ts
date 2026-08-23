@@ -15,6 +15,7 @@ export const migrationPaths = [
   "../../migrations/0009_task9_operations.sql",
   "../../migrations/0010_profile_account_center.sql",
   "../../migrations/0011_profile_audit_enforcement.sql",
+  "../../migrations/0012_daily_notes.sql",
 ];
 
 export function splitMigration(sql: string) {
