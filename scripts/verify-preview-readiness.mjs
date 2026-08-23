@@ -17,6 +17,7 @@ export function verifyPreviewConfig(config) {
   assertReady(/preview_urls\s*=\s*true/.test(config), "preview: preview_urls must remain enabled");
   assertReady(/main\s*=\s*"src\/index\.ts"/.test(config), "preview: Worker entry must be apps/worker/src/index.ts");
   assertReady(/directory\s*=\s*"\.\.\/web\/dist"/.test(config), "preview: assets must use the Beta web build");
+  assertReady(/run_worker_first\s*=\s*\["\/\*"\]/.test(config), "preview: all asset paths must pass through the security gateway");
   assertReady(/database_id\s*=\s*"<PREVIEW_D1_DATABASE_ID>"/.test(config), "preview: example must not contain a real D1 ID");
   assertReady(/bucket_name\s*=\s*"nexus-notes-public-beta-preview-files"/.test(config), "preview: private FILES bucket is missing");
   assertReady(/queue\s*=\s*"nexus-notes-public-beta-preview-jobs"/.test(config), "preview: JOBS queue is missing");

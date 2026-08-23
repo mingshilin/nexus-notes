@@ -7,6 +7,7 @@ import type { LocalDraft } from "../src/data/local-store";
 import { AdaptiveWorkbench } from "../src/layout/AdaptiveWorkbench";
 import { ProductNavigation, type ProductDomain } from "../src/navigation/ProductNavigation";
 import { NoteDraftController } from "../src/notes/note-draft-controller";
+import { NoteOrganizationPanel } from "../src/notes/NoteOrganizationPanel";
 
 const user = { id: "u1", email: "u@example.test", displayName: "用户" };
 
@@ -379,6 +380,35 @@ describe("App product navigation", () => {
     expect(within(quickStart).getByRole("button", { name: "新建笔记" })).toBeVisible();
     expect(within(quickStart).getByRole("button", { name: "创建内容" })).toBeVisible();
     expect(within(quickStart).getByRole("button", { name: "个人资料与设置" })).toBeVisible();
+  });
+
+  it("exposes note organization controls for folder filtering and creation", async () => {
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+
+    const organization = await screen.findByRole("region", { name: "笔记整理" });
+    expect(within(organization).getByRole("button", { name: "全部文件夹" })).toBeVisible();
+    expect(within(organization).getByRole("textbox", { name: "新建文件夹名称" })).toBeVisible();
+    expect(within(organization).getByRole("button", { name: "创建文件夹" })).toBeVisible();
+  });
+
+  it("lets users select a folder and create one without losing the input on success", async () => {
+    const folder = {
+      id: "folder-1", workspace_id: "ws-1", parent_id: null, name: "项目", position: 0, revision: 1,
+      created_at: "2026-08-23T00:00:00.000Z", updated_at: "2026-08-23T00:00:00.000Z",
+    };
+    const onSelectFolder = vi.fn();
+    const onCreateFolder = vi.fn(async () => undefined);
+    render(<NoteOrganizationPanel folders={[folder]} selectedFolderId={null} onSelectFolder={onSelectFolder} onCreateFolder={onCreateFolder} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "文件夹：项目" }));
+    expect(onSelectFolder).toHaveBeenCalledWith("folder-1");
+
+    const organization = screen.getByRole("region", { name: "笔记整理" });
+    const folderName = within(organization).getByRole("textbox", { name: "新建文件夹名称" });
+    fireEvent.change(folderName, { target: { value: "灵感" } });
+    fireEvent.click(within(organization).getByRole("button", { name: "创建文件夹" }));
+    await waitFor(() => expect(onCreateFolder).toHaveBeenCalledWith("灵感"));
+    expect(within(organization).getByRole("textbox", { name: "新建文件夹名称" })).toHaveValue("");
   });
 
   it("renders truthful knowledge, AI, and account destinations", async () => {

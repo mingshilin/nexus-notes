@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 
-const DEFAULT_DIST_DIR = "dist";
+const DEFAULT_DIST_DIR = "apps/web/dist";
 export const INITIAL_CHUNK_BUDGET_BYTES = 500_000;
 const FORBIDDEN_INITIAL_CHUNKS = ["markdown-vendor", "ocr-vendor", "ai-vendor"];
 const TURNSTILE_SITE_KEY_PATTERN = /0x4[A-Za-z0-9_-]{20,}/g;

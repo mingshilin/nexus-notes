@@ -7,7 +7,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, KnowledgeDiagnostic, Note, Profile, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
+import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, Profile, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient, ApiClientError } from "../data/api-client";
 import { ProfileClient } from "../data/profile-client";
@@ -27,6 +27,7 @@ import { NoteDraftController, type DraftSyncResult, type NoteDraftStore } from "
 import { NormalizedCache } from "../data/normalized-cache";
 import { ProductNavigation, type AccountSubsection, type ProductDomain } from "../navigation/ProductNavigation";
 import { QuickCapturePanel } from "../notes/QuickCapturePanel";
+import { NoteOrganizationPanel } from "../notes/NoteOrganizationPanel";
 import { CreateCenter, type CreateActionResult } from "../create";
 import { FeatureHub } from "../features";
 import {
@@ -281,6 +282,9 @@ function AuthenticatedWorkspace({
   const [notes, setNotes] = useState<Note[]>([]);
   const [notesLoading, setNotesLoading] = useState(Boolean(workspaceId));
   const [notesError, setNotesError] = useState<string | null>(null);
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folderLoading, setFolderLoading] = useState(Boolean(workspaceId));
+  const [noteFolderFilter, setNoteFolderFilter] = useState<string | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [workspaceModal, setWorkspaceModal] = useState<WorkspaceModal | null>(null);
   const createCenterOpen = workspaceModal === "create";
@@ -310,6 +314,7 @@ function AuthenticatedWorkspace({
   const [dailyNoteOpening, setDailyNoteOpening] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftContent, setDraftContent] = useState("");
+  const [draftFolderId, setDraftFolderId] = useState<string | null>(null);
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteMessage, setNoteMessage] = useState<string | null>(null);
   const [noteError, setNoteError] = useState<string | null>(null);
@@ -377,12 +382,34 @@ function AuthenticatedWorkspace({
   const mountedRef = useRef(true);
   const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
   permanentDeletePendingRef.current = permanentDeletePending;
+  const visibleNotes = noteFolderFilter === null
+    ? notes
+    : notes.filter((note) => note.folder_id === noteFolderFilter);
   const noteTargets = notes.map((note) => ({
     type: "note" as const,
     id: note.id,
     label: note.title.trim() || "未命名笔记",
   }));
   const userId = user.id;
+
+  useEffect(() => {
+    if (!workspaceId) {
+      setFolders([]);
+      setFolderLoading(false);
+      setNoteFolderFilter(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setFolderLoading(true);
+    void new KnowledgeClient(apiClient, workspaceId).listFolders(controller.signal).then((items) => {
+      if (!controller.signal.aborted) setFolders(items);
+    }).catch(() => {
+      if (!controller.signal.aborted) setFolders([]);
+    }).finally(() => {
+      if (!controller.signal.aborted) setFolderLoading(false);
+    });
+    return () => controller.abort();
+  }, [apiClient, workspaceId]);
 
   const closePermanentDeleteDialog = (focusTarget: "origin" | "fallback" = "origin") => {
     permanentDeleteFocusTargetRef.current = focusTarget;
@@ -474,6 +501,7 @@ function AuthenticatedWorkspace({
       setCreatingNote(true);
       setDraftTitle(draft.title);
       setDraftContent(draft.content);
+      setDraftFolderId(null);
       setNoteMessage(null);
       setNoteError(null);
       setActiveDomain("notes");
@@ -501,6 +529,7 @@ function AuthenticatedWorkspace({
     setCreatingNote(false);
     setDraftTitle(note.title);
     setDraftContent(note.content);
+    setDraftFolderId(note.folder_id);
     draftTitleRef.current = note.title;
     draftContentRef.current = note.content;
     setNoteMessage(null);
@@ -509,6 +538,29 @@ function AuthenticatedWorkspace({
     setSelectedCommentId(null);
     setResolvedNotificationRecord(null);
     setActivePane("canvas");
+  };
+
+  const selectFolderFilter = (folderId: string | null) => {
+    setFeatureMapOpen(false);
+    noteListViewRef.current = "all";
+    setNoteListView("all");
+    setNoteFolderFilter(folderId);
+    setActivePane("context");
+    if (!activeDraftIdRef.current) {
+      userSelectedNote.current = false;
+      setSelectedNoteId(null);
+      setCreatingNote(false);
+      setDraftTitle("");
+      setDraftContent("");
+      setDraftFolderId(null);
+    }
+  };
+
+  const createFolder = async (name: string) => {
+    if (!workspaceId) throw new Error("Workspace is required");
+    const folder = await new KnowledgeClient(apiClient, workspaceId).createFolder({ name });
+    setFolders((current) => [...current, folder].sort((left, right) => left.position - right.position || left.name.localeCompare(right.name)));
+    selectFolderFilter(folder.id);
   };
 
   const openTodayNote = async (): Promise<CreateActionResult> => {
@@ -562,6 +614,7 @@ function AuthenticatedWorkspace({
       setCreatingNote(false);
       setDraftTitle("");
       setDraftContent("");
+      setDraftFolderId(null);
     }
   };
 
@@ -580,6 +633,7 @@ function AuthenticatedWorkspace({
         base_revision: selectedNote.revision,
         title: draftTitle,
         content: draftContent,
+        folder_id: draftFolderId,
         source: "manual",
       });
     void request.then((saved) => {
@@ -588,6 +642,7 @@ function AuthenticatedWorkspace({
       setCreatingNote(false);
       setDraftTitle(saved.title);
       setDraftContent(saved.content);
+      setDraftFolderId(saved.folder_id);
       draftTitleRef.current = saved.title;
       draftContentRef.current = saved.content;
       setNoteMessage("已保存");
@@ -602,11 +657,13 @@ function AuthenticatedWorkspace({
     setNoteMessage(null);
     setNoteError(null);
     const contentChanged = draftTitle !== selectedNote.title || draftContent !== selectedNote.content;
+    const folderChanged = draftFolderId !== selectedNote.folder_id;
     void new NotesClient(apiClient, workspaceId).update(selectedNote.id, {
       base_revision: selectedNote.revision,
       status,
       source: "manual",
       ...(contentChanged ? { title: draftTitle, content: draftContent } : {}),
+      ...(folderChanged ? { folder_id: draftFolderId } : {}),
     }).then((saved) => {
       const nextView: NoteListView = status === "trashed" ? "trash" : "all";
       noteListViewRef.current = nextView;
@@ -617,6 +674,7 @@ function AuthenticatedWorkspace({
       setCreatingNote(false);
       setDraftTitle(saved.title);
       setDraftContent(saved.content);
+      setDraftFolderId(saved.folder_id);
       draftTitleRef.current = saved.title;
       draftContentRef.current = saved.content;
       setNoteMessage(status === "trashed" ? "已移入回收站" : "已恢复");
@@ -645,6 +703,7 @@ function AuthenticatedWorkspace({
       setSelectedNoteId(null);
       setDraftTitle("");
       setDraftContent("");
+      setDraftFolderId(null);
       draftTitleRef.current = "";
       draftContentRef.current = "";
       setNoteMessage("笔记已永久删除");
@@ -688,6 +747,7 @@ function AuthenticatedWorkspace({
     setCreatingNote(false);
     setDraftTitle(result.note.title);
     setDraftContent(result.note.content);
+    setDraftFolderId(result.note.folder_id);
     draftTitleRef.current = result.note.title;
     draftContentRef.current = result.note.content;
     setNoteMessage("已保存");
@@ -815,18 +875,21 @@ function AuthenticatedWorkspace({
     setNotesLoading(true);
     setNotesError(null);
     const todayDate = localDateKey();
+    const selectedFolderId = noteListView === "all" ? noteFolderFilter ?? undefined : undefined;
     const listOptions = noteListView === "inbox"
       ? { status: "active" as const, folderId: null, limit: 50, signal: controller.signal }
       : noteListView === "today"
         ? { status: "active" as const, dailyDate: todayDate, limit: 50, signal: controller.signal }
         : noteListView === "trash"
           ? { status: "trashed" as const, limit: 50, signal: controller.signal }
-          : { status: "active" as const, limit: 50, signal: controller.signal };
+          : { status: "active" as const, folderId: selectedFolderId, limit: 50, signal: controller.signal };
     void new NotesClient(apiClient, workspaceId).list(listOptions).then((page) => {
       if (controller.signal.aborted) return;
       const activeNotes = page.items.filter((note) => noteMatchesListView(note, noteListView, todayDate));
       const installedNotes = [...installedNotesRef.current.values()]
-        .filter((note) => note.workspace_id === workspaceId && noteMatchesListView(note, noteListView, todayDate));
+        .filter((note) => note.workspace_id === workspaceId
+          && noteMatchesListView(note, noteListView, todayDate)
+          && (noteFolderFilter === null || note.folder_id === noteFolderFilter));
       const byId = new Map([...activeNotes, ...installedNotes].map((note) => [note.id, note]));
       setNotes([...byId.values()]);
       if (!activeDraftIdRef.current && !activationInFlight.current && !userSelectedNote.current) {
@@ -841,7 +904,7 @@ function AuthenticatedWorkspace({
       if (!controller.signal.aborted) setNotesLoading(false);
     });
     return () => controller.abort();
-  }, [apiClient, noteListView, workspaceId]);
+  }, [apiClient, noteFolderFilter, noteListView, workspaceId]);
 
   useEffect(() => {
     if (logoutPending || !workspaceId || notesLoading || activeDraftIdRef.current || userSelectedNote.current) return undefined;
@@ -871,11 +934,13 @@ function AuthenticatedWorkspace({
     if (selectedNote) {
       setDraftTitle(selectedNote.title);
       setDraftContent(selectedNote.content);
+      setDraftFolderId(selectedNote.folder_id);
       draftTitleRef.current = selectedNote.title;
       draftContentRef.current = selectedNote.content;
     } else {
       setDraftTitle("");
       setDraftContent("");
+      setDraftFolderId(null);
       draftTitleRef.current = "";
       draftContentRef.current = "";
     }
@@ -1281,6 +1346,14 @@ function AuthenticatedWorkspace({
           </button>
         </div>
       </div>
+      <NoteOrganizationPanel
+        folders={folders}
+        selectedFolderId={noteFolderFilter}
+        loading={folderLoading}
+        disabled={logoutPending || !workspaceId}
+        onSelectFolder={selectFolderFilter}
+        onCreateFolder={createFolder}
+      />
       <nav className="note-list-views" aria-label="笔记视图">
         {([["all", "全部"], ["inbox", "收件箱"], ["today", "今日"], ["trash", "回收站"]] as const).map(([view, label]) => (
           <button key={view} type="button" aria-pressed={noteListView === view} className={noteListView === view ? "active" : ""} onClick={() => changeNoteListView(view)}>{label}</button>
@@ -1295,7 +1368,7 @@ function AuthenticatedWorkspace({
       <label className="search-field"><Search size={15} /><input aria-label="搜索笔记" placeholder="搜索笔记" /></label>
       {notesLoading ? <p className="database-empty" role="status">正在加载笔记…</p> : null}
       {notesError ? <p className="database-operation-error" role="alert">{notesError}</p> : null}
-      {!notesLoading && notes.length === 0 ? (
+      {!notesLoading && visibleNotes.length === 0 ? (
         <div className="note-empty-state">
           <p className="database-empty">暂无笔记，开始记录你的想法。</p>
           <button className="primary-create-note note-empty-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
@@ -1304,7 +1377,7 @@ function AuthenticatedWorkspace({
           </button>
         </div>
       ) : null}
-      {notes.map((note) => (
+      {visibleNotes.map((note) => (
         <button key={note.id} className={note.id === selectedNoteId ? "note-row selected" : "note-row"} type="button" onClick={() => selectNote(note)}>
           <strong>{note.title.trim() || "未命名笔记"}</strong><span>{new Date(note.updated_at).toLocaleDateString()}</span>
           <p>{note.content.trim().slice(0, 80) || "空白笔记"}</p>
@@ -1491,6 +1564,14 @@ function AuthenticatedWorkspace({
             </button>
           </div>
         </section>
+        <NoteOrganizationPanel
+          folders={folders}
+          selectedFolderId={noteFolderFilter}
+          loading={folderLoading}
+          disabled={logoutPending || !workspaceId}
+          onSelectFolder={selectFolderFilter}
+          onCreateFolder={createFolder}
+        />
         {noteError && activePane !== "context" ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
         <hr />
         <h2>自适应工作台</h2>
@@ -1640,6 +1721,7 @@ function AuthenticatedWorkspace({
             <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
             <h1>{draftTitle.trim() || "未命名笔记"}</h1>
             <label className="note-editor-field">标题<input ref={titleInputRef} aria-label="笔记标题" disabled={logoutPending || selectedNote?.status === "trashed"} value={draftTitle} onChange={(event) => updateActiveDraftInput(event.target.value, draftContentRef.current)} /></label>
+            <label className="note-editor-field">文件夹<select aria-label="笔记文件夹" disabled={logoutPending || creatingNote || selectedNote?.status === "trashed"} value={draftFolderId ?? ""} onChange={(event) => { setDraftFolderId(event.target.value || null); setNoteMessage(null); }}><option value="">未分类</option>{folders.map((folder, index) => <option key={`${folder.id || "folder"}-${index}`} value={folder.id}>{folder.name}</option>)}</select></label>
             <label className="note-editor-field">内容<textarea aria-label="笔记内容" disabled={logoutPending || selectedNote?.status === "trashed"} value={draftContent} onChange={(event) => updateActiveDraftInput(draftTitleRef.current, event.target.value)} /></label>
             <div className="note-editor-actions">
               {selectedNote?.status !== "trashed" ? (

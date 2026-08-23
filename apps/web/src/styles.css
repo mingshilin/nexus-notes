@@ -118,6 +118,20 @@ button { color: inherit; }
 .note-row strong { font-size: 14px; }
 .note-row span { float: right; color: hsl(var(--muted-foreground)); font-size: 11px; }
 .note-row p { display: -webkit-box; margin: 7px 0 0; overflow: hidden; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.note-organization { display: grid; gap: 9px; margin: 12px 0 16px; padding: 12px; border: 1px solid var(--border-subtle); border-radius: 15px; background: color-mix(in srgb, var(--surface-elevated) 74%, transparent); }
+.note-organization-heading { display: flex; align-items: center; justify-content: space-between; color: hsl(var(--muted-foreground)); }
+.note-organization-heading h3 { margin: 3px 0 0; color: hsl(var(--foreground)); font-size: 14px; }
+.note-organization-list { display: grid; max-height: 142px; gap: 3px; overflow-y: auto; }
+.note-organization-list button { display: flex; min-width: 0; min-height: 34px; align-items: center; justify-content: space-between; gap: 8px; border: 0; border-radius: 9px; padding: 6px 8px; color: hsl(var(--foreground)); text-align: left; background: transparent; cursor: pointer; font-size: 12px; }
+.note-organization-list button:hover, .note-organization-list button.active { color: var(--nexus-accent); background: rgba(0,122,255,.08); }
+.note-organization-list button:disabled { cursor: not-allowed; opacity: .5; }
+.note-organization-list button small { color: hsl(var(--muted-foreground)); font-size: 10px; }
+.note-organization-create { display: flex; min-width: 0; gap: 6px; }
+.note-organization-create input { min-width: 0; flex: 1; height: 34px; border: 1px solid var(--border-subtle); border-radius: 9px; padding: 0 9px; color: inherit; background: var(--surface-elevated); font-size: 12px; }
+.note-organization-create button { display: inline-flex; min-height: 34px; flex: 0 0 auto; align-items: center; gap: 5px; border: 1px solid rgba(0,122,255,.22); border-radius: 9px; padding: 0 9px; color: var(--nexus-accent); background: rgba(0,122,255,.08); cursor: pointer; font-size: 11px; font-weight: 700; }
+.note-organization-create button:disabled { cursor: not-allowed; opacity: .5; }
+.note-organization-state, .note-organization-error { margin: 0; color: hsl(var(--muted-foreground)); font-size: 11px; line-height: 1.4; }
+.note-organization-error { color: hsl(var(--destructive)); }
 .workbench-canvas { min-width: 0; min-height: 0; background: var(--surface-editor); }
 .page-scroll-area { width: 100%; height: 100%; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
 .editor-document { min-height: 100%; }
@@ -269,9 +283,9 @@ button { color: inherit; }
 .editor-copy .lead { color: hsl(var(--muted-foreground)); font-size: 20px; }
 .editor-copy hr { margin: 46px 0; border: 0; border-top: 1px solid var(--border-subtle); }
 .note-editor-field { display: grid; gap: 7px; margin: 18px 0; color: hsl(var(--muted-foreground)); font-size: 11px; font-weight: 700; letter-spacing: .08em; }
-.note-editor-field input, .note-editor-field textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--border-subtle); border-radius: 13px; padding: 12px 14px; outline: 0; color: hsl(var(--foreground)); background: rgba(255,255,255,.62); font-size: 16px; letter-spacing: 0; }
+.note-editor-field input, .note-editor-field select, .note-editor-field textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--border-subtle); border-radius: 13px; padding: 12px 14px; outline: 0; color: hsl(var(--foreground)); background: rgba(255,255,255,.62); font-size: 16px; letter-spacing: 0; }
 .note-editor-field textarea { min-height: 220px; resize: vertical; line-height: 1.7; }
-.note-editor-field input:focus, .note-editor-field textarea:focus { border-color: rgba(0,122,255,.45); box-shadow: 0 0 0 3px rgba(0,122,255,.12); }
+.note-editor-field input:focus, .note-editor-field select:focus, .note-editor-field textarea:focus { border-color: rgba(0,122,255,.45); box-shadow: 0 0 0 3px rgba(0,122,255,.12); }
 .note-editor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 20px 0; }
 .note-editor-actions button { border: 0; border-radius: 11px; padding: 10px 16px; color: white; background: var(--nexus-accent); cursor: pointer; font-weight: 700; }
 .note-editor-actions button:disabled { cursor: not-allowed; opacity: .48; }

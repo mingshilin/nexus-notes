@@ -13,7 +13,7 @@ describe("preview Worker configuration", () => {
 
     expect(assets).toContain('binding = "ASSETS"');
     expect(assets).toContain('not_found_handling = "single-page-application"');
-    expect(assets).toContain('run_worker_first = ["/api/*"]');
+    expect(assets).toContain('run_worker_first = ["/*"]');
   });
 
   it("redrives stale OCR jobs and pending outbox rows every minute", () => {
