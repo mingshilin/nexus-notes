@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type {
+  Folder,
   SavedSearch,
   SavedSearchFilters,
   SearchHit,
   SearchRequest,
+  Tag,
 } from "@nexus/contracts";
 import { KnowledgeClient } from "../data/knowledge-client";
 
-type SearchClient = Pick<KnowledgeClient, "search" | "listSavedSearches" | "createSavedSearch" | "deleteSavedSearch">;
+type SearchClient = Pick<KnowledgeClient, "search" | "listSavedSearches" | "createSavedSearch" | "deleteSavedSearch" | "listFolders" | "listTags">;
 type SearchEntityType = SavedSearchFilters["source_types"][number];
 
 const emptyFilters: SavedSearchFilters = {
@@ -67,6 +69,9 @@ export function KnowledgeSearchPanel({ client }: { client: SearchClient }) {
   const [results, setResults] = useState<SearchHit[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [taxonomyLoading, setTaxonomyLoading] = useState(true);
   const [saveName, setSaveName] = useState("");
   const [loading, setLoading] = useState(false);
   const [savedLoading, setSavedLoading] = useState(true);
@@ -84,6 +89,21 @@ export function KnowledgeSearchPanel({ client }: { client: SearchClient }) {
       if (!controller.signal.aborted) setError("保存的搜索暂时无法加载，请稍后重试。");
     }).finally(() => {
       if (!controller.signal.aborted) setSavedLoading(false);
+    });
+    return () => controller.abort();
+  }, [client]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setTaxonomyLoading(true);
+    void Promise.all([client.listFolders(controller.signal), client.listTags(controller.signal)]).then(([nextFolders, nextTags]) => {
+      if (controller.signal.aborted) return;
+      setFolders(nextFolders);
+      setTags(nextTags);
+    }).catch(() => {
+      if (!controller.signal.aborted) setError("文件夹和标签暂时无法加载，仍可使用 ID 过滤。");
+    }).finally(() => {
+      if (!controller.signal.aborted) setTaxonomyLoading(false);
     });
     return () => controller.abort();
   }, [client]);
@@ -116,6 +136,15 @@ export function KnowledgeSearchPanel({ client }: { client: SearchClient }) {
 
   const updateListFilter = (key: ListFilterKey, value: string) => {
     setFilters((current) => ({ ...current, [key]: parseList(value) }));
+  };
+
+  const toggleListValue = (key: "tag_ids" | "folder_ids", value: string) => {
+    setFilters((current) => ({
+      ...current,
+      [key]: current[key].includes(value)
+        ? current[key].filter((item) => item !== value)
+        : [...current[key], value],
+    }));
   };
 
   const toggleSource = (value: SearchEntityType) => {
@@ -202,6 +231,8 @@ export function KnowledgeSearchPanel({ client }: { client: SearchClient }) {
         <label className="knowledge-search-filter">置顶<select aria-label="置顶过滤" value={filters.pinned === undefined ? "" : String(filters.pinned)} onChange={(event) => setFilters((current) => ({ ...current, pinned: event.target.value === "" ? undefined : event.target.value === "true" }))}><option value="">全部</option><option value="true">仅置顶</option><option value="false">未置顶</option></select></label>
         <div className="knowledge-search-checks"><span>来源类型</span>{sourceOptions.map((option) => <label key={option.value}><input type="checkbox" checked={filters.source_types.includes(option.value)} onChange={() => toggleSource(option.value)} />{option.label}</label>)}</div>
         <div className="knowledge-search-checks"><span>OCR 状态</span>{ocrOptions.map((status) => <label key={status}><input type="checkbox" checked={filters.ocr_statuses.includes(status)} onChange={() => toggleOcrStatus(status)} />{status}</label>)}</div>
+        {taxonomyLoading ? <p className="knowledge-search-state" role="status">正在加载文件夹和标签…</p> : null}
+        {!taxonomyLoading && (folders.length > 0 || tags.length > 0) ? <div className="knowledge-search-taxonomy"><span>可读分类</span>{tags.map((tag) => <label key={tag.id}><input type="checkbox" aria-label={`标签：${tag.name}`} checked={filters.tag_ids.includes(tag.id)} onChange={() => toggleListValue("tag_ids", tag.id)} />标签：{tag.name}</label>)}{folders.map((folder) => <label key={folder.id}><input type="checkbox" aria-label={`文件夹：${folder.name}`} checked={filters.folder_ids.includes(folder.id)} onChange={() => toggleListValue("folder_ids", folder.id)} />文件夹：{folder.name}</label>)}</div> : null}
         <button type="button" className="knowledge-search-reset" onClick={resetFilters}>清除过滤</button>
       </fieldset>
       <form className="knowledge-search-save" onSubmit={saveCurrentSearch}>

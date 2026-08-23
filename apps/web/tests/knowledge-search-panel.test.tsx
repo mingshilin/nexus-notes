@@ -41,6 +41,8 @@ function createClient() {
   return {
     search: vi.fn(async () => ({ items: [searchHit], next_cursor: null })),
     listSavedSearches: vi.fn(async () => [savedSearch]),
+    listFolders: vi.fn(async () => [{ id: "folder-1", workspace_id: "ws-1", name: "项目", parent_id: null, position: 0, revision: 1, created_at: "2026-08-23T00:00:00.000Z", updated_at: "2026-08-23T00:00:00.000Z" }]),
+    listTags: vi.fn(async () => [{ id: "tag-1", workspace_id: "ws-1", name: "研究", color: "", revision: 1, created_at: "2026-08-23T00:00:00.000Z", updated_at: "2026-08-23T00:00:00.000Z" }]),
     createSavedSearch: vi.fn(async (input: unknown) => ({ ...savedSearch, ...(input as object), id: "saved-2" })),
     deleteSavedSearch: vi.fn(async () => ({ deleted: true as const })),
   };
@@ -91,5 +93,18 @@ describe("KnowledgeSearchPanel", () => {
     const savedRow = screen.getByRole("listitem", { name: "Beta 资料" });
     fireEvent.click(within(savedRow).getByRole("button", { name: "删除Beta 资料" }));
     await waitFor(() => expect(client.deleteSavedSearch).toHaveBeenCalledWith("saved-2"));
+  });
+
+  it("offers readable folder and tag filters while preserving their IDs", async () => {
+    const client = createClient();
+    render(<KnowledgeSearchPanel client={client} />);
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: "标签：研究" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "文件夹：项目" }));
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+
+    await waitFor(() => expect(client.search).toHaveBeenCalledWith(expect.objectContaining({
+      filters: expect.objectContaining({ tag_ids: ["tag-1"], folder_ids: ["folder-1"] }),
+    })));
   });
 });
