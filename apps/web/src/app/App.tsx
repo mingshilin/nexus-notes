@@ -1,6 +1,7 @@
 import {
   Bell,
   Boxes,
+  LayoutGrid,
   Plus,
   Search,
   Sparkles,
@@ -267,6 +268,7 @@ function AuthenticatedWorkspace({
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const [createCenterOpen, setCreateCenterOpen] = useState(false);
+  const [featureMapOpen, setFeatureMapOpen] = useState(false);
   const [noteListView, setNoteListView] = useState<NoteListView>("all");
   const [creatingNote, setCreatingNote] = useState(false);
   const [dailyNoteOpening, setDailyNoteOpening] = useState(false);
@@ -421,6 +423,7 @@ function AuthenticatedWorkspace({
     if (logoutPending || !workspaceId || activationInFlight.current || activeDraftIdRef.current) return false;
     activationInFlight.current = true;
     userSelectedNote.current = true;
+    setFeatureMapOpen(false);
     setNoteError(null);
     void draftController.create(workspaceId).then((draft) => {
       activeDraftIdRef.current = draft.entity_id;
@@ -444,6 +447,7 @@ function AuthenticatedWorkspace({
   };
 
   const selectNote = (note: Note) => {
+    setFeatureMapOpen(false);
     activeDraftIdRef.current = null;
     setActiveDraftId(null);
     userSelectedNote.current = true;
@@ -463,14 +467,14 @@ function AuthenticatedWorkspace({
   };
 
   const openTodayNote = () => {
-    if (logoutPending || !workspaceId || dailyNoteOpeningRef.current) return;
+    if (logoutPending || !workspaceId || dailyNoteOpeningRef.current) return false;
     const dailyDate = localDateKey();
     const existing = notes.find((note) => note.status === "active" && note.daily_date === dailyDate);
     if (existing) {
       focusInstalledNoteRef.current = true;
       selectNote(existing);
       queueMicrotask(() => titleInputRef.current?.focus());
-      return;
+      return true;
     }
 
     dailyNoteOpeningRef.current = true;
@@ -487,6 +491,7 @@ function AuthenticatedWorkspace({
       dailyNoteOpeningRef.current = false;
       setDailyNoteOpening(false);
     });
+    return true;
   };
 
   const handleQuickCapture = (note: Note) => {
@@ -497,6 +502,7 @@ function AuthenticatedWorkspace({
 
   const changeNoteListView = (view: NoteListView) => {
     if (view === noteListView) return;
+    setFeatureMapOpen(false);
     noteListViewRef.current = view;
     setNoteListView(view);
     setActivePane("context");
@@ -1018,6 +1024,7 @@ function AuthenticatedWorkspace({
   const createFirstDatabase = () => createDatabaseFromName(firstDatabaseName);
 
   const openDatabaseCreation = () => {
+    setFeatureMapOpen(false);
     setFirstDatabaseName("");
     setActiveDomain("databases");
     setActivePane(databases.length > 0 ? "context" : "canvas");
@@ -1093,6 +1100,7 @@ function AuthenticatedWorkspace({
 
   const changeDomain = (domain: ProductDomain) => {
     if (domain === "collaboration") setCollaborationInitialSection("people");
+    setFeatureMapOpen(false);
     setActiveDomain(domain);
     setActivePane("canvas");
   };
@@ -1105,6 +1113,19 @@ function AuthenticatedWorkspace({
   const openAccountSubsection = (subsection: AccountSubsection) => {
     setAccountSubsection(subsection);
     changeDomain("account");
+  };
+  const openFeatureMap = () => {
+    setFeatureMapOpen(true);
+    setActiveDomain("notes");
+    setActivePane("canvas");
+  };
+  const navigateFeatureMap = (domain: Parameters<typeof changeDomain>[0] | "reminders") => {
+    if (domain === "reminders") return;
+    if (domain === "account") {
+      openAccountSubsection("personal");
+      return;
+    }
+    changeDomain(domain);
   };
   const changeWorkspace = async (nextWorkspaceId: string) => {
     if (!workspaceId || nextWorkspaceId === workspaceId) return;
@@ -1150,8 +1171,15 @@ function AuthenticatedWorkspace({
       onCreateDatabase={workspaceId ? openDatabaseCreation : undefined}
     />
   );
+  const featureMapAction = (
+    <button className="feature-map-trigger" type="button" aria-label="打开功能地图" aria-pressed={featureMapOpen} onClick={openFeatureMap}>
+      <LayoutGrid aria-hidden="true" size={16} />
+      <span>功能地图</span>
+    </button>
+  );
   const mobileCreateAction = activePane !== "context" ? (
     <div className="mobile-create-actions">
+      {featureMapAction}
       {createCenterAction}
       {activeDomain === "notes" ? (
         <button className="mobile-create-note-button" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
@@ -1163,6 +1191,7 @@ function AuthenticatedWorkspace({
   ) : null;
   const desktopCreateAction = (
     <div className="desktop-create-actions">
+      {featureMapAction}
       {createCenterAction}
       {activeDomain === "notes" ? (
         <button
@@ -1362,6 +1391,28 @@ function AuthenticatedWorkspace({
       <p className="product-domain-lead">当前没有可用工作区或协作能力。选择其他产品区域不会更改你的笔记数据。</p>
     </section>
   );
+  const workspaceOverviewCanvas = (
+    <article className="editor-document">
+      <header className="editor-toolbar">
+        <span className="saved-state" role="status" aria-live="polite"><span /> 已保存</span>
+        <div>
+          <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}><Bell aria-hidden="true" size={17} /></button>
+          <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>
+        </div>
+      </header>
+      <div className="editor-copy">
+        <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
+        <h1 ref={permanentDeleteFallbackRef} tabIndex={-1}>Public Beta 重写计划</h1>
+        <p className="lead">一个稳定、响应迅速、离线可恢复的知识工作台。</p>
+        <hr />
+        <h2>自适应工作台</h2>
+        <p>导航保持轻量，列表按需出现，主画布获得最多空间，检查器不再永久挤压编辑区域。</p>
+        <div className="callout"><Sparkles size={18} /><p>视觉风格继续使用原有蓝色强调、玻璃层级和舒适圆角。</p></div>
+        <FeatureHub availability={{ collaboration: collaborationEnabled }} onNavigate={navigateFeatureMap} />
+        {recoveryPanel}
+      </div>
+    </article>
+  );
 
   const collaborationRecords = resolvedNotificationRecord && !databaseRecords.some((record) => record.id === resolvedNotificationRecord.id)
     ? [...databaseRecords, resolvedNotificationRecord]
@@ -1458,6 +1509,7 @@ function AuthenticatedWorkspace({
 
   return (
     <>
+      <div className="workspace-modal-background" data-testid="workspace-modal-background" inert={createCenterOpen || undefined}>
       {serviceWorkerUpdate ? (
         <div className="update-banner" role="status">
           <span>新版本已准备好。</span>
@@ -1481,14 +1533,14 @@ function AuthenticatedWorkspace({
         contextualList={activeDomain === "databases" ? databaseContextualList : activeDomain === "notes" ? contextualList : undefined}
         inspector={<div className="inspector-content"><small>页面信息</small><h3>{inspectorTitle}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
         inspectorOpen={inspectorOpen}
-        externalModalOpen={permanentDeleteOpen}
+        externalModalOpen={permanentDeleteOpen || createCenterOpen}
         activePane={activePane}
         onActivePaneChange={setActivePane}
         onInspectorOpen={openInspector}
         onInspectorClose={closeInspector}
       >
         <>
-        {activeDomain === "collaboration" ? collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : collaborationUnavailableCanvas : activeDomain === "databases" ? databaseCanvas : activeDomain === "knowledge" ? knowledgeCanvas : activeDomain === "ai" ? aiCanvas : activeDomain === "account" ? accountCanvas : selectedNote || creatingNote ? <article className="editor-document">
+        {activeDomain === "collaboration" ? collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : collaborationUnavailableCanvas : activeDomain === "databases" ? databaseCanvas : activeDomain === "knowledge" ? knowledgeCanvas : activeDomain === "ai" ? aiCanvas : activeDomain === "account" ? accountCanvas : featureMapOpen ? workspaceOverviewCanvas : selectedNote || creatingNote ? <article className="editor-document">
           <header className="editor-toolbar">
             <span className="saved-state" role="status" aria-live="polite"><span /> {noteSaving ? "保存中…" : noteMessage ?? "未保存更改"}</span>
             <div>
@@ -1519,29 +1571,7 @@ function AuthenticatedWorkspace({
             <p className="note-content-preview" aria-label="笔记内容预览">{draftContent || "开始记录你的想法。"}</p>
             {recoveryPanel}
           </div>
-        </article> : <article className="editor-document">
-          <header className="editor-toolbar">
-            <span className="saved-state" role="status" aria-live="polite"><span /> 已保存</span>
-            <div>
-              <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}><Bell aria-hidden="true" size={17} /></button>
-              <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>
-            </div>
-          </header>
-          <div className="editor-copy">
-            <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
-            <h1 ref={permanentDeleteFallbackRef} tabIndex={-1}>Public Beta 重写计划</h1>
-            <p className="lead">一个稳定、响应迅速、离线可恢复的知识工作台。</p>
-            <hr />
-            <h2>自适应工作台</h2>
-            <p>导航保持轻量，列表按需出现，主画布获得最多空间，检查器不再永久挤压编辑区域。</p>
-            <div className="callout"><Sparkles size={18} /><p>视觉风格继续使用原有蓝色强调、玻璃层级和舒适圆角。</p></div>
-            <FeatureHub
-              availability={{ collaboration: collaborationEnabled }}
-              onNavigate={(domain) => { if (domain !== "reminders") changeDomain(domain); }}
-            />
-            {recoveryPanel}
-          </div>
-        </article>}
+        </article> : workspaceOverviewCanvas}
         <NotificationCenter
           client={collaborationClient}
           open={notificationOpen}
@@ -1553,6 +1583,7 @@ function AuthenticatedWorkspace({
         />
         </>
       </AdaptiveWorkbench>
+      </div>
       {quickCaptureOpen && workspaceId ? (
         <div className="quick-capture-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickCaptureOpen(false); }}>
           <div className="quick-capture-dialog" role="dialog" aria-modal="true" aria-labelledby="quick-capture-title" onMouseDown={(event) => event.stopPropagation()}>

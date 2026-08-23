@@ -1,18 +1,21 @@
 import { Bell, CalendarDays, Database, FileUp, Lightbulb, Plus, Zap, X } from "lucide-react";
 import { createPortal } from "react-dom";
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useWorkbenchModalState } from "../layout/AdaptiveWorkbench";
+
+export type CreateActionResult = void | boolean;
+export type CreateActionHandler = () => CreateActionResult | Promise<CreateActionResult>;
 
 export interface CreateCenterProps {
   open: boolean;
   onOpenChange(open: boolean): void;
   disabled?: boolean;
-  onCreateNote?(): void;
-  onQuickCapture?(): void;
-  onTodayNote?(): void;
-  onCreateDatabase?(): void;
-  onCreateReminder?(): void;
-  onImport?(): void;
+  onCreateNote?: CreateActionHandler;
+  onQuickCapture?: CreateActionHandler;
+  onTodayNote?: CreateActionHandler;
+  onCreateDatabase?: CreateActionHandler;
+  onCreateReminder?: CreateActionHandler;
+  onImport?: CreateActionHandler;
 }
 
 type CreateAction = {
@@ -20,7 +23,7 @@ type CreateAction = {
   label: string;
   description: string;
   icon: typeof Lightbulb;
-  run?: () => void;
+  run?: CreateActionHandler;
 };
 
 const focusableSelector = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
@@ -30,8 +33,12 @@ export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNot
   const triggerRef = useRef<HTMLButtonElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const wasOpenRef = useRef(false);
+  const [pendingAction, setPendingAction] = useState<CreateAction["id"] | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const titleId = useId();
   const descriptionId = useId();
+  const dialogId = `${titleId}-dialog`;
 
   const actions: CreateAction[] = [
     { id: "note", label: "新建笔记", description: "打开一篇空白笔记，马上开始记录。", icon: Lightbulb, run: onCreateNote },
@@ -43,10 +50,8 @@ export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNot
   ];
 
   useEffect(() => {
-    if (!open) {
-      triggerRef.current?.focus();
-      return undefined;
-    }
+    if (!open) return undefined;
+    wasOpenRef.current = true;
     setWorkbenchModalOpen(true);
     closeRef.current?.focus();
     const trapFocus = (event: KeyboardEvent) => {
@@ -78,9 +83,50 @@ export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNot
     };
   }, [onOpenChange, open, setWorkbenchModalOpen]);
 
+  useEffect(() => {
+    if (open || !wasOpenRef.current) return undefined;
+    wasOpenRef.current = false;
+    setPendingAction(null);
+    const timer = window.setTimeout(() => {
+      const trigger = triggerRef.current;
+      if (trigger && !trigger.closest("[inert]")) trigger.focus();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [open]);
+
+  const finishAction = (id: CreateAction["id"], label: string, result: CreateActionResult) => {
+    setPendingAction(null);
+    if (result === false) {
+      setActionError(`未能开始${label}。当前可能已有未完成操作，请完成后再试。`);
+      return;
+    }
+    setActionError(null);
+    onOpenChange(false);
+  };
+
+  const runAction = (id: CreateAction["id"], label: string, run: CreateActionHandler) => {
+    if (disabled || pendingAction) return;
+    setPendingAction(id);
+    setActionError(null);
+    try {
+      const result = run();
+      if (result instanceof Promise) {
+        void result.then((value) => finishAction(id, label, value)).catch(() => {
+          setPendingAction(null);
+          setActionError(`${label}启动失败，请稍后重试。`);
+        });
+        return;
+      }
+      finishAction(id, label, result);
+    } catch {
+      setPendingAction(null);
+      setActionError(`${label}启动失败，请稍后重试。`);
+    }
+  };
+
   const dialog = open ? (
     <div className="create-center-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onOpenChange(false); }}>
-      <div ref={dialogRef} className="create-center-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={descriptionId} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
+      <div id={dialogId} ref={dialogRef} className="create-center-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={descriptionId} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
         <header className="create-center-header">
           <div>
             <p className="eyebrow">创建中心</p>
@@ -91,10 +137,19 @@ export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNot
             <X aria-hidden="true" size={18} />
           </button>
         </header>
+        {disabled ? <p className="create-center-feedback" role="status">正在退出登录，请稍候。</p> : null}
+        {actionError ? <p className="create-center-feedback error" role="alert">{actionError}</p> : null}
         <div className="create-center-actions">
           {actions.map(({ id, label, description, icon: Icon, run }) => {
-            const available = Boolean(run);
-            const status = available ? null : id === "reminder" || id === "import" ? "即将开放" : "当前不可用";
+            const available = Boolean(run) && !disabled;
+            const pending = pendingAction === id;
+            const status = pending
+              ? "处理中"
+              : available
+                ? null
+                : disabled
+                  ? "暂不可用"
+                  : id === "reminder" || id === "import" ? "即将开放" : "当前不可用";
             const accessibleLabel = status ? `${label}，${status}` : label;
             return (
               <button
@@ -103,11 +158,11 @@ export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNot
                 className={available ? "create-center-action" : "create-center-action unavailable"}
                 aria-label={accessibleLabel}
                 aria-describedby={status ? `${titleId}-${id}-status` : undefined}
-                disabled={!available}
+                aria-busy={pending || undefined}
+                disabled={!available || pendingAction !== null}
                 onClick={() => {
                   if (!run) return;
-                  onOpenChange(false);
-                  run();
+                  runAction(id, label, run);
                 }}
               >
                 <span className="create-center-action-icon"><Icon aria-hidden="true" size={19} /></span>
@@ -123,7 +178,7 @@ export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNot
 
   return (
     <>
-      <button ref={triggerRef} className="create-center-trigger" type="button" aria-label="创建内容" aria-haspopup="dialog" aria-expanded={open} disabled={disabled} onClick={() => onOpenChange(true)}>
+      <button ref={triggerRef} className="create-center-trigger" type="button" aria-label="创建内容" aria-haspopup="dialog" aria-controls={dialogId} aria-expanded={open} disabled={disabled} onClick={() => { setActionError(null); onOpenChange(true); }}>
         <Plus aria-hidden="true" size={17} />
         <span>创建内容</span>
       </button>
