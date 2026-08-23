@@ -70,3 +70,53 @@ None. The repository already had untracked `pnpm-lock.yaml` and `pnpm-workspace.
 ## Commit SHA
 
 Implementation and tests: `cf187dc312ea06c503e24a39cbbcd95e25b65461` (`feat(beta): permanently delete trashed notes`).
+
+## Review Fixes
+
+### RED Evidence
+
+Added focused tests before changing the dialog implementation or CSS, then ran:
+
+- `npm run test --workspace @nexus/web -- tests/live-notes-flow.test.tsx tests/permanent-note-delete-styles.test.ts`
+  - Five normalized-error cases initially rendered the same generic message.
+  - Pending `Tab` did not prevent focus from escaping because disabled buttons left no focusable target.
+  - The dialog lacked `tabindex="-1"`.
+  - The destructive selector and 390px safe-area/scroll CSS rules were absent.
+- `npm run test --workspace @nexus/worker -- tests/note-routes.test.ts`
+  - The strengthened exact success-envelope assertion passed immediately because the existing route already returned `{ success: true, data: { deleted: true }, request_id }`; this was a coverage-only test correction, not missing production behavior.
+
+### Changed Files
+
+- `apps/web/src/app/App.tsx`
+- `apps/web/src/styles.css`
+- `apps/web/tests/live-notes-flow.test.tsx`
+- `apps/web/tests/permanent-note-delete-styles.test.ts`
+- `apps/worker/tests/note-routes.test.ts`
+
+### Fix Summary
+
+- Permanent-delete failures now distinguish `NOTE_CONFLICT`, `NOTE_NOT_TRASHED`, `NOTE_NOT_FOUND`, retryable network/timeout failures, and unknown failures. The rendered message retains a request ID only when it matches a safe bounded identifier format.
+- While a delete request is pending, the dialog receives programmatic focus and intercepts both Tab directions when all actions are disabled. Escape and backdrop dismissal remain blocked while pending.
+- Added destructive styling for the Trash action and confirmation button. The confirmation selector is more specific and appears after the generic blue account-action rule.
+- Added mobile rules for safe-area padding, overlay scrolling, dialog height bounds, and tall-content scrolling at 390px.
+- The DELETE route success test now asserts the entire normal envelope.
+
+### GREEN Evidence
+
+- Focused Web: `live-notes-flow.test.tsx` and `permanent-note-delete-styles.test.ts` passed 29/29.
+- Focused Worker: `note-routes.test.ts` passed 6/6.
+- `npm run typecheck --workspace @nexus/web`: passed.
+- `npm run typecheck --workspace @nexus/worker`: passed.
+- Full Web suite: 37 files, 280 tests passed.
+- Full Worker suite: 54 files, 353 tests passed.
+
+### Self-Review And Concerns
+
+- The atomic D1 repository and API surface were not changed.
+- Confirmed no write retries, whole-trash deletion, or browser-native confirmation were introduced.
+- Confirmed the fix commit contains only dialog, CSS, and focused test files; `pnpm-lock.yaml` and `pnpm-workspace.yaml` remain untracked and unstaged.
+- No remaining concerns.
+
+### Fix Commit SHA
+
+`0c3d970eaba2c8c9b4c75ffaec65da4911f8ff92` (`fix(beta): harden permanent delete dialog`).
