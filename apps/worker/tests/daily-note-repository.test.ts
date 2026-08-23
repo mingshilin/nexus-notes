@@ -41,19 +41,21 @@ describe("D1 daily notes", () => {
   it("creates once per workspace/date, returns the existing active note, and records normal side effects", async () => {
     const { db, repository } = await fixture();
 
-    const created = await repository.openOrCreateDaily(dailyInput());
-    const [repeated, concurrent] = await Promise.all([
-      repository.openOrCreateDaily({ ...dailyInput(), id: "daily-second-call", requestId: "req-repeat" }),
+    const [created, concurrent] = await Promise.all([
+      repository.openOrCreateDaily(dailyInput()),
       repository.openOrCreateDaily({ ...dailyInput(), id: "daily-concurrent-call", requestId: "req-concurrent" }),
     ]);
+    const repeated = await repository.openOrCreateDaily({ ...dailyInput(), id: "daily-second-call", requestId: "req-repeat" });
 
-    expect(repeated).toEqual(created);
     expect(concurrent).toEqual(created);
+    expect(repeated).toEqual(created);
     expect(await db.prepare("SELECT COUNT(*) AS count FROM notes WHERE workspace_id = ? AND daily_date = ? AND status = 'active' AND deleted_at IS NULL").bind("ws-1", "2026-08-23").first<{ count: number }>()).toEqual({ count: 1 });
-    expect(await db.prepare("SELECT COUNT(*) AS count FROM note_revisions WHERE workspace_id = ? AND note_id = ? AND revision = 1").bind("ws-1", created.id).first<{ count: number }>()).toEqual({ count: 1 });
-    expect(await db.prepare("SELECT COUNT(*) AS count FROM sync_changes WHERE workspace_id = ? AND entity_id = ? AND kind = 'create'").bind("ws-1", created.id).first<{ count: number }>()).toEqual({ count: 1 });
-    expect(await db.prepare("SELECT COUNT(*) AS count FROM search_documents WHERE workspace_id = ? AND entity_id = ? AND revision = 1").bind("ws-1", created.id).first<{ count: number }>()).toEqual({ count: 1 });
-    expect(await db.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE workspace_id = ? AND request_id = ? AND action = 'note.created'").bind("ws-1", "req-ws-1").first<{ count: number }>()).toEqual({ count: 1 });
+    const winnerId = created.id;
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM note_revisions WHERE workspace_id = ? AND note_id = ? AND revision = 1").bind("ws-1", winnerId).first<{ count: number }>()).toEqual({ count: 1 });
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM sync_changes WHERE workspace_id = ? AND entity_id = ? AND kind = 'create'").bind("ws-1", winnerId).first<{ count: number }>()).toEqual({ count: 1 });
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM search_documents WHERE workspace_id = ? AND entity_id = ? AND revision = 1").bind("ws-1", winnerId).first<{ count: number }>()).toEqual({ count: 1 });
+    const winnerRequestId = created.id === dailyInput().id ? "req-ws-1" : "req-concurrent";
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE workspace_id = ? AND request_id = ? AND action = 'note.created'").bind("ws-1", winnerRequestId).first<{ count: number }>()).toEqual({ count: 1 });
   });
 
   it("never returns a same-date note from another workspace", async () => {

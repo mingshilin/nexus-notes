@@ -3,7 +3,19 @@ import { z } from "zod";
 const EntityIdSchema = z.string().trim().min(1).max(128);
 const NoteTitleSchema = z.string().max(160);
 const NoteContentSchema = z.string().max(200_000);
-const DailyDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+function isValidDailyDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0;
+  return day <= daysInMonth;
+}
+
+const DailyDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isValidDailyDate, "daily_date must be a valid calendar date");
 
 export const NoteStatusSchema = z.enum(["active", "archived", "trashed"]);
 export const NoteRevisionSourceSchema = z.enum(["autosave", "manual", "restore", "conflict", "import"]);

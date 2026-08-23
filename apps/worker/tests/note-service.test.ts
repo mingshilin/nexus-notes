@@ -39,6 +39,39 @@ function createRepository(overrides: Record<string, unknown> = {}) {
 }
 
 describe("NoteService", () => {
+  it("returns an existing repository Daily Note without using the normal create path", async () => {
+    const worker = await loadWorker();
+    const existing = { ...serverNote, daily_date: "2026-08-23", title: "Daily Note 2026-08-23" };
+    const repository = createRepository({
+      openOrCreateDaily: vi.fn(async () => existing),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository, { createId: () => "unused-create-id" });
+
+    await expect(service.openOrCreateDaily(
+      { workspaceId: "ws-1", userId: "user-1" },
+      { daily_date: "2026-08-23" },
+    )).resolves.toEqual(existing);
+    expect(repository.createNote).not.toHaveBeenCalled();
+    expect(repository.openOrCreateDaily).toHaveBeenCalledOnce();
+  });
+
+  it.each(["create", "update"] as const)("maps a Daily Note uniqueness failure during %s to a stable conflict", async (operation) => {
+    const worker = await loadWorker();
+    const repository = createRepository({
+      createNote: vi.fn(async () => { throw new Error("DAILY_NOTE_EXISTS: SQLITE_CONSTRAINT"); }),
+      updateNote: vi.fn(async () => { throw new Error("DAILY_NOTE_EXISTS: SQLITE_CONSTRAINT"); }),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository);
+    const context = { workspaceId: "ws-1", userId: "user-1" };
+
+    const result = operation === "create"
+      ? service.create(context, { title: "Daily", content: "", daily_date: "2026-08-23" })
+      : service.update(context, "note-1", { base_revision: 1, daily_date: "2026-08-23" });
+    await expect(result).rejects.toMatchObject({ code: "DAILY_NOTE_CONFLICT", status: 409, retryable: false });
+  });
+
   it("maps a daily date to the repository operation without falling back to normal creation", async () => {
     const worker = await loadWorker();
     const repository = createRepository();

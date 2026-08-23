@@ -1170,7 +1170,7 @@ function AuthenticatedWorkspace({
         ))}
       </nav>
       {noteListView === "today" ? (
-        <button className="primary-create-note note-empty-create-note" type="button" disabled={logoutPending || dailyNoteOpening} onClick={openTodayNote}>
+        <button className="primary-create-note daily-note-action" type="button" disabled={logoutPending || dailyNoteOpening} onClick={openTodayNote}>
           {dailyNoteOpening ? "正在打开今日笔记…" : "打开今日笔记"}
         </button>
       ) : null}

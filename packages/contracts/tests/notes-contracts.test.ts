@@ -31,7 +31,13 @@ describe("note contracts", () => {
     const schema = contracts.DailyNoteInputSchema as { safeParse(value: unknown): { success: boolean } };
 
     expect(schema.safeParse({ daily_date: "2026-08-23" }).success).toBe(true);
+    expect(schema.safeParse({ daily_date: "2024-02-29" }).success).toBe(true);
     expect(schema.safeParse({ daily_date: "2026-8-23" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2026-02-31" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2025-02-29" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2026-00-10" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2026-13-10" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2026-01-00" }).success).toBe(false);
     expect(schema.safeParse({ daily_date: "2026-08-23", title: "ignored" }).success).toBe(false);
   });
 

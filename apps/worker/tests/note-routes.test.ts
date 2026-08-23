@@ -53,6 +53,32 @@ function serviceDouble() {
 }
 
 describe("v2 note routes", () => {
+  it("returns 409 for controlled Daily Note conflicts on normal create and update routes", async () => {
+    const worker = await loadWorker();
+    const ServiceError = worker.NoteServiceError as new (code: string, message: string, status: number) => Error;
+    const service = serviceDouble();
+    service.create.mockRejectedValue(new ServiceError("DAILY_NOTE_CONFLICT", "Daily note already exists", 409));
+    service.update.mockRejectedValue(new ServiceError("DAILY_NOTE_CONFLICT", "Daily note already exists", 409));
+    const registry = (worker.createRouteRegistry as any)({
+      requestId: () => "req-daily-conflict",
+      authenticate: vi.fn(async () => ({ userId: "user-1" })),
+      authorizeWorkspace: vi.fn(async () => workspace),
+    });
+    (worker.registerNoteRoutes as any)(registry, () => service);
+
+    const create = await registry.fetch(request("/api/v2/notes", {
+      method: "POST", body: JSON.stringify({ title: "Daily", content: "", daily_date: "2026-08-23" }),
+    }), {});
+    const update = await registry.fetch(request("/api/v2/notes/note-1", {
+      method: "PATCH", body: JSON.stringify({ base_revision: 1, daily_date: "2026-08-23" }),
+    }), {});
+
+    expect(create.status).toBe(409);
+    expect(update.status).toBe(409);
+    expect(await create.json()).toMatchObject({ success: false, error: { code: "DAILY_NOTE_CONFLICT", retryable: false } });
+    expect(await update.json()).toMatchObject({ success: false, error: { code: "DAILY_NOTE_CONFLICT", retryable: false } });
+  });
+
   it("opens a daily note for editors and validates its strict request body", async () => {
     const worker = await loadWorker();
     const service = serviceDouble();

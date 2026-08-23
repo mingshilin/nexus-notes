@@ -108,6 +108,13 @@ function quickCaptureTitle(input: QuickCaptureInput) {
   return (firstLine ?? "Untitled note").slice(0, 160);
 }
 
+function mapRepositoryError(error: unknown): never {
+  if (error instanceof Error && /DAILY_NOTE_EXISTS/iu.test(error.message)) {
+    throw new NoteServiceError("DAILY_NOTE_CONFLICT", "Daily note already exists", 409);
+  }
+  throw error;
+}
+
 export class NoteService {
   private readonly options: NoteServiceOptions;
 
@@ -121,22 +128,26 @@ export class NoteService {
     };
   }
 
-  create(context: NoteActorContext, input: CreateNoteInput) {
-    return this.repository.createNote({
-      id: this.options.createId(),
-      workspaceId: context.workspaceId,
-      userId: context.userId,
-      title: input.title,
-      content: input.content,
-      folderId: input.folder_id ?? null,
-      databaseId: input.database_id ?? null,
-      dailyDate: input.daily_date ?? null,
-      isFavorite: input.is_favorite ?? false,
-      isPinned: input.is_pinned ?? false,
-      source: "manual",
-      now: this.options.clock().toISOString(),
-      requestId: context.requestId,
-    });
+  async create(context: NoteActorContext, input: CreateNoteInput) {
+    try {
+      return await this.repository.createNote({
+        id: this.options.createId(),
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+        title: input.title,
+        content: input.content,
+        folderId: input.folder_id ?? null,
+        databaseId: input.database_id ?? null,
+        dailyDate: input.daily_date ?? null,
+        isFavorite: input.is_favorite ?? false,
+        isPinned: input.is_pinned ?? false,
+        source: "manual",
+        now: this.options.clock().toISOString(),
+        requestId: context.requestId,
+      });
+    } catch (error) {
+      return mapRepositoryError(error);
+    }
   }
 
   openOrCreateDaily(context: NoteActorContext, input: DailyNoteInput) {
@@ -195,15 +206,20 @@ export class NoteService {
 
   async update(context: NoteActorContext, noteId: string, input: UpdateNoteInput) {
     const { base_revision: baseRevision, ...patch } = input;
-    const result = await this.repository.updateNote({
-      workspaceId: context.workspaceId,
-      userId: context.userId,
-      noteId,
-      baseRevision,
-      patch,
-      now: this.options.clock().toISOString(),
-      requestId: context.requestId,
-    });
+    let result: Awaited<ReturnType<NoteRepository["updateNote"]>>;
+    try {
+      result = await this.repository.updateNote({
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+        noteId,
+        baseRevision,
+        patch,
+        now: this.options.clock().toISOString(),
+        requestId: context.requestId,
+      });
+    } catch (error) {
+      return mapRepositoryError(error);
+    }
     if (!result.note) {
       if (!result.current) {
         throw new NoteServiceError("NOTE_NOT_FOUND", "Note not found", 404);

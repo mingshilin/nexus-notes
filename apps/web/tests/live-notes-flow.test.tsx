@@ -155,6 +155,38 @@ function renderWorkspaceWithStore(
 }
 
 describe("live note workspace flow", () => {
+  it("keeps the Today action visible and usable at the mobile breakpoint", async () => {
+    const apiClient = createApiClient();
+    renderWorkspace(apiClient, 390);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "今日" }));
+    const openDaily = await screen.findByRole("button", { name: "打开今日笔记" });
+    expect(openDaily).toBeVisible();
+    expect(openDaily).not.toHaveClass("note-empty-create-note");
+    fireEvent.click(openDaily);
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/notes/daily", method: "POST" })));
+  });
+
+  it("shows a retryable Today error in the active context pane and re-enables retry", async () => {
+    const apiClient = createApiClient({
+      listToday: async () => ({ items: [], next_cursor: null }),
+      openOrCreateDaily: async () => { throw new ApiClientError({ code: "NETWORK_ERROR", message: "offline", retryable: true }); },
+    });
+    renderWorkspace(apiClient, 929);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "今日" }));
+    const openDaily = await screen.findByRole("button", { name: "打开今日笔记" });
+    fireEvent.click(openDaily);
+
+    const pane = screen.getByTestId("task-pane");
+    expect(await screen.findByRole("alert")).toHaveTextContent("今日笔记暂时无法打开，可重试。当前选择和草稿内容已保留。");
+    expect(pane).toContainElement(screen.getByRole("alert"));
+    expect(openDaily).toBeEnabled();
+    expect(screen.getByRole("button", { name: "今日" })).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("opens an existing Today note locally without another create request", async () => {
     const date = [new Date().getFullYear(), String(new Date().getMonth() + 1).padStart(2, "0"), String(new Date().getDate()).padStart(2, "0")].join("-");
     const daily = { ...serverNoteForFlow(), id: "daily-existing", title: "Existing daily", daily_date: date };
