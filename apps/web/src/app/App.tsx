@@ -20,6 +20,7 @@ import { NotesClient } from "../data/notes-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic, type RecoveryFilters } from "../knowledge/KnowledgeRecoveryPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
+import { useWorkbenchMode } from "../layout/use-mobile-layout";
 import { DatabaseClient, type DatabaseBundle } from "../data/database-client";
 import { BetaLocalStore } from "../data/local-store";
 import { NoteDraftController, type DraftSyncResult, type NoteDraftStore } from "../notes/note-draft-controller";
@@ -265,6 +266,7 @@ function AuthenticatedWorkspace({
   onDeleted(): void;
   onDiagnosticNavigate?: (diagnostic: KnowledgeDiagnostic) => void;
 }) {
+  const workbenchMode = useWorkbenchMode();
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
   const [activeDomain, setActiveDomain] = useState<ProductDomain>("notes");
@@ -1231,10 +1233,11 @@ function AuthenticatedWorkspace({
       <span>功能地图</span>
     </button>
   );
+  const showWorkspaceOverview = activeDomain === "notes" && !selectedNote && !creatingNote;
   const mobileCreateAction = activePane !== "context" ? (
     <div className="mobile-create-actions">
       {featureMapAction}
-      {createCenterAction}
+      {!showWorkspaceOverview ? createCenterAction : null}
       {activeDomain === "notes" ? (
         <button className="mobile-create-note-button" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
           <Plus aria-hidden="true" size={20} />
@@ -1246,8 +1249,8 @@ function AuthenticatedWorkspace({
   const desktopCreateAction = (
     <div className="desktop-create-actions">
       {featureMapAction}
-      {createCenterAction}
-      {activeDomain === "notes" ? (
+      {!showWorkspaceOverview ? createCenterAction : null}
+      {activeDomain === "notes" && !showWorkspaceOverview ? (
         <button
           className="editor-new-note-button"
           type="button"
@@ -1463,6 +1466,31 @@ function AuthenticatedWorkspace({
         <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
         <h1 ref={permanentDeleteFallbackRef} tabIndex={-1}>Public Beta 重写计划</h1>
         <p className="lead">一个稳定、响应迅速、离线可恢复的知识工作台。</p>
+        <section className="workspace-quick-start" aria-label="快速开始">
+          <div className="workspace-quick-start-heading">
+            <div>
+              <p className="eyebrow">现在就开始</p>
+              <h2>快速开始</h2>
+            </div>
+            <p>常用入口集中在这里，不需要先找菜单。</p>
+          </div>
+          <div className="workspace-quick-start-actions">
+            {workbenchMode === "mobile" ? null : (
+              <button className="workspace-quick-start-action workspace-quick-start-primary" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={() => { void startNewNote(); }}>
+                <span className="workspace-quick-start-icon"><Plus aria-hidden="true" size={18} /></span>
+                <span><strong>新建笔记</strong><small>打开一篇空白笔记</small></span>
+              </button>
+            )}
+            <div className="workspace-quick-start-create-center">
+              {createCenterAction}
+              <small>笔记、快速捕获或数据库</small>
+            </div>
+            <button className="workspace-quick-start-action" type="button" aria-label="个人资料与设置" disabled={logoutPending} onClick={() => openAccountSubsection("personal")}>
+              <span className="workspace-quick-start-icon"><Boxes aria-hidden="true" size={18} /></span>
+              <span><strong>个人资料与设置</strong><small>资料、密码、安全和工作区</small></span>
+            </button>
+          </div>
+        </section>
         {noteError && activePane !== "context" ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
         <hr />
         <h2>自适应工作台</h2>

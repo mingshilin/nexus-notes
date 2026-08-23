@@ -1,7 +1,7 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createElement } from "react";
 import type { Note } from "@nexus/contracts";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 import type { LocalDraft } from "../src/data/local-store";
 import { AdaptiveWorkbench } from "../src/layout/AdaptiveWorkbench";
@@ -14,6 +14,10 @@ afterEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
   sessionStorage.clear();
+});
+
+beforeEach(() => {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
 });
 
 function navigationProps(overrides: Partial<Parameters<typeof ProductNavigation>[0]> = {}) {
@@ -368,6 +372,15 @@ describe("ProductNavigation", () => {
 });
 
 describe("App product navigation", () => {
+  it("exposes explicit first-run actions for creating notes, opening the create center, and editing profile", async () => {
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+
+    const quickStart = await screen.findByRole("region", { name: "快速开始" });
+    expect(within(quickStart).getByRole("button", { name: "新建笔记" })).toBeVisible();
+    expect(within(quickStart).getByRole("button", { name: "创建内容" })).toBeVisible();
+    expect(within(quickStart).getByRole("button", { name: "个人资料与设置" })).toBeVisible();
+  });
+
   it("renders truthful knowledge, AI, and account destinations", async () => {
     render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
 
