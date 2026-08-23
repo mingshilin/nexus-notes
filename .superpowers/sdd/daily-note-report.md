@@ -101,3 +101,49 @@ Fix implementation commit: `2985703`
 - Normal `POST /api/v2/notes` and `PATCH /api/v2/notes/:noteId` now return the stable 409 conflict envelope for controlled Daily Note uniqueness conflicts; Daily open/create still returns its committed winner.
 - The context-pane recovery behavior was already present at the review baseline and is now directly covered at tablet width with the retry button enabled after failure.
 - No unresolved concerns. Historical duplicate rows remain intentionally preserved as required; OCR invalid-message stderr in the full suite is expected test output.
+
+## Review Fix 2
+
+### Scope and RED Evidence
+
+Starting from `dbd496c`, fix2 addressed the remaining Important context-surface alert issue and strengthened historical duplicate evidence. Tests were added before the production edit.
+
+- The first 390px test attempt exposed a test-flow issue because mobile chrome was hidden while the draft title still had focus; the test was corrected to blur the title before opening the context pane.
+- The corrected web RED run failed only the new mobile draft/context test: `34 tests, 1 failed`, with `Unable to find role="alert"` inside the active context pane while `creatingNote` remained true.
+- The migration evidence run passed `2/2` before production edits, showing the existing repository ordering and migration triggers already had the required behavior but lacked this explicit historical fixture and update-branch evidence.
+
+### Changed Files
+
+- `apps/web/src/app/App.tsx`: render the Daily Note error in the Today context surface whenever `activePane === "context"`, regardless of selection or draft creation; suppress the duplicate editor alert while that context surface is active.
+- `apps/web/tests/live-notes-flow.test.tsx`: add a 390px unsaved-draft failure regression covering context placement, draft preservation after returning to the editor, Today selection, and retry re-enablement.
+- `apps/worker/tests/daily-note-migration.test.ts`: seed two historical active duplicates before migration, assert `openOrCreateDaily` returns the newest by `updated_at`, exercise the update trigger through a new candidate row, and verify both historical rows remain unchanged.
+
+### Idempotency and Transaction Reasoning
+
+The UI change only changes error placement and duplicate suppression; it does not alter the Daily POST, pending guard, retry reset, selection, or draft state transitions. `openOrCreateDaily` continues to read active rows with `ORDER BY updated_at DESC, id DESC`, so preserved duplicates have a deterministic winner. Migration `0012` remains additive: the insert and update triggers reject future active duplicates without rewriting historical rows. The update test uses a separate candidate row, proving trigger rollback without attempting cleanup or revision of either historical duplicate.
+
+### GREEN Evidence
+
+- Focused web GREEN: `tests/live-notes-flow.test.tsx`, `34/34` tests passed.
+- Focused worker GREEN: migration and repository suites, `4/4` tests passed.
+- Full `npm run beta:test`: web `37/37 files, 289 tests`; worker `56/56 files, 363 tests`; contracts `9/9 files, 39 tests`; domain `6/6 files, 21 tests`; UI `1/1 file, 2 tests`; testkit `passWithNoTests`.
+- `npm run beta:lint`: passed for all six workspaces.
+- `npm run beta:build`: passed, including the Vite production build.
+- `npm run verify:deploy`: passed.
+- `npm run verify:preview`: passed.
+- `npm audit --omit=dev --audit-level=high`: `0 vulnerabilities`.
+- `git diff --check`: passed.
+
+### Self-Review
+
+- Today context errors now remain visible over an existing selected note or an in-flight unsaved draft on mobile and tablet, while closing the context pane restores the editor error without duplicating alerts.
+- The retry button becomes enabled through the existing `finally` state reset; no API, route matching, authorization, quota, date validation, migration, or transaction behavior changed.
+- Historical duplicates are neither deleted nor revised. The new evidence checks both timestamp ordering and the update-trigger rejection path.
+- Only the three bounded task files plus this required report are intended for commit. Untracked `pnpm-lock.yaml` and `pnpm-workspace.yaml` remain untouched and unstaged.
+
+### Concerns and Commit
+
+- Full audit currently reports 11 vulnerabilities in the installed dependency tree, primarily development tooling; this fix changes no dependency or pnpm file. Production-only audit is clean. This is retained as a non-blocking concern for dependency maintenance.
+- Historical active duplicates remain intentionally preserved as required; cleanup would need a separate product decision.
+
+Fix implementation commit: pending after verification and bounded staging.

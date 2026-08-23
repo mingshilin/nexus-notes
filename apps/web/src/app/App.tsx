@@ -1174,7 +1174,7 @@ function AuthenticatedWorkspace({
           {dailyNoteOpening ? "正在打开今日笔记…" : "打开今日笔记"}
         </button>
       ) : null}
-      {noteListView === "today" && noteError && !selectedNote && !creatingNote ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
+      {noteListView === "today" && activePane === "context" && noteError ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
       <label className="search-field"><Search size={15} /><input aria-label="搜索笔记" placeholder="搜索笔记" /></label>
       {notesLoading ? <p className="database-empty" role="status">正在加载笔记…</p> : null}
       {notesError ? <p className="database-operation-error" role="alert">{notesError}</p> : null}
@@ -1483,7 +1483,7 @@ function AuthenticatedWorkspace({
                 <button type="button" className="note-lifecycle-action note-lifecycle-danger" disabled={logoutPending || noteSaving || permanentDeletePending} onClick={(event) => openPermanentDelete(event.currentTarget)}>永久删除</button>
               ) : null}
               {noteMessage ? <p role="status">{noteMessage}</p> : null}
-              {noteError ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
+              {noteError && activePane !== "context" ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
             </div>
             <p className="note-content-preview" aria-label="笔记内容预览">{draftContent || "开始记录你的想法。"}</p>
             {recoveryPanel}

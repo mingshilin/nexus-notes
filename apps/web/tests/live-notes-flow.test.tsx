@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 import { ApiClientError } from "../src/data/api-client";
@@ -185,6 +185,37 @@ describe("live note workspace flow", () => {
     expect(pane).toContainElement(screen.getByRole("alert"));
     expect(openDaily).toBeEnabled();
     expect(screen.getByRole("button", { name: "今日" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps a mobile draft while showing the failed Today request in the context pane", async () => {
+    let resolveCreate!: (value: unknown) => void;
+    const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });
+    const apiClient = createApiClient({
+      createNote: async () => createBlocked,
+      listToday: async () => ({ items: [], next_cursor: null }),
+      openOrCreateDaily: async () => { throw new ApiClientError({ code: "NETWORK_ERROR", message: "offline", retryable: true }); },
+    });
+    renderWorkspace(apiClient, 390);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    const title = await findNoteTitle();
+    fireEvent.change(title, { target: { value: "移动端保留草稿" } });
+    fireEvent.focusOut(title);
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "今日" }));
+
+    const pane = screen.getByTestId("task-pane");
+    const openDaily = within(pane).getByRole("button", { name: "打开今日笔记" });
+    fireEvent.click(openDaily);
+
+    const alert = await screen.findByRole("alert");
+    expect(pane).toContainElement(alert);
+    expect(alert).toHaveTextContent("今日笔记暂时无法打开，可重试。当前选择和草稿内容已保留。");
+    expect(openDaily).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "关闭笔记列表" }));
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("移动端保留草稿");
+    resolveCreate({ note: serverNoteForFlow() });
   });
 
   it("opens an existing Today note locally without another create request", async () => {
