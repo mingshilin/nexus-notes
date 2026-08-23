@@ -18,6 +18,7 @@ import { AIChatPanel } from "../ai/AIChatPanel";
 import { KnowledgeClient } from "../data/knowledge-client";
 import { NotesClient } from "../data/notes-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic, type RecoveryFilters } from "../knowledge/KnowledgeRecoveryPanel";
+import { KnowledgeSearchPanel } from "../knowledge/KnowledgeSearchPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
 import { DatabaseClient, type DatabaseBundle } from "../data/database-client";
@@ -258,6 +259,7 @@ function AuthenticatedWorkspace({
   const [activeDomain, setActiveDomain] = useState<ProductDomain>("notes");
   const [accountSubsection, setAccountSubsection] = useState<AccountSubsection>("personal");
   const [collaborationClient] = useState(() => new CollaborationClient(apiClient, workspaceId ?? ""));
+  const [knowledgeClient] = useState(() => new KnowledgeClient(apiClient, workspaceId ?? ""));
   const [operationsClient] = useState(() => new OperationsClient(apiClient, workspaceId ?? ""));
   const [profileClient] = useState(() => new ProfileClient(apiClient));
   const [navigationUser, setNavigationUser] = useState(user);
@@ -1403,9 +1405,10 @@ function AuthenticatedWorkspace({
   );
   const knowledgeCanvas = (
     <section className="product-domain-page knowledge-domain-page">
-      <p className="eyebrow">KNOWLEDGE RECOVERY</p>
+      <p className="eyebrow">KNOWLEDGE CENTER</p>
       <h1>知识恢复</h1>
-      <p className="product-domain-lead">集中处理附件 OCR 状态与知识诊断。</p>
+      <p className="product-domain-lead">搜索、保存查询，并集中处理附件 OCR 状态与知识诊断。</p>
+      <KnowledgeSearchPanel client={knowledgeClient} />
       {recoveryPanel}
     </section>
   );
