@@ -80,6 +80,29 @@ describe("KnowledgeRecoveryPanel", () => {
     expect(screen.getByText("暂无附件或待处理诊断。")).toBeInTheDocument();
   });
 
+  it("exposes a file picker and forwards a selected attachment for upload", async () => {
+    const { KnowledgeRecoveryPanel } = await import("../src/knowledge/KnowledgeRecoveryPanel");
+    const onUpload = vi.fn();
+    const file = new File(["%PDF-1.7"], "scan.pdf", { type: "application/pdf" });
+    render(<KnowledgeRecoveryPanel
+      attachments={[]}
+      diagnostics={[]}
+      filters={{ mimeType: "", ocrStatus: "" }}
+      loading={false}
+      refreshing={false}
+      onUpload={onUpload}
+      onRetry={vi.fn()}
+      onBatchRetry={vi.fn()}
+      onRecover={vi.fn()}
+      onFiltersChange={vi.fn()}
+      onLoadMoreAttachments={vi.fn()}
+      onLoadMoreDiagnostics={vi.fn()}
+    />);
+
+    fireEvent.change(screen.getByLabelText("上传附件"), { target: { files: [file] } });
+    expect(onUpload).toHaveBeenCalledWith(file);
+  });
+
   it("keeps recovery controls usable at 390px and 200% zoom without adding motion or a scroll owner", () => {
     const css = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
 

@@ -7,6 +7,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { MAX_UPLOAD_BYTES, SUPPORTED_ATTACHMENT_MIME_TYPES } from "@nexus/contracts";
 import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, Profile, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient, ApiClientError } from "../data/api-client";
@@ -148,6 +149,10 @@ function recoveryFeedback(result: { queued: string[]; ineligible: string[]; dupl
   if (result.ineligible.length) feedback.push(`${result.ineligible.length} 项不符合重试条件。`);
   if (result.duplicate.length) feedback.push(`${result.duplicate.length} 项已在处理中。`);
   return feedback.join(" ") || "没有可重试的附件。";
+}
+
+function isSupportedAttachmentMime(value: string): value is typeof SUPPORTED_ATTACHMENT_MIME_TYPES[number] {
+  return (SUPPORTED_ATTACHMENT_MIME_TYPES as readonly string[]).includes(value);
 }
 
 function isAborted(error: unknown, signal: AbortSignal) {
@@ -346,6 +351,8 @@ function AuthenticatedWorkspace({
   const [creatingFirstDatabase, setCreatingFirstDatabase] = useState(false);
   const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState<ServiceWorkerUpdate | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<KnowledgeDiagnostic[]>([]);
   const [filters, setFilters] = useState<RecoveryFilters>(initialRecoveryFilters);
   const [attachmentCursor, setAttachmentCursor] = useState<string | null>(null);
@@ -1287,6 +1294,45 @@ function AuthenticatedWorkspace({
     });
   };
 
+  const uploadAttachment = (file: File) => {
+    if (!workspaceId || role === "viewer" || uploadingAttachment) return;
+    const mimeType = file.type;
+    if (!isSupportedAttachmentMime(mimeType)) {
+      setUploadError("不支持这个附件类型。请上传 PDF、JPG、PNG、WEBP 或纯文本文件。");
+      return;
+    }
+    if (file.size <= 0 || file.size > MAX_UPLOAD_BYTES) {
+      setUploadError("附件必须大于 0 且不超过 25 MB。");
+      return;
+    }
+
+    setUploadingAttachment(true);
+    setUploadError(null);
+    const knowledge = new KnowledgeClient(apiClient, workspaceId);
+    let reservedId: string | null = null;
+    void (async () => {
+      try {
+        const reserved = await knowledge.createAttachmentUpload({
+          filename: file.name,
+          mime_type: mimeType,
+          size_bytes: file.size,
+          note_id: selectedNoteId,
+        });
+        reservedId = reserved.id;
+        const uploaded = await knowledge.uploadAttachmentContent(reserved.id, await file.arrayBuffer());
+        const completed = await knowledge.completeAttachmentUpload(uploaded.id);
+        setAttachments((current) => [completed, ...current.filter((attachment) => attachment.id !== completed.id)]);
+        setRetryFeedback(`已上传 ${file.name}，OCR 已加入队列。`);
+        setRefreshVersion((version) => version + 1);
+      } catch {
+        if (reservedId) await knowledge.deleteAttachment(reservedId).catch(() => undefined);
+        setUploadError("附件上传失败，请重新选择文件。未完成的上传会自动清理。");
+      } finally {
+        if (mountedRef.current) setUploadingAttachment(false);
+      }
+    })();
+  };
+
   const changeDomain = (domain: ProductDomain) => {
     if (domain === "collaboration") setCollaborationInitialSection("people");
     setFeatureMapOpen(false);
@@ -1523,6 +1569,9 @@ function AuthenticatedWorkspace({
       diagnosticError={diagnosticError}
       retryFeedback={retryFeedback}
       isRetryPending={retryingIds.size > 0}
+      onUpload={role === "viewer" ? undefined : uploadAttachment}
+      uploading={uploadingAttachment}
+      uploadError={uploadError}
       attachmentNextCursor={attachmentCursor}
       diagnosticNextCursor={diagnosticCursor}
       onRetry={(id) => retryAttachments([id])}

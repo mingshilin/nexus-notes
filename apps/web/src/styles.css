@@ -315,9 +315,13 @@ button { color: inherit; }
 .callout p { margin: 0; font-size: 14px; }
 .knowledge-recovery { display: grid; min-width: 0; gap: 10px; padding: 16px 0; }
 .knowledge-recovery-heading, .knowledge-recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.knowledge-recovery-heading-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .knowledge-recovery-heading h3 { margin: 4px 0 0; font-size: 18px; }
 .knowledge-recovery button { border: 1px solid var(--border-subtle); border-radius: 10px; padding: 7px 10px; color: var(--nexus-accent); background: rgba(0,122,255,.06); cursor: pointer; font-size: 12px; font-weight: 650; }
 .knowledge-recovery button:disabled { cursor: not-allowed; opacity: .48; }
+.knowledge-upload-button { display: inline-flex; min-height: 32px; align-items: center; border: 1px solid rgba(0,122,255,.22); border-radius: 10px; padding: 0 10px; color: var(--nexus-accent); background: rgba(0,122,255,.1); cursor: pointer; font-size: 12px; font-weight: 700; }
+.knowledge-upload-button input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+.knowledge-upload-button:has(input:disabled) { cursor: not-allowed; opacity: .48; }
 .knowledge-recovery-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 8px; }
 .knowledge-filter { display: grid; gap: 5px; color: hsl(var(--muted-foreground)); font-size: 11px; }
 .knowledge-filter select { width: 100%; min-width: 0; border: 1px solid var(--border-subtle); border-radius: 10px; padding: 8px 10px; outline: 0; color: hsl(var(--foreground)); background: rgba(255,255,255,.52); }
@@ -667,7 +671,7 @@ button { color: inherit; }
   .auth-card { min-height: 100%; padding: max(32px, env(safe-area-inset-top)) 24px max(28px, env(safe-area-inset-bottom)); }
   .knowledge-recovery-heading, .knowledge-recovery-row { align-items: flex-start; flex-wrap: wrap; }
   .knowledge-recovery-row span { flex: 1 1 12rem; }
-  .knowledge-recovery-heading > button, .knowledge-recovery-row > button { min-height: 38px; }
+  .knowledge-recovery-heading-actions button, .knowledge-upload-button, .knowledge-recovery-row > button { min-height: 38px; }
   .knowledge-search { margin-top: 18px; padding: 13px; border-radius: 15px; }
   .knowledge-search-heading { display: grid; align-items: start; gap: 4px; }
   .knowledge-search-heading > p { max-width: none; text-align: left; }

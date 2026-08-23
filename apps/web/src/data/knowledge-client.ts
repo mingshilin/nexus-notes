@@ -189,6 +189,26 @@ export class KnowledgeClient {
     }).then(({ attachment }) => attachment);
   }
 
+  uploadAttachmentContent(attachmentId: string, body: ArrayBuffer | ArrayBufferView, signal?: AbortSignal) {
+    return this.client.request<{ attachment: Attachment }>({
+      path: `/api/v2/attachments/${encodeURIComponent(attachmentId)}/content`,
+      method: "PUT",
+      headers: { ...this.headers(), "content-type": "application/octet-stream" },
+      body,
+      bodyMode: "raw",
+      requestClass: "command",
+      policy: { timeoutMs: 30_000, retry: 0, idempotencyKey: this.createId(), signal },
+    }).then(({ attachment }) => attachment);
+  }
+
+  completeAttachmentUpload(attachmentId: string) {
+    return this.command<{ attachment: Attachment }>(
+      `/api/v2/attachments/${encodeURIComponent(attachmentId)}/complete`,
+      "POST",
+      { upload_id: attachmentId },
+    ).then(({ attachment }) => attachment);
+  }
+
   retryAttachmentOcr(attachmentId: string, signal?: AbortSignal) {
     return this.command<{ queued: string[]; ineligible: string[]; duplicate: string[] }>(
       `/api/v2/attachments/${encodeURIComponent(attachmentId)}/ocr/retry`,

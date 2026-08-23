@@ -95,7 +95,9 @@ describe("KnowledgeClient", () => {
 
     const controller = new AbortController();
     await client.listAttachments({ mime_type: "application/pdf", ocr_status: "failed", limit: 25 }, controller.signal);
-    await client.createAttachmentUpload({ filename: "scan.pdf", mime_type: "application/pdf", size_bytes: 5 });
+    await client.createAttachmentUpload({ filename: "scan.pdf", mime_type: "application/pdf", size_bytes: 5, note_id: "note-1" });
+    await client.uploadAttachmentContent("attachment-1", new Uint8Array([1, 2, 3]).buffer, controller.signal);
+    await client.completeAttachmentUpload("attachment-1");
     await client.retryAttachmentOcr("attachment-1");
     await client.retryAttachmentOcrBatch(["attachment-1", "attachment-2"]);
     await client.getKnowledgeDiagnostics({ limit: 25 });
@@ -104,6 +106,8 @@ describe("KnowledgeClient", () => {
     expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET"])).toEqual([
       ["/api/v2/attachments?mime_type=application%2Fpdf&ocr_status=failed&limit=25", "GET"],
       ["/api/v2/attachments/uploads", "POST"],
+      ["/api/v2/attachments/attachment-1/content", "PUT"],
+      ["/api/v2/attachments/attachment-1/complete", "POST"],
       ["/api/v2/attachments/attachment-1/ocr/retry", "POST"],
       ["/api/v2/attachments/ocr/retry", "POST"],
       ["/api/v2/knowledge/diagnostics?limit=25", "GET"],
@@ -111,7 +115,9 @@ describe("KnowledgeClient", () => {
     ]);
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
     expect(api.request.mock.calls[0]?.[0].policy.signal).toBe(controller.signal);
-    expect(api.request.mock.calls[2]?.[0].body).toEqual({ attachment_ids: ["attachment-1"] });
-    expect(api.request.mock.calls[3]?.[0].body).toEqual({ attachment_ids: ["attachment-1", "attachment-2"] });
+    expect(api.request.mock.calls[2]?.[0].bodyMode).toBe("raw");
+    expect(api.request.mock.calls[2]?.[0].policy.signal).toBe(controller.signal);
+    expect(api.request.mock.calls[4]?.[0].body).toEqual({ attachment_ids: ["attachment-1"] });
+    expect(api.request.mock.calls[5]?.[0].body).toEqual({ attachment_ids: ["attachment-1", "attachment-2"] });
   });
 });
