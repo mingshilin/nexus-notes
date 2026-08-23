@@ -146,4 +146,4 @@ The UI change only changes error placement and duplicate suppression; it does no
 - Full audit currently reports 11 vulnerabilities in the installed dependency tree, primarily development tooling; this fix changes no dependency or pnpm file. Production-only audit is clean. This is retained as a non-blocking concern for dependency maintenance.
 - Historical active duplicates remain intentionally preserved as required; cleanup would need a separate product decision.
 
-Fix implementation commit: pending after verification and bounded staging.
+Fix implementation commit: `0c1193e`.
