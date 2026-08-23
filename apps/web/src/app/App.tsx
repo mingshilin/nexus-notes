@@ -18,8 +18,6 @@ import { AIChatPanel } from "../ai/AIChatPanel";
 import { KnowledgeClient } from "../data/knowledge-client";
 import { NotesClient } from "../data/notes-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic, type RecoveryFilters } from "../knowledge/KnowledgeRecoveryPanel";
-import { KnowledgeSearchPanel } from "../knowledge/KnowledgeSearchPanel";
-import { ReminderPanel } from "../reminders/ReminderPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
 import { DatabaseClient, type DatabaseBundle } from "../data/database-client";
@@ -44,6 +42,18 @@ import {
 const LazyDatabaseWorkbench = lazy(async () => {
   const module = await import("../databases/DatabaseWorkbench");
   return { default: module.DatabaseWorkbench };
+});
+const LazyKnowledgeSearchPanel = lazy(async () => {
+  const module = await import("../knowledge/KnowledgeSearchPanel");
+  return { default: module.KnowledgeSearchPanel };
+});
+const LazyKnowledgeGraphPanel = lazy(async () => {
+  const module = await import("../knowledge/KnowledgeGraphPanel");
+  return { default: module.KnowledgeGraphPanel };
+});
+const LazyReminderPanel = lazy(async () => {
+  const module = await import("../reminders/ReminderPanel");
+  return { default: module.ReminderPanel };
 });
 
 const defaultAuthClient = new AuthClient(new ApiClient());
@@ -1408,11 +1418,14 @@ function AuthenticatedWorkspace({
       <p className="eyebrow">KNOWLEDGE CENTER</p>
       <h1>知识恢复</h1>
       <p className="product-domain-lead">搜索、保存查询，并集中处理附件 OCR 状态与知识诊断。</p>
-      <KnowledgeSearchPanel client={knowledgeClient} />
+      <Suspense fallback={<p className="knowledge-search-state" role="status">正在加载知识工具…</p>}>
+        <LazyKnowledgeSearchPanel client={knowledgeClient} />
+        <LazyKnowledgeGraphPanel client={knowledgeClient} />
+      </Suspense>
       {recoveryPanel}
     </section>
   );
-  const remindersCanvas = <ReminderPanel client={knowledgeClient} />;
+  const remindersCanvas = <Suspense fallback={<p className="reminder-state" role="status">正在加载提醒中心…</p>}><LazyReminderPanel client={knowledgeClient} /></Suspense>;
   const aiCanvas = <AIChatPanel client={apiClient} workspaceId={workspaceId ?? ""} />;
   const accountCanvas = (
     <AccountCenter
