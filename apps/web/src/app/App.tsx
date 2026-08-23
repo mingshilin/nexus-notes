@@ -326,8 +326,10 @@ function AuthenticatedWorkspace({
   const permanentDeleteOpenerRef = useRef<HTMLButtonElement | null>(null);
   const permanentDeleteDialogRef = useRef<HTMLDivElement | null>(null);
   const permanentDeleteCancelRef = useRef<HTMLButtonElement | null>(null);
+  const permanentDeleteFallbackRef = useRef<HTMLHeadingElement | null>(null);
   const permanentDeletePendingRef = useRef(false);
   const permanentDeleteWasOpenRef = useRef(false);
+  const permanentDeleteFocusTargetRef = useRef<"origin" | "fallback">("origin");
   const focusInstalledNoteRef = useRef(false);
   const installedNotesRef = useRef(new Map<string, Note>());
   const mountedRef = useRef(true);
@@ -339,6 +341,11 @@ function AuthenticatedWorkspace({
     label: note.title.trim() || "未命名笔记",
   }));
   const userId = user.id;
+
+  const closePermanentDeleteDialog = (focusTarget: "origin" | "fallback" = "origin") => {
+    permanentDeleteFocusTargetRef.current = focusTarget;
+    setPermanentDeleteOpen(false);
+  };
 
   useEffect(() => {
     draftControllerRef.current = draftController;
@@ -357,8 +364,11 @@ function AuthenticatedWorkspace({
   useLayoutEffect(() => {
     if (!permanentDeleteOpen) {
       if (permanentDeleteWasOpenRef.current) {
-        permanentDeleteOpenerRef.current?.focus();
+        (permanentDeleteFocusTargetRef.current === "fallback"
+          ? permanentDeleteFallbackRef.current
+          : permanentDeleteOpenerRef.current)?.focus();
         permanentDeleteWasOpenRef.current = false;
+        permanentDeleteFocusTargetRef.current = "origin";
       }
       return undefined;
     }
@@ -367,7 +377,7 @@ function AuthenticatedWorkspace({
     else permanentDeleteCancelRef.current?.focus();
     const trapFocus = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        if (!permanentDeletePendingRef.current) setPermanentDeleteOpen(false);
+        if (!permanentDeletePendingRef.current) closePermanentDeleteDialog();
         return;
       }
       if (event.key !== "Tab") return;
@@ -531,6 +541,7 @@ function AuthenticatedWorkspace({
   const openPermanentDelete = (opener: HTMLButtonElement) => {
     if (logoutPending || !selectedNote || selectedNote.status !== "trashed") return;
     permanentDeleteOpenerRef.current = opener;
+    permanentDeleteFocusTargetRef.current = "origin";
     setPermanentDeleteError(null);
     setPermanentDeleteOpen(true);
   };
@@ -549,7 +560,7 @@ function AuthenticatedWorkspace({
       draftTitleRef.current = "";
       draftContentRef.current = "";
       setNoteMessage("笔记已永久删除");
-      setPermanentDeleteOpen(false);
+      closePermanentDeleteDialog("fallback");
     }).catch((error: unknown) => {
       setPermanentDeleteError(permanentDeleteErrorMessage(error));
     }).finally(() => setPermanentDeletePending(false));
@@ -608,11 +619,12 @@ function AuthenticatedWorkspace({
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() !== "n" || (!event.ctrlKey && !event.metaKey) || event.repeat || isEditableTarget(event.target)) return;
+      if (permanentDeleteOpen) return;
       if (startNewNote()) event.preventDefault();
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [logoutPending, workspaceId]);
+  }, [logoutPending, permanentDeleteOpen, workspaceId]);
 
   useEffect(() => {
     if (logoutPending || !workspaceId || !activeDraftId) return undefined;
@@ -1403,6 +1415,7 @@ function AuthenticatedWorkspace({
         contextualList={activeDomain === "databases" ? databaseContextualList : activeDomain === "notes" ? contextualList : undefined}
         inspector={<div className="inspector-content"><small>页面信息</small><h3>{inspectorTitle}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
         inspectorOpen={inspectorOpen}
+        externalModalOpen={permanentDeleteOpen}
         activePane={activePane}
         onActivePaneChange={setActivePane}
         onInspectorOpen={openInspector}
@@ -1450,7 +1463,7 @@ function AuthenticatedWorkspace({
           </header>
           <div className="editor-copy">
             <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
-            <h1>Public Beta 重写计划</h1>
+            <h1 ref={permanentDeleteFallbackRef} tabIndex={-1}>Public Beta 重写计划</h1>
             <p className="lead">一个稳定、响应迅速、离线可恢复的知识工作台。</p>
             <hr />
             <h2>自适应工作台</h2>
@@ -1478,13 +1491,13 @@ function AuthenticatedWorkspace({
         </div>
       ) : null}
       {permanentDeleteOpen && selectedNote ? (
-        <div className="account-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !permanentDeletePending) setPermanentDeleteOpen(false); }}>
+        <div className="account-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !permanentDeletePending) closePermanentDeleteDialog(); }}>
           <div ref={permanentDeleteDialogRef} className="account-confirm-dialog" role="dialog" aria-modal="true" aria-label="永久删除笔记" tabIndex={-1}>
             <h3>永久删除笔记</h3>
             <p>此操作不可撤销。笔记、其评论和公开分享链接将被永久删除。</p>
             {permanentDeleteError ? <p className="account-error" role="alert">{permanentDeleteError}</p> : null}
             <div className="account-actions">
-              <button ref={permanentDeleteCancelRef} type="button" disabled={permanentDeletePending} onClick={() => setPermanentDeleteOpen(false)}>取消</button>
+              <button ref={permanentDeleteCancelRef} type="button" disabled={permanentDeletePending} onClick={() => closePermanentDeleteDialog()}>取消</button>
               <button type="button" className="account-danger-button" disabled={permanentDeletePending} onClick={deleteSelectedNotePermanently}>{permanentDeletePending ? "正在永久删除…" : "确认永久删除"}</button>
             </div>
           </div>

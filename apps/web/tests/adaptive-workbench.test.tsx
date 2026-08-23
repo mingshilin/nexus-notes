@@ -16,6 +16,7 @@ interface WorkbenchProps {
   contextualList: ReactNode;
   inspector: ReactNode;
   inspectorOpen: boolean;
+  externalModalOpen?: boolean;
   activePane?: "context" | "canvas";
   onInspectorClose: () => void;
   children: ReactNode;
@@ -129,6 +130,31 @@ describe("adaptive workbench", () => {
     expect(screen.queryByRole("dialog", { name: "检查器" })).not.toBeInTheDocument();
     expect(container.querySelector(".workbench-canvas")).not.toHaveAttribute("aria-hidden");
     expect(container.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);
+  });
+
+  it("applies the existing modal boundary for a parent-owned external modal", async () => {
+    const web = await loadWeb();
+    const AdaptiveWorkbench = web.AdaptiveWorkbench as ComponentType<WorkbenchProps>;
+    const { container } = render(createElement(
+      AdaptiveWorkbench,
+      {
+        mode: "desktop",
+        navigation: "Navigation",
+        contextualList: "Notes",
+        inspector: "Inspector",
+        inspectorOpen: false,
+        externalModalOpen: true,
+        onInspectorClose: vi.fn(),
+      },
+      "Editor",
+    ));
+
+    expect(container.querySelector('nav[aria-label="主导航"]')).toHaveAttribute("aria-hidden", "true");
+    expect(container.querySelector('nav[aria-label="主导航"]')).toHaveAttribute("inert");
+    expect(container.querySelector(".workbench-context")).toHaveAttribute("inert");
+    expect(container.querySelector(".workbench-canvas")).toHaveAttribute("inert");
+    expect(container.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(0);
+    expect(document.body.style.overflow).toBe("hidden");
   });
 
   it("keeps one page scroll owner on the tablet canvas", async () => {

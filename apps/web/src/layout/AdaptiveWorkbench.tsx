@@ -14,6 +14,7 @@ export interface AdaptiveWorkbenchProps {
   contextualList?: ReactNode;
   inspector?: ReactNode;
   inspectorOpen: boolean;
+  externalModalOpen?: boolean;
   activePane?: "context" | "canvas";
   onActivePaneChange?: (pane: "context" | "canvas") => void;
   onInspectorOpen?: (opener: HTMLElement) => void;
@@ -53,6 +54,7 @@ export function AdaptiveWorkbench({
   contextualList,
   inspector,
   inspectorOpen,
+  externalModalOpen = false,
   activePane = "canvas",
   onActivePaneChange,
   onInspectorOpen,
@@ -66,7 +68,7 @@ export function AdaptiveWorkbench({
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [childModalOpen, setChildModalOpen] = useState(false);
   const inspectorModalOpen = inspectorOpen && Boolean(inspector);
-  const modalOpen = childModalOpen || inspectorModalOpen;
+  const modalOpen = childModalOpen || inspectorModalOpen || externalModalOpen;
   const mobileChromeVisible = mobile && mobileChrome.visible && !modalOpen;
 
   useEffect(() => {

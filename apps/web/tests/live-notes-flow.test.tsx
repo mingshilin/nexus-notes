@@ -172,9 +172,6 @@ describe("live note workspace flow", () => {
     expect(alert).toHaveTextContent(message);
     if (requestId) expect(alert).toHaveTextContent(requestId);
     expect(screen.getByRole("dialog", { name: "永久删除笔记" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
-    expect(await screen.findByRole("button", { name: "回收站" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("Trashed error");
     expect(screen.getByRole("button", { name: "确认永久删除" })).toBeEnabled();
   });
 
@@ -207,6 +204,35 @@ describe("live note workspace flow", () => {
     expect(dialog).toBeInTheDocument();
     resolveDelete({ deleted: true });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "永久删除笔记" })).not.toBeInTheDocument());
+  });
+
+  it("keeps the workbench inert and ignores Ctrl+N while permanent deletion is pending", async () => {
+    const trashed = { ...serverNoteForFlow(), id: "trashed-shortcut", title: "Trashed shortcut", status: "trashed" as const, revision: 4 };
+    let resolveDelete!: (value: { deleted: true }) => void;
+    const pendingDelete = new Promise<{ deleted: true }>((resolve) => { resolveDelete = resolve; });
+    const apiClient = createApiClient({
+      listTrash: async () => ({ items: [trashed], next_cursor: null }),
+      deletePermanently: async () => pendingDelete,
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "回收站" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Trashed shortcut/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "永久删除" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认永久删除" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "正在永久删除…" })).toBeDisabled());
+    expect(document.querySelector(".workbench-canvas")).toHaveAttribute("inert");
+    expect(document.querySelector('nav[aria-label="主导航"]')).toHaveAttribute("inert");
+    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    expect(apiClient.request.mock.calls.filter(([request]) => request.path === "/api/v2/notes" && request.method === "POST")).toHaveLength(0);
+    expect(screen.getByRole("textbox", { name: "笔记标题", hidden: true })).toHaveValue("Trashed shortcut");
+
+    resolveDelete({ deleted: true });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "永久删除笔记" })).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /Trashed shortcut/ })).not.toBeInTheDocument();
+    expect(apiClient.request.mock.calls.filter(([request]) => request.path === "/api/v2/notes" && request.method === "POST")).toHaveLength(0);
   });
 
   it("keeps permanent deletion reachable and actionable at 390px", async () => {
@@ -261,12 +287,12 @@ describe("live note workspace flow", () => {
     await waitFor(() => expect(apiClient.request.mock.calls.filter(([request]) => request.method === "DELETE")).toHaveLength(1));
     expect(await screen.findByRole("alert")).toHaveTextContent("永久删除失败");
     expect(screen.getByRole("dialog", { name: "永久删除笔记" })).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("Trashed note");
 
     rejectDelete = false;
     fireEvent.click(screen.getByRole("button", { name: "确认永久删除" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "永久删除笔记" })).not.toBeInTheDocument());
     expect(screen.queryByRole("button", { name: /Trashed note/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Public Beta 重写计划" })).toHaveFocus();
   });
 
   it("opens the tablet context drawer so the note creation action is reachable", async () => {
