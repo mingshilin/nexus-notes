@@ -279,7 +279,9 @@ export async function checkRemoteDeploy(baseUrl, { turnstileSiteKey } = {}) {
   assertReadiness(baseUrl, "online: deploy URL is required");
 
   const normalizedBaseUrl = new URL(baseUrl);
-  const htmlResponse = await fetchWithTimeout(normalizedBaseUrl);
+  const freshHtmlUrl = new URL(normalizedBaseUrl);
+  freshHtmlUrl.searchParams.set("_deploy_check", Date.now().toString());
+  const htmlResponse = await fetchWithTimeout(freshHtmlUrl);
   assertReadiness(htmlResponse.ok, `online: failed to fetch ${normalizedBaseUrl} (${htmlResponse.status})`);
   checkSecurityHeaders(htmlResponse, "online");
   const html = await htmlResponse.text();

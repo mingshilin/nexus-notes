@@ -24,17 +24,17 @@ describe("online deploy readiness", () => {
 
   it("accepts the Beta health route and verifies browser security headers", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === `${baseUrl}/`) {
+      const url = new URL(String(input));
+      if (url.origin === baseUrl && url.pathname === "/") {
         return new Response('<script type="module" src="/assets/main.js"></script>', {
           status: 200,
           headers: securityHeaders,
         });
       }
-      if (url === `${baseUrl}/assets/main.js`) {
+      if (url.href === `${baseUrl}/assets/main.js`) {
         return new Response(new Uint8Array(10), { status: 200 });
       }
-      if (url === `${baseUrl}/api/v2/health`) {
+      if (url.href === `${baseUrl}/api/v2/health`) {
         return new Response(JSON.stringify({ success: true, data: { status: "ok", version: "preview", ocr: "ready" } }), {
           status: 200,
           headers: { "content-type": "application/json", ...securityHeaders },
@@ -51,5 +51,31 @@ describe("online deploy readiness", () => {
     expect(result.healthStatus).toBe("ok");
     expect(result.healthOcr).toBe("ready");
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain(`${baseUrl}/api/v2/health`);
+  });
+
+  it("fetches a fresh HTML shell for online verification", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.origin === baseUrl && url.pathname === "/") {
+        expect(url.searchParams.has("_deploy_check")).toBe(true);
+        return new Response('<script type="module" src="/assets/main.js"></script>', {
+          status: 200,
+          headers: securityHeaders,
+        });
+      }
+      if (url.href === `${baseUrl}/assets/main.js`) {
+        return new Response(new Uint8Array(10), { status: 200 });
+      }
+      if (url.href === `${baseUrl}/api/v2/health`) {
+        return new Response(JSON.stringify({ success: true, data: { status: "ok" } }), {
+          status: 200,
+          headers: { "content-type": "application/json", ...securityHeaders },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(checkRemoteDeploy(baseUrl)).resolves.toMatchObject({ healthPath: "/api/v2/health" });
   });
 });
