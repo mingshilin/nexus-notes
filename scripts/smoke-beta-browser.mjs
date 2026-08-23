@@ -175,7 +175,10 @@ function connect(wsUrl) {
 
 async function evaluate(cdp, expression) {
   const result = await cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-  if (result.exceptionDetails) throw new Error(result.exceptionDetails.text ?? "Browser evaluation failed");
+  if (result.exceptionDetails) {
+    const detail = result.exceptionDetails.exception?.description ?? result.exceptionDetails.text ?? "Browser evaluation failed";
+    throw new Error(`${detail} [expression: ${expression.slice(0, 180)}]`);
+  }
   return result.result.value;
 }
 
@@ -202,11 +205,15 @@ const accessibleName = "(node) => { const ids = node.getAttribute('aria-labelled
 const visibleNode = "(node) => { const style=getComputedStyle(node); const rect=node.getBoundingClientRect(); return style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none' && rect.width > 0 && rect.height > 0; }";
 
 // CDP locators mirror the required page.getByRole/getByLabel/getByText contract without storing a Playwright profile.
-function getByRole(cdp, role, name) {
+export function buildRoleLocatorExpression(role, name, action) {
   const selector = role === "button" ? "button,[role='button']" : "[role='" + role + "']";
-  const lookup = "(node) => " + accessibleName + "(node) === " + JSON.stringify(name);
+  const lookup = "(node) => (" + accessibleName + ")(node) === " + JSON.stringify(name);
   const nodeExpression = "[...document.querySelectorAll(" + JSON.stringify(selector) + ")].find((candidate) => (" + lookup + ")(candidate) && (" + visibleNode + ")(candidate))";
-  const expression = (action) => "(() => { const node = " + nodeExpression + "; if (!node) return false; " + action + " })()";
+  return "(() => { const node = " + nodeExpression + "; if (!node) return false; " + action + " })()";
+}
+
+function getByRole(cdp, role, name) {
+  const expression = (action) => buildRoleLocatorExpression(role, name, action);
   return {
     async waitFor() {
       return waitFor(cdp, expression("const rect=node.getBoundingClientRect(); const style=getComputedStyle(node); return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;"), "role " + role + " " + name);

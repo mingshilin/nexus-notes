@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   INSPECTOR_INERT_NAVIGATION_SELECTOR,
+  buildRoleLocatorExpression,
   enterKeyboardViewport,
   parseArgs,
   pressKey,
@@ -30,6 +31,19 @@ describe("release browser smoke modes", () => {
   it("recognizes the product's implicit nav landmark when it is inert", () => {
     document.body.innerHTML = '<nav aria-label="移动端主导航" inert></nav>';
     expect(document.querySelector(INSPECTOR_INERT_NAVIGATION_SELECTOR)).not.toBeNull();
+  });
+
+  it("builds a syntactically valid role locator that finds a visible named button", () => {
+    document.body.innerHTML = '<button id="new-note">新建笔记</button>';
+    const button = document.getElementById("new-note");
+    Object.defineProperty(button, "getBoundingClientRect", {
+      value: () => ({ width: 32, height: 32 }),
+    });
+
+    const expression = buildRoleLocatorExpression("button", "新建笔记", "return node.id === 'new-note';");
+    const runExpression = new Function(`return ${expression};`);
+
+    expect(runExpression()).toBe(true);
   });
 
   it("sends real CDP Tab and Shift+Tab key metadata for inspector containment", async () => {
