@@ -110,6 +110,14 @@ export class KnowledgeClient {
     );
   }
 
+  listNoteTags(noteId: string, signal?: AbortSignal) {
+    return this.listQuery<Tag>(
+      `/api/v2/notes/${encodeURIComponent(noteId)}/tags`,
+      `note-tags:${noteId}`,
+      signal,
+    );
+  }
+
   setNoteLinks(noteId: string, input: SetNoteLinksInput) {
     return this.command<{ updated: true }>(
       `/api/v2/notes/${encodeURIComponent(noteId)}/links`,

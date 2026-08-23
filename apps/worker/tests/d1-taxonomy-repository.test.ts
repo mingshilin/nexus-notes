@@ -72,6 +72,21 @@ describe("D1TaxonomyRepository", () => {
     expect(statements.every((statement) => statement.bindings.includes("ws-1"))).toBe(true);
   });
 
+  it("lists only active note tags from the requested workspace", async () => {
+    const worker = await loadWorker();
+    const tag = {
+      id: "tag-1", workspace_id: "ws-1", name: "research", color: "", revision: 1,
+      created_at: "2026-08-21T00:00:00.000Z", updated_at: "2026-08-21T00:00:00.000Z",
+    };
+    const { db, statements } = createDb((sql) => sql.includes("FROM note_tags") ? [tag] : []);
+    const Repository = worker.D1TaxonomyRepository as new (db: unknown) => any;
+    const repository = new Repository(db);
+
+    await expect(repository.listNoteTags("ws-1", "note-1")).resolves.toEqual([tag]);
+    expect(statements[0]?.sql).toMatch(/JOIN tags[\s\S]*JOIN notes[\s\S]*deleted_at IS NULL/i);
+    expect(statements[0]?.bindings).toEqual(["ws-1", "note-1"]);
+  });
+
   it("does not report a folder created when its parent is outside the workspace", async () => {
     const worker = await loadWorker();
     const { db } = createDb(() => []);

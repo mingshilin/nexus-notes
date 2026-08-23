@@ -78,7 +78,7 @@ describe("v2 knowledge routes", () => {
     const service = {
       listFolders: vi.fn(async () => []), createFolder: vi.fn(async () => ({ id: "folder-1" })),
       listTags: vi.fn(async () => []), createTag: vi.fn(async () => ({ id: "tag-1" })),
-      setNoteTags: vi.fn(async () => undefined), setNoteLinks: vi.fn(async () => undefined),
+      listNoteTags: vi.fn(async () => []), setNoteTags: vi.fn(async () => undefined), setNoteLinks: vi.fn(async () => undefined),
       listNoteLinks: vi.fn(async () => []), listBacklinks: vi.fn(async () => []),
       getGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
       listReminders: vi.fn(async () => []), createReminder: vi.fn(async () => ({ id: "reminder-1" })),
@@ -99,6 +99,7 @@ describe("v2 knowledge routes", () => {
       registry.fetch(request("/api/v2/tags"), {}),
       registry.fetch(request("/api/v2/tags", { method: "POST", body: JSON.stringify({ name: "research" }) }), {}),
       registry.fetch(request("/api/v2/notes/note-1/tags", { method: "PUT", body: JSON.stringify({ tag_ids: ["tag-1"] }) }), {}),
+      registry.fetch(request("/api/v2/notes/note-1/tags"), {}),
       registry.fetch(request("/api/v2/notes/note-1/links", { method: "PUT", body: JSON.stringify({ target_note_ids: ["note-2"] }) }), {}),
       registry.fetch(request("/api/v2/notes/note-1/links"), {}),
       registry.fetch(request("/api/v2/notes/note-1/backlinks"), {}),

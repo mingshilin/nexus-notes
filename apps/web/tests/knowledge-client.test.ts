@@ -65,6 +65,7 @@ describe("KnowledgeClient", () => {
     await client.listTags();
     await client.createTag({ name: "research", color: "" });
     await client.setNoteTags("note-1", { tag_ids: ["tag-1"] });
+    await client.listNoteTags("note-1");
     await client.setNoteLinks("note-1", { target_note_ids: ["note-2"] });
     await client.listNoteLinks("note-1");
     await client.listBacklinks("note-1");
@@ -77,7 +78,8 @@ describe("KnowledgeClient", () => {
     expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET"])).toEqual([
       ["/api/v2/folders", "GET"], ["/api/v2/folders", "POST"],
       ["/api/v2/tags", "GET"], ["/api/v2/tags", "POST"],
-      ["/api/v2/notes/note-1/tags", "PUT"], ["/api/v2/notes/note-1/links", "PUT"],
+      ["/api/v2/notes/note-1/tags", "PUT"], ["/api/v2/notes/note-1/tags", "GET"],
+      ["/api/v2/notes/note-1/links", "PUT"],
       ["/api/v2/notes/note-1/links", "GET"], ["/api/v2/notes/note-1/backlinks", "GET"],
       ["/api/v2/graph", "GET"], ["/api/v2/graph/local/note-1", "GET"],
       ["/api/v2/reminders?include_completed=true", "GET"], ["/api/v2/reminders", "POST"],

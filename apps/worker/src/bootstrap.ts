@@ -171,6 +171,7 @@ function createKnowledgeService(env: BetaWorkerEnv) {
     listFolders: (...args) => taxonomy.listFolders(...args),
     createFolder: (...args) => taxonomy.createFolder(...args),
     listTags: (...args) => taxonomy.listTags(...args),
+    listNoteTags: (...args) => taxonomy.listNoteTags(...args),
     createTag: (...args) => taxonomy.createTag(...args),
     setNoteTags: (...args) => taxonomy.setNoteTags(...args),
     setNoteLinks: (...args) => taxonomy.setNoteLinks(...args),

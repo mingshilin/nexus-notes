@@ -37,6 +37,7 @@ export interface KnowledgeRepository {
   listFolders(workspaceId: string): Promise<Folder[]>;
   createFolder(workspaceId: string, input: CreateFolderInput, now: string): Promise<Folder | null>;
   listTags(workspaceId: string): Promise<Tag[]>;
+  listNoteTags(workspaceId: string, noteId: string): Promise<Tag[]>;
   createTag(workspaceId: string, input: CreateTagInput, now: string): Promise<Tag>;
   setNoteTags(workspaceId: string, noteId: string, tagIds: string[], now: string): Promise<void>;
   setNoteLinks(workspaceId: string, noteId: string, targetNoteIds: string[], now: string): Promise<void>;
@@ -120,6 +121,10 @@ export class KnowledgeService {
 
   listTags(context: KnowledgeActorContext) {
     return this.repository.listTags(context.workspaceId);
+  }
+
+  listNoteTags(context: KnowledgeActorContext, noteId: string) {
+    return this.repository.listNoteTags(context.workspaceId, noteId);
   }
 
   createTag(context: KnowledgeActorContext, input: CreateTagInput) {

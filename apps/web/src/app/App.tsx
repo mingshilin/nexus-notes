@@ -7,7 +7,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, Profile, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
+import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, Profile, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient, ApiClientError } from "../data/api-client";
 import { ProfileClient } from "../data/profile-client";
@@ -28,6 +28,7 @@ import { NormalizedCache } from "../data/normalized-cache";
 import { ProductNavigation, type AccountSubsection, type ProductDomain } from "../navigation/ProductNavigation";
 import { QuickCapturePanel } from "../notes/QuickCapturePanel";
 import { NoteOrganizationPanel } from "../notes/NoteOrganizationPanel";
+import { NoteTagPanel } from "../notes/NoteTagPanel";
 import { CreateCenter, type CreateActionResult } from "../create";
 import { FeatureHub } from "../features";
 import {
@@ -285,6 +286,11 @@ function AuthenticatedWorkspace({
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderLoading, setFolderLoading] = useState(Boolean(workspaceId));
   const [noteFolderFilter, setNoteFolderFilter] = useState<string | null>(null);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [noteTagIds, setNoteTagIds] = useState<Record<string, string[]>>({});
+  const [noteTagsLoading, setNoteTagsLoading] = useState(false);
+  const [noteTagsSaving, setNoteTagsSaving] = useState(false);
+  const [noteTagsError, setNoteTagsError] = useState<string | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [workspaceModal, setWorkspaceModal] = useState<WorkspaceModal | null>(null);
   const createCenterOpen = workspaceModal === "create";
@@ -407,6 +413,22 @@ function AuthenticatedWorkspace({
       if (!controller.signal.aborted) setFolders([]);
     }).finally(() => {
       if (!controller.signal.aborted) setFolderLoading(false);
+    });
+    return () => controller.abort();
+  }, [apiClient, workspaceId]);
+
+  useEffect(() => {
+    if (!workspaceId) {
+      setTags([]);
+      setNoteTagIds({});
+      setNoteTagsError(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    void new KnowledgeClient(apiClient, workspaceId).listTags(controller.signal).then((items) => {
+      if (!controller.signal.aborted) setTags(items);
+    }).catch(() => {
+      if (!controller.signal.aborted) setTags([]);
     });
     return () => controller.abort();
   }, [apiClient, workspaceId]);
@@ -616,6 +638,37 @@ function AuthenticatedWorkspace({
       setDraftContent("");
       setDraftFolderId(null);
     }
+  };
+
+  const createNoteTag = async (name: string) => {
+    if (!workspaceId || role === "viewer") throw new Error("当前工作区没有标签编辑权限。");
+    setNoteTagsError(null);
+    try {
+      const created = await new KnowledgeClient(apiClient, workspaceId).createTag({ name, color: "" });
+      setTags((current) => current.some((tag) => tag.id === created.id) ? current : [...current, created].sort((left, right) => left.name.localeCompare(right.name)));
+      return created;
+    } catch (error) {
+      setNoteTagsError("创建标签失败，请重试。标签名称仍保留在输入框中。");
+      throw error;
+    }
+  };
+
+  const updateSelectedNoteTags = (nextTagIds: string[]) => {
+    if (logoutPending || !workspaceId || !selectedNoteId || creatingNote || role === "viewer" || selectedNote?.status === "trashed" || noteTagsSaving) return;
+    const noteId = selectedNoteId;
+    const previousTagIds = noteTagIds[noteId] ?? [];
+    setNoteTagIds((current) => ({ ...current, [noteId]: nextTagIds }));
+    setNoteTagsSaving(true);
+    setNoteTagsError(null);
+    void new KnowledgeClient(apiClient, workspaceId).setNoteTags(noteId, { tag_ids: nextTagIds }).then(() => {
+      if (mountedRef.current && selectedNoteId === noteId) setNoteMessage("标签已保存");
+    }).catch(() => {
+      if (!mountedRef.current) return;
+      setNoteTagIds((current) => ({ ...current, [noteId]: previousTagIds }));
+      setNoteTagsError("标签保存失败，请重试。当前选择已恢复。");
+    }).finally(() => {
+      if (mountedRef.current) setNoteTagsSaving(false);
+    });
   };
 
   const saveNote = () => {
@@ -945,6 +998,26 @@ function AuthenticatedWorkspace({
       draftContentRef.current = "";
     }
   }, [creatingNote, selectedNote]);
+
+  useEffect(() => {
+    if (!workspaceId || !selectedNoteId || creatingNote) {
+      setNoteTagsLoading(false);
+      setNoteTagsError(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setNoteTagsLoading(true);
+    setNoteTagsError(null);
+    void new KnowledgeClient(apiClient, workspaceId).listNoteTags(selectedNoteId, controller.signal).then((items) => {
+      if (controller.signal.aborted) return;
+      setNoteTagIds((current) => ({ ...current, [selectedNoteId]: items.map((tag) => tag.id) }));
+    }).catch(() => {
+      if (!controller.signal.aborted) setNoteTagsError("标签暂时无法加载，保持当前选择后可重试。");
+    }).finally(() => {
+      if (!controller.signal.aborted) setNoteTagsLoading(false);
+    });
+    return () => controller.abort();
+  }, [apiClient, creatingNote, selectedNoteId, workspaceId]);
 
   useEffect(() => {
     if (!workspaceId || !collaborationEnabled) {
@@ -1722,6 +1795,15 @@ function AuthenticatedWorkspace({
             <h1>{draftTitle.trim() || "未命名笔记"}</h1>
             <label className="note-editor-field">标题<input ref={titleInputRef} aria-label="笔记标题" disabled={logoutPending || selectedNote?.status === "trashed"} value={draftTitle} onChange={(event) => updateActiveDraftInput(event.target.value, draftContentRef.current)} /></label>
             <label className="note-editor-field">文件夹<select aria-label="笔记文件夹" disabled={logoutPending || creatingNote || selectedNote?.status === "trashed"} value={draftFolderId ?? ""} onChange={(event) => { setDraftFolderId(event.target.value || null); setNoteMessage(null); }}><option value="">未分类</option>{folders.map((folder, index) => <option key={`${folder.id || "folder"}-${index}`} value={folder.id}>{folder.name}</option>)}</select></label>
+            {!creatingNote && selectedNote ? <NoteTagPanel
+              tags={tags}
+              selectedTagIds={noteTagIds[selectedNote.id] ?? []}
+              saving={noteTagsLoading || noteTagsSaving}
+              readOnly={role === "viewer" || selectedNote.status === "trashed"}
+              error={noteTagsError}
+              onChange={updateSelectedNoteTags}
+              onCreateTag={role === "viewer" || selectedNote.status === "trashed" ? undefined : createNoteTag}
+            /> : null}
             <label className="note-editor-field">内容<textarea aria-label="笔记内容" disabled={logoutPending || selectedNote?.status === "trashed"} value={draftContent} onChange={(event) => updateActiveDraftInput(draftTitleRef.current, event.target.value)} /></label>
             <div className="note-editor-actions">
               {selectedNote?.status !== "trashed" ? (
