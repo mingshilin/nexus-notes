@@ -4,7 +4,7 @@ import { Fragment, useId } from "react";
 import { AccountMenu } from "../account/AccountMenu";
 import { useWorkbenchModalOpen } from "../layout/AdaptiveWorkbench";
 
-export type ProductDomain = "notes" | "databases" | "knowledge" | "collaboration" | "ai" | "account";
+export type ProductDomain = "notes" | "databases" | "knowledge" | "reminders" | "collaboration" | "ai" | "account";
 export type AccountSubsection = "personal" | "workspace";
 
 export interface ProductNavigationProps {

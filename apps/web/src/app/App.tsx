@@ -19,6 +19,7 @@ import { KnowledgeClient } from "../data/knowledge-client";
 import { NotesClient } from "../data/notes-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic, type RecoveryFilters } from "../knowledge/KnowledgeRecoveryPanel";
 import { KnowledgeSearchPanel } from "../knowledge/KnowledgeSearchPanel";
+import { ReminderPanel } from "../reminders/ReminderPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
 import { DatabaseClient, type DatabaseBundle } from "../data/database-client";
@@ -1157,8 +1158,7 @@ function AuthenticatedWorkspace({
     setActiveDomain("notes");
     setActivePane("canvas");
   };
-  const navigateFeatureMap = (domain: Parameters<typeof changeDomain>[0] | "reminders") => {
-    if (domain === "reminders") return;
+  const navigateFeatureMap = (domain: Parameters<typeof changeDomain>[0]) => {
     if (domain === "account") {
       openAccountSubsection("personal");
       return;
@@ -1412,6 +1412,7 @@ function AuthenticatedWorkspace({
       {recoveryPanel}
     </section>
   );
+  const remindersCanvas = <ReminderPanel client={knowledgeClient} />;
   const aiCanvas = <AIChatPanel client={apiClient} workspaceId={workspaceId ?? ""} />;
   const accountCanvas = (
     <AccountCenter
@@ -1454,7 +1455,7 @@ function AuthenticatedWorkspace({
         <h2>自适应工作台</h2>
         <p>导航保持轻量，列表按需出现，主画布获得最多空间，检查器不再永久挤压编辑区域。</p>
         <div className="callout"><Sparkles size={18} /><p>视觉风格继续使用原有蓝色强调、玻璃层级和舒适圆角。</p></div>
-        <FeatureHub availability={{ collaboration: collaborationEnabled }} onNavigate={navigateFeatureMap} />
+        <FeatureHub availability={{ collaboration: collaborationEnabled, reminders: Boolean(workspaceId) }} onNavigate={navigateFeatureMap} />
         {recoveryPanel}
       </div>
     </article>
@@ -1586,7 +1587,7 @@ function AuthenticatedWorkspace({
         onInspectorClose={closeInspector}
       >
         <>
-        {activeDomain === "collaboration" ? collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : collaborationUnavailableCanvas : activeDomain === "databases" ? databaseCanvas : activeDomain === "knowledge" ? knowledgeCanvas : activeDomain === "ai" ? aiCanvas : activeDomain === "account" ? accountCanvas : featureMapOpen ? workspaceOverviewCanvas : selectedNote || creatingNote ? <article className="editor-document">
+        {activeDomain === "collaboration" ? collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : collaborationUnavailableCanvas : activeDomain === "databases" ? databaseCanvas : activeDomain === "knowledge" ? knowledgeCanvas : activeDomain === "reminders" ? remindersCanvas : activeDomain === "ai" ? aiCanvas : activeDomain === "account" ? accountCanvas : featureMapOpen ? workspaceOverviewCanvas : selectedNote || creatingNote ? <article className="editor-document">
           <header className="editor-toolbar">
             <span className="saved-state" role="status" aria-live="polite"><span /> {noteSaving ? "保存中…" : noteMessage ?? "未保存更改"}</span>
             <div>
