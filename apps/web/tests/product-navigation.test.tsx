@@ -214,6 +214,20 @@ describe("ProductNavigation", () => {
     expect(screen.getByRole("button", { name: "账户" })).toHaveAttribute("title", "账户与个人资料");
   });
 
+  it("exposes a direct personal-settings shortcut in desktop and mobile navigation", () => {
+    const onPersonalCenter = vi.fn();
+    const props = navigationProps({ onPersonalCenter });
+    const { rerender } = render(<ProductNavigation {...props} mode="rail" />);
+
+    const desktopShortcut = screen.getByRole("button", { name: "个人资料与设置" });
+    expect(desktopShortcut).toBeVisible();
+    fireEvent.click(desktopShortcut);
+    expect(onPersonalCenter).toHaveBeenCalledOnce();
+
+    rerender(<ProductNavigation {...props} mode="mobile" />);
+    expect(screen.getByRole("button", { name: "个人资料与设置" })).toBeVisible();
+  });
+
   it("uses direct Chinese destinations and exact domain callbacks", () => {
     const props = navigationProps();
     render(<ProductNavigation {...props} />);
@@ -440,6 +454,16 @@ describe("App product navigation", () => {
     const createButtons = await screen.findAllByRole("button", { name: "新建笔记" });
     expect(createButtons.length).toBeGreaterThanOrEqual(2);
     expect(createButtons.some((button) => button.textContent?.includes("新建笔记"))).toBe(true);
+  });
+
+  it("keeps the create center in the fixed mobile action area on the notes overview", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+
+    await screen.findByRole("region", { name: "快速开始" });
+    const mobileActionArea = document.querySelector(".mobile-create-note");
+    expect(mobileActionArea).toBeInTheDocument();
+    expect(within(mobileActionArea as HTMLElement).getByRole("button", { name: "创建内容" })).toBeVisible();
   });
 
   it("opens Quick Capture from the note list and selects the captured note", async () => {

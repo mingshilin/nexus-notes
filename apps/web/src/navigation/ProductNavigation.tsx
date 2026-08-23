@@ -1,5 +1,5 @@
 import type { AuthUserSummary } from "@nexus/contracts";
-import { Bot, Database, Library, List, NotebookPen, Plus, Settings, Users } from "lucide-react";
+import { Bot, Database, Library, List, NotebookPen, Plus, Settings, UserRound, Users } from "lucide-react";
 import { Fragment, useId } from "react";
 import { AccountMenu } from "../account/AccountMenu";
 import { useWorkbenchModalOpen } from "../layout/AdaptiveWorkbench";
@@ -116,6 +116,16 @@ export function ProductNavigation({
         </button>
       ) : null}
       <div className="product-navigation-account">
+        <button
+          className="product-navigation-item product-navigation-profile-shortcut"
+          type="button"
+          aria-label="个人资料与设置"
+          title="个人资料、密码、安全与工作区"
+          onClick={onPersonalCenter}
+        >
+          <UserRound aria-hidden="true" size={19} />
+          <span>个人资料</span>
+        </button>
         {destinationButton("account", "设置", Settings)}
         <AccountMenu
           user={user}

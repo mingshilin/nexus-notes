@@ -1300,10 +1300,10 @@ function AuthenticatedWorkspace({
   );
   const showWorkspaceOverview = activeDomain === "notes" && !selectedNote && !creatingNote;
   const mobileCreateAction = activePane !== "context" ? (
-    <div className="mobile-create-actions">
-      {featureMapAction}
-      {!showWorkspaceOverview ? createCenterAction : null}
-      {activeDomain === "notes" ? (
+      <div className="mobile-create-actions">
+        {featureMapAction}
+        {createCenterAction}
+        {activeDomain === "notes" ? (
         <button className="mobile-create-note-button" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
           <Plus aria-hidden="true" size={20} />
           <span>新建笔记</span>
