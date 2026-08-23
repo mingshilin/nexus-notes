@@ -90,6 +90,7 @@ describe("v2 note routes", () => {
     ]);
 
     expect(responses.map((response: Response) => response.status)).toEqual([200, 201, 200, 200, 200, 200, 200, 201]);
+    expect(await responses[4]!.json()).toEqual({ success: true, data: { deleted: true }, request_id: "req-notes" });
     expect(service.list).toHaveBeenCalledWith(workspace, { cursor: "cursor-1", limit: 25 });
     const mutationWorkspace = { ...workspace, requestId: "req-notes" };
     expect(service.create).toHaveBeenCalledWith(mutationWorkspace, { title: "Draft", content: "Body" });

@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
+import { ApiClientError } from "../src/data/api-client";
 import type { LocalDraft } from "../src/data/local-store";
 import { NoteDraftController } from "../src/notes/note-draft-controller";
 
@@ -108,8 +109,8 @@ function createApiClient(options: NoteApiOptions = {}) {
   return { request };
 }
 
-function renderWorkspace(apiClient: ReturnType<typeof createApiClient>) {
-  Object.defineProperty(window, "innerWidth", { configurable: true, value: 929 });
+function renderWorkspace(apiClient: ReturnType<typeof createApiClient>, width = 929) {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
   const localStore = createDraftStore();
   return render(
     <App
@@ -147,6 +148,84 @@ function renderWorkspaceWithStore(
 }
 
 describe("live note workspace flow", () => {
+  it.each([
+    ["conflict", new ApiClientError({ code: "NOTE_CONFLICT", message: "Conflict", request_id: "req-conflict", retryable: false }), "笔记已发生变化", "req-conflict"],
+    ["not trashed", new ApiClientError({ code: "NOTE_NOT_TRASHED", message: "Not trashed", request_id: "req-not-trashed", retryable: false }), "已不在回收站", "req-not-trashed"],
+    ["not found", new ApiClientError({ code: "NOTE_NOT_FOUND", message: "Missing", request_id: "req-not-found", retryable: false }), "已不存在或无权访问", "req-not-found"],
+    ["transient network", new ApiClientError({ code: "NETWORK_ERROR", message: "Offline", request_id: "req-network", retryable: true }), "仍保留在回收站中，可安全重试", "req-network"],
+    ["unknown", new Error("unexpected"), "永久删除失败，请重试", undefined],
+  ])("keeps the Trash dialog open with a normalized %s deletion error", async (_kind, error, message, requestId) => {
+    const trashed = { ...serverNoteForFlow(), id: "trashed-error", title: "Trashed error", status: "trashed" as const, revision: 4 };
+    const apiClient = createApiClient({
+      listTrash: async () => ({ items: [trashed], next_cursor: null }),
+      deletePermanently: async () => { throw error; },
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: "回收站" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Trashed error/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "永久删除" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认永久删除" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(message);
+    if (requestId) expect(alert).toHaveTextContent(requestId);
+    expect(screen.getByRole("dialog", { name: "永久删除笔记" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    expect(await screen.findByRole("button", { name: "回收站" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("Trashed error");
+    expect(screen.getByRole("button", { name: "确认永久删除" })).toBeEnabled();
+  });
+
+  it("keeps focus in the permanent delete dialog while its request is pending", async () => {
+    const trashed = { ...serverNoteForFlow(), id: "trashed-pending", title: "Trashed pending", status: "trashed" as const, revision: 4 };
+    let resolveDelete!: (value: { deleted: true }) => void;
+    const pendingDelete = new Promise<{ deleted: true }>((resolve) => { resolveDelete = resolve; });
+    const apiClient = createApiClient({
+      listTrash: async () => ({ items: [trashed], next_cursor: null }),
+      deletePermanently: async () => pendingDelete,
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "回收站" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Trashed pending/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "永久删除" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认永久删除" }));
+
+    const dialog = screen.getByRole("dialog", { name: "永久删除笔记" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "正在永久删除…" })).toBeDisabled());
+    for (const shiftKey of [false, true]) {
+      const event = new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true });
+      document.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(dialog).toHaveFocus();
+    }
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.mouseDown(dialog.parentElement!);
+    expect(dialog).toBeInTheDocument();
+    resolveDelete({ deleted: true });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "永久删除笔记" })).not.toBeInTheDocument());
+  });
+
+  it("keeps permanent deletion reachable and actionable at 390px", async () => {
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: { height: 500, offsetTop: 0, addEventListener: vi.fn(), removeEventListener: vi.fn() } });
+    const trashed = { ...serverNoteForFlow(), id: "trashed-mobile", title: "Trashed mobile", status: "trashed" as const, revision: 4 };
+    const apiClient = createApiClient({ listTrash: async () => ({ items: [trashed], next_cursor: null }) });
+    renderWorkspace(apiClient, 390);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "回收站" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Trashed mobile/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "永久删除" }));
+    const dialog = await screen.findByRole("dialog", { name: "永久删除笔记" });
+    expect(dialog).toHaveAttribute("tabindex", "-1");
+    expect(screen.getByRole("button", { name: "取消" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认永久删除" })).toBeVisible();
+  });
+
   it("confirms permanent Trash deletion accessibly, prevents duplicates, and preserves retry after failure", async () => {
     const trashed = { ...serverNoteForFlow(), id: "trashed-1", title: "Trashed note", content: "Keep until confirmed", status: "trashed" as const, revision: 4 };
     let rejectDelete = true;

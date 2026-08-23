@@ -8,7 +8,7 @@ import {
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, KnowledgeDiagnostic, Note, Profile, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
-import { ApiClient } from "../data/api-client";
+import { ApiClient, ApiClientError } from "../data/api-client";
 import { ProfileClient } from "../data/profile-client";
 import { OperationsClient } from "../data/operations-client";
 import { AccountCenter } from "../account";
@@ -52,6 +52,30 @@ type NoteListView = "all" | "inbox" | "today" | "trash";
 type WorkspaceRouteAuthority = { userId: string; workspaceId: string };
 type UserScopedLocalStore = NoteDraftStore & { destroy(): Promise<void> };
 type LogoutPhase = "idle" | "quiescing" | "cleanup" | "cleanup-error";
+
+function permanentDeleteErrorMessage(error: unknown) {
+  const candidate = error instanceof ApiClientError
+    ? { code: error.code, retryable: error.retryable, requestId: error.requestId }
+    : typeof error === "object" && error !== null
+      ? error as { code?: unknown; retryable?: unknown; requestId?: unknown; request_id?: unknown }
+      : {};
+  const code = typeof candidate.code === "string" ? candidate.code : "";
+  const retryable = candidate.retryable === true;
+  const requestId = typeof candidate.requestId === "string"
+    ? candidate.requestId
+    : typeof candidate.request_id === "string" ? candidate.request_id : undefined;
+  const message = code === "NOTE_CONFLICT"
+    ? "笔记已发生变化。请刷新回收站后再试。"
+    : code === "NOTE_NOT_TRASHED"
+      ? "笔记已不在回收站中。请刷新回收站后再试。"
+      : code === "NOTE_NOT_FOUND"
+        ? "笔记已不存在或无权访问。请刷新回收站后再试。"
+        : code === "NETWORK_ERROR" || code === "TIMEOUT" || retryable
+          ? "网络或服务暂时不可用。笔记仍保留在回收站中，可安全重试。"
+          : "永久删除失败，请重试。笔记仍保留在回收站中。";
+  const safeRequestId = requestId && /^[A-Za-z0-9._:-]{1,128}$/u.test(requestId) ? requestId : undefined;
+  return safeRequestId ? `${message} 请求 ID：${safeRequestId}` : message;
+}
 
 function localDateKey(date = new Date()) {
   return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
@@ -339,7 +363,8 @@ function AuthenticatedWorkspace({
       return undefined;
     }
     permanentDeleteWasOpenRef.current = true;
-    permanentDeleteCancelRef.current?.focus();
+    if (permanentDeletePending) permanentDeleteDialogRef.current?.focus();
+    else permanentDeleteCancelRef.current?.focus();
     const trapFocus = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         if (!permanentDeletePendingRef.current) setPermanentDeleteOpen(false);
@@ -349,7 +374,11 @@ function AuthenticatedWorkspace({
       const dialog = permanentDeleteDialogRef.current;
       if (!dialog) return;
       const focusable = [...dialog.querySelectorAll<HTMLElement>("button:not([disabled])")];
-      if (!focusable.length) return;
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
       const activeIndex = focusable.indexOf(document.activeElement as HTMLElement);
       const nextIndex = event.shiftKey
         ? activeIndex <= 0 ? focusable.length - 1 : activeIndex - 1
@@ -359,7 +388,7 @@ function AuthenticatedWorkspace({
     };
     document.addEventListener("keydown", trapFocus);
     return () => document.removeEventListener("keydown", trapFocus);
-  }, [permanentDeleteOpen]);
+  }, [permanentDeleteOpen, permanentDeletePending]);
 
   const openInspector = (opener?: HTMLElement) => {
     inspectorOpenerRef.current = opener ?? null;
@@ -521,8 +550,8 @@ function AuthenticatedWorkspace({
       draftContentRef.current = "";
       setNoteMessage("笔记已永久删除");
       setPermanentDeleteOpen(false);
-    }).catch(() => {
-      setPermanentDeleteError("永久删除失败，请重试。笔记仍保留在回收站中。");
+    }).catch((error: unknown) => {
+      setPermanentDeleteError(permanentDeleteErrorMessage(error));
     }).finally(() => setPermanentDeletePending(false));
   };
 
@@ -1450,7 +1479,7 @@ function AuthenticatedWorkspace({
       ) : null}
       {permanentDeleteOpen && selectedNote ? (
         <div className="account-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !permanentDeletePending) setPermanentDeleteOpen(false); }}>
-          <div ref={permanentDeleteDialogRef} className="account-confirm-dialog" role="dialog" aria-modal="true" aria-label="永久删除笔记">
+          <div ref={permanentDeleteDialogRef} className="account-confirm-dialog" role="dialog" aria-modal="true" aria-label="永久删除笔记" tabIndex={-1}>
             <h3>永久删除笔记</h3>
             <p>此操作不可撤销。笔记、其评论和公开分享链接将被永久删除。</p>
             {permanentDeleteError ? <p className="account-error" role="alert">{permanentDeleteError}</p> : null}

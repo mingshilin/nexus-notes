@@ -208,6 +208,8 @@ button { color: inherit; }
 .account-service-status small { color: hsl(var(--muted-foreground)); background: rgba(0,0,0,.045); }
 .account-danger-zone { border-color: color-mix(in srgb, hsl(var(--destructive)) 35%, var(--border-subtle)); }
 .account-panel .account-danger-button { color: hsl(var(--destructive)); border-color: color-mix(in srgb, hsl(var(--destructive)) 32%, var(--border-subtle)); background: color-mix(in srgb, hsl(var(--destructive)) 8%, var(--surface-elevated)); }
+.account-actions button.account-danger-button { color: white; border-color: hsl(var(--destructive)); background: hsl(var(--destructive)); }
+.note-lifecycle-action.note-lifecycle-danger { color: hsl(var(--destructive)); border-color: color-mix(in srgb, hsl(var(--destructive)) 36%, var(--border-subtle)); background: color-mix(in srgb, hsl(var(--destructive)) 9%, var(--surface-elevated)); }
 .logout-error-banner { position: fixed; top: max(12px, env(safe-area-inset-top)); left: 50%; z-index: 60; display: flex; max-width: min(560px, calc(100% - 28px)); align-items: center; gap: 14px; padding: 11px 12px 11px 16px; transform: translateX(-50%); border: 1px solid color-mix(in srgb, hsl(var(--destructive)) 24%, var(--border-subtle)); border-radius: 14px; color: hsl(var(--destructive)); background: var(--surface-overlay); box-shadow: var(--shadow-md); backdrop-filter: blur(18px); font-size: 12px; }
 .logout-error-banner button { flex: 0 0 auto; border: 0; border-radius: 10px; padding: 7px 10px; color: white; background: hsl(var(--destructive)); cursor: pointer; }
 .editor-copy h1 { max-width: 700px; margin: 11px 0 16px; font-size: clamp(36px, 5vw, 64px); line-height: 1.06; letter-spacing: -0.045em; }
@@ -505,6 +507,8 @@ button { color: inherit; }
   .note-empty-create-note { display: none; }
   .account-workspace-row, .account-member-row { align-items: stretch; flex-direction: column; }
   .account-workspace-row > button, .account-member-row > button, .account-member-row > select { width: 100%; }
+  .account-dialog-backdrop { place-items: center; padding: max(16px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); overflow-y: auto; overscroll-behavior: contain; }
+  .account-confirm-dialog { width: min(430px, 100%); max-height: calc(100dvh - max(32px, calc(env(safe-area-inset-top) + env(safe-area-inset-bottom)))); overflow-y: auto; padding-bottom: max(23px, env(safe-area-inset-bottom)); }
   .logout-error-banner { align-items: stretch; flex-direction: column; }
   .auth-page { height: 100dvh; min-height: 0; grid-template-columns: 1fr; overflow-y: auto; border: 0; border-radius: 0; }
   .auth-intro { display: none; }
