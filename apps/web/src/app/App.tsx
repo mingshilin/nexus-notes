@@ -25,6 +25,8 @@ import { NoteDraftController, type DraftSyncResult, type NoteDraftStore } from "
 import { NormalizedCache } from "../data/normalized-cache";
 import { ProductNavigation, type AccountSubsection, type ProductDomain } from "../navigation/ProductNavigation";
 import { QuickCapturePanel } from "../notes/QuickCapturePanel";
+import { CreateCenter } from "../create";
+import { FeatureHub } from "../features";
 import {
   CollaborationCenter,
   InviteRedemptionPage,
@@ -264,6 +266,7 @@ function AuthenticatedWorkspace({
   const [notesError, setNotesError] = useState<string | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
+  const [createCenterOpen, setCreateCenterOpen] = useState(false);
   const [noteListView, setNoteListView] = useState<NoteListView>("all");
   const [creatingNote, setCreatingNote] = useState(false);
   const [dailyNoteOpening, setDailyNoteOpening] = useState(false);
@@ -1014,6 +1017,13 @@ function AuthenticatedWorkspace({
 
   const createFirstDatabase = () => createDatabaseFromName(firstDatabaseName);
 
+  const openDatabaseCreation = () => {
+    setFirstDatabaseName("");
+    setActiveDomain("databases");
+    setActivePane(databases.length > 0 ? "context" : "canvas");
+    setDatabaseCreateOpen(databases.length > 0);
+  };
+
   const loadMoreAttachments = () => {
     if (!workspaceId || !attachmentCursor || loading || refreshing) return;
     const controller = createRecoveryRequest();
@@ -1129,26 +1139,47 @@ function AuthenticatedWorkspace({
   };
   const navigation = <ProductNavigation {...productNavigationProps} mode="rail" />;
   const mobileNavigation = <ProductNavigation {...productNavigationProps} mode="mobile" />;
-  const mobileCreateAction = activeDomain === "notes" && activePane !== "context" ? (
-    <button className="mobile-create-note-button" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
-      <Plus aria-hidden="true" size={20} />
-      <span>新建笔记</span>
-    </button>
-  ) : null;
-  const desktopCreateAction = activeDomain === "notes" && activePane !== "context" ? (
-    <button
-      className="editor-new-note-button"
-      type="button"
-      aria-label="新建笔记"
-      aria-keyshortcuts="Control+N Meta+N"
-      title="新建笔记（Ctrl/Cmd+N）"
+  const createCenterAction = (
+    <CreateCenter
+      open={createCenterOpen}
+      onOpenChange={setCreateCenterOpen}
       disabled={logoutPending}
-      onClick={startNewNote}
-    >
-      <Plus aria-hidden="true" size={16} />
-      <span>新建笔记</span>
-    </button>
+      onCreateNote={workspaceId ? startNewNote : undefined}
+      onQuickCapture={workspaceId ? () => setQuickCaptureOpen(true) : undefined}
+      onTodayNote={workspaceId ? openTodayNote : undefined}
+      onCreateDatabase={workspaceId ? openDatabaseCreation : undefined}
+    />
+  );
+  const mobileCreateAction = activePane !== "context" ? (
+    <div className="mobile-create-actions">
+      {createCenterAction}
+      {activeDomain === "notes" ? (
+        <button className="mobile-create-note-button" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
+          <Plus aria-hidden="true" size={20} />
+          <span>新建笔记</span>
+        </button>
+      ) : null}
+    </div>
   ) : null;
+  const desktopCreateAction = (
+    <div className="desktop-create-actions">
+      {createCenterAction}
+      {activeDomain === "notes" ? (
+        <button
+          className="editor-new-note-button"
+          type="button"
+          aria-label="新建笔记"
+          aria-keyshortcuts="Control+N Meta+N"
+          title="新建笔记（Ctrl/Cmd+N）"
+          disabled={logoutPending}
+          onClick={startNewNote}
+        >
+          <Plus aria-hidden="true" size={16} />
+          <span>新建笔记</span>
+        </button>
+      ) : null}
+    </div>
+  );
 
   const contextualList = (
     <div className="context-content">
@@ -1504,6 +1535,10 @@ function AuthenticatedWorkspace({
             <h2>自适应工作台</h2>
             <p>导航保持轻量，列表按需出现，主画布获得最多空间，检查器不再永久挤压编辑区域。</p>
             <div className="callout"><Sparkles size={18} /><p>视觉风格继续使用原有蓝色强调、玻璃层级和舒适圆角。</p></div>
+            <FeatureHub
+              availability={{ collaboration: collaborationEnabled }}
+              onNavigate={(domain) => { if (domain !== "reminders") changeDomain(domain); }}
+            />
             {recoveryPanel}
           </div>
         </article>}
