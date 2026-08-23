@@ -120,3 +120,47 @@ Added focused tests before changing the dialog implementation or CSS, then ran:
 ### Fix Commit SHA
 
 `0c3d970eaba2c8c9b4c75ffaec65da4911f8ff92` (`fix(beta): harden permanent delete dialog`).
+
+## Review Fixes 2
+
+### RED Evidence
+
+Focused Web tests were added before production edits, then run with the checked-in root Vitest binary because the preserved, untracked `pnpm-workspace.yaml` is not recognized by pnpm's workspace filter in this checkout.
+
+- `..\\..\\node_modules\\.bin\\vitest run --config vitest.config.ts tests/adaptive-workbench.test.tsx tests/live-notes-flow.test.tsx`
+  - `applies the existing modal boundary for a parent-owned external modal` failed because rail `aria-hidden` was absent: `externalModalOpen` did not exist in `AdaptiveWorkbench`'s modal truth.
+  - `keeps the workbench inert and ignores Ctrl+N while permanent deletion is pending` failed because the workbench canvas had no `inert` attribute while the parent dialog was open.
+  - The extended permanent-delete success test failed because focus landed on `body`, not the surviving `Public Beta 重写计划` heading after deleting the opener note.
+
+### Changed Files
+
+- `apps/web/src/layout/AdaptiveWorkbench.tsx`
+- `apps/web/src/app/App.tsx`
+- `apps/web/tests/adaptive-workbench.test.tsx`
+- `apps/web/tests/live-notes-flow.test.tsx`
+
+### Fix Summary And Atomicity
+
+- `AdaptiveWorkbench` now accepts the controlled optional `externalModalOpen` state and folds it into its sole `modalOpen` value. Existing rail, context, canvas, scroll-owner, body-overflow, and mobile-chrome handling therefore applies without duplicating a second modal implementation.
+- `App` passes permanent-delete visibility to that boundary and explicitly exits the window-level Ctrl/Cmd+N shortcut while the dialog is open, including pending deletion.
+- The permanent-delete close path records either the triggering opener for cancellation or failure dismissal, or a focusable Notes canvas heading for successful deletion. The layout effect focuses that surviving fallback only after the trashed note/editor has been removed.
+- The pending-promise flow verifies no POST draft request occurs, the selected trashed note remains selected until deletion resolves, and no unrelated draft is cleared by the completed delete.
+- No D1, API, client, migration, or deletion atomicity code changed.
+
+### GREEN Evidence
+
+- Focused Web: `..\\..\\node_modules\\.bin\\vitest run --config vitest.config.ts tests/adaptive-workbench.test.tsx tests/live-notes-flow.test.tsx` passed 2 files / 36 tests.
+- Web typecheck: `node_modules\\.bin\\tsc -p apps\\web\\tsconfig.json --noEmit` passed.
+- Worker typecheck: `node_modules\\.bin\\tsc -p tsconfig.worker.json --noEmit` passed.
+- Full Web suite: `..\\..\\node_modules\\.bin\\vitest run --config vitest.config.ts --reporter=dot` completed successfully.
+
+### Self-Review And Concerns
+
+- `git diff --check` passed before staging. The implementation commit contains only the four bounded Web files above.
+- Cancel focus restoration remains covered by the existing test; success now asserts the dialog closes, the row disappears, and the surviving canvas heading owns focus.
+- `pnpm-lock.yaml` and `pnpm-workspace.yaml` remained untracked and unstaged throughout. No browser, session, token, secret, API, D1, or migration artifact was touched.
+- Concern: pnpm's workspace command could not run in this checkout because its workspace manifest is intentionally untracked, and `pnpm --dir apps/web` attempted an install blocked by ignored build-script policy. Equivalent direct checked-in Vitest and TypeScript binaries completed all required verification.
+
+### Fix Commit SHA
+
+`16e1796ec95bc669f1e05ffa8c58fdb5f2c96325` (`fix(beta): isolate permanent delete modal`).
