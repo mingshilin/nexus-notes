@@ -1,5 +1,6 @@
 import {
   CreateNoteInputSchema,
+  DeleteNoteInputSchema,
   QuickCaptureInputSchema,
   NoteStatusSchema,
   RestoreNoteInputSchema,
@@ -15,7 +16,7 @@ interface NoteRegistry<TEnv> {
 
 type NoteRouteService = Pick<
   NoteService,
-  "list" | "create" | "get" | "update" | "listRevisions" | "restore" | "quickCapture"
+  "list" | "create" | "get" | "update" | "listRevisions" | "restore" | "deletePermanently" | "quickCapture"
 >;
 
 function listOptions(request: Request) {
@@ -90,6 +91,17 @@ export function registerNoteRoutes<TEnv>(
     body: UpdateNoteInputSchema,
     handler: async ({ env, workspace, params, body, requestId }) => ({
       data: { note: await createService(env).update(mutationContext(workspace!, requestId), params.noteId!, body) },
+    }),
+  });
+
+  registry.register({
+    method: "DELETE",
+    path: "/api/v2/notes/:noteId",
+    auth: "workspace",
+    minimumRole: "editor",
+    body: DeleteNoteInputSchema,
+    handler: async ({ env, workspace, params, body, requestId }) => ({
+      data: await createService(env).deletePermanently(mutationContext(workspace!, requestId), params.noteId!, body),
     }),
   });
 

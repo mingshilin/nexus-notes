@@ -1,5 +1,6 @@
 import type {
   CreateNoteInput,
+  DeleteNoteInput,
   Note,
   NoteRevision,
   QuickCaptureInput,
@@ -59,6 +60,14 @@ export interface NoteRepository {
     now: string;
     requestId?: string;
   }): Promise<{ note: Note | null; current: Note | null; revisionFound: boolean }>;
+  deletePermanently(input: {
+    workspaceId: string;
+    userId: string;
+    noteId: string;
+    baseRevision: number;
+    now: string;
+    requestId?: string;
+  }): Promise<{ deleted: boolean; state: "deleted" | "not_found" | "not_trashed" | "conflict" }>;
 }
 
 export class NoteServiceError extends Error {
@@ -223,5 +232,24 @@ export class NoteService {
       );
     }
     return result.note;
+  }
+
+  async deletePermanently(context: NoteActorContext, noteId: string, input: DeleteNoteInput) {
+    const result = await this.repository.deletePermanently({
+      workspaceId: context.workspaceId,
+      userId: context.userId,
+      noteId,
+      baseRevision: input.base_revision,
+      now: this.options.clock().toISOString(),
+      requestId: context.requestId,
+    });
+    if (result.deleted) return { deleted: true };
+    if (result.state === "not_found") {
+      throw new NoteServiceError("NOTE_NOT_FOUND", "Note not found", 404);
+    }
+    if (result.state === "not_trashed") {
+      throw new NoteServiceError("NOTE_NOT_TRASHED", "Only trashed notes can be permanently deleted", 409);
+    }
+    throw new NoteServiceError("NOTE_CONFLICT", "The note changed before it could be permanently deleted", 409);
   }
 }

@@ -87,6 +87,12 @@ export const RestoreNoteInputSchema = z.object({
 
 export type RestoreNoteInput = z.infer<typeof RestoreNoteInputSchema>;
 
+export const DeleteNoteInputSchema = z.object({
+  base_revision: z.number().int().positive(),
+});
+
+export type DeleteNoteInput = z.infer<typeof DeleteNoteInputSchema>;
+
 export const QuickCaptureInputSchema = z.object({
   title: NoteTitleSchema.optional(),
   content: NoteContentSchema.min(1),

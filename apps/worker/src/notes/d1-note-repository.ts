@@ -366,6 +366,62 @@ export class D1NoteRepository implements NoteRepository {
     return { note: null, current, revisionFound: Boolean(revision) };
   }
 
+  async deletePermanently(input: {
+    workspaceId: string;
+    userId: string;
+    noteId: string;
+    baseRevision: number;
+    now: string;
+    requestId?: string;
+  }) {
+    const condition = `workspace_id = ? AND id = ? AND status = 'trashed' AND revision = ? AND deleted_at IS NULL`;
+    const bindings = [input.workspaceId, input.noteId, input.baseRevision];
+    const exists = `EXISTS (SELECT 1 FROM notes WHERE ${condition})`;
+    const cleanup = (table: "comments" | "public_shares" | "search_documents") => this.db.prepare(
+      `DELETE FROM ${table}
+       WHERE workspace_id = ? AND entity_type = 'note' AND entity_id = ?
+         AND ${exists}`,
+    ).bind(input.workspaceId, input.noteId, ...bindings);
+    const insertTombstone = this.db.prepare(
+      `INSERT INTO sync_changes (
+         workspace_id, entity_type, entity_id, revision, kind, payload_json, created_at
+       )
+       SELECT workspace_id, 'note', id, revision, 'delete', '{}', ?
+       FROM notes WHERE ${condition}`,
+    ).bind(input.now, ...bindings);
+    const deleteNote = this.db.prepare(
+      `DELETE FROM notes WHERE ${condition} RETURNING revision`,
+    ).bind(...bindings);
+    const results = await this.db.batch<{ revision: number }>([
+      cleanup("comments"),
+      cleanup("public_shares"),
+      cleanup("search_documents"),
+      insertTombstone,
+      ...this.auditStatements(
+        input,
+        "note.permanently_deleted",
+        input.noteId,
+        input.baseRevision,
+        input.now,
+        exists,
+        bindings,
+      ),
+      deleteNote,
+    ]);
+    const deleted = results.at(-1)?.results?.[0] ?? null;
+    if (deleted) {
+      await this.notifyPresence(input.workspaceId, input.noteId, deleted.revision);
+      return { deleted: true as const, state: "deleted" as const };
+    }
+
+    const current = await this.db.prepare(
+      "SELECT status, revision FROM notes WHERE workspace_id = ? AND id = ? AND deleted_at IS NULL LIMIT 1",
+    ).bind(input.workspaceId, input.noteId).first<{ status: Note["status"]; revision: number }>();
+    if (!current) return { deleted: false as const, state: "not_found" as const };
+    if (current.status !== "trashed") return { deleted: false as const, state: "not_trashed" as const };
+    return { deleted: false as const, state: "conflict" as const };
+  }
+
   private revisionFromCurrentNote(
     input: { workspaceId: string; noteId: string; userId: string; now: string },
     source: NoteRevision["source"],

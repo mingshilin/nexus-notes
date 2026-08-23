@@ -58,6 +58,17 @@ describe("note contracts", () => {
     expect(schema.safeParse({ base_revision: 2, content: "x".repeat(200_001) }).success).toBe(false);
   });
 
+  it("requires a positive integer revision for permanent note deletion", async () => {
+    const contracts = await loadContracts();
+    expect(contracts.DeleteNoteInputSchema).toBeDefined();
+    const schema = contracts.DeleteNoteInputSchema as { safeParse(value: unknown): { success: boolean } };
+
+    expect(schema.safeParse({ base_revision: 2 }).success).toBe(true);
+    expect(schema.safeParse({}).success).toBe(false);
+    expect(schema.safeParse({ base_revision: 0 }).success).toBe(false);
+    expect(schema.safeParse({ base_revision: 1.5 }).success).toBe(false);
+  });
+
   it("bounds create, restore, and quick-capture payloads", async () => {
     const contracts = await loadContracts();
     expect(contracts.CreateNoteInputSchema).toBeDefined();

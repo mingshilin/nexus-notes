@@ -46,6 +46,7 @@ function serviceDouble() {
     update: vi.fn(async () => ({ ...note, revision: 2 })),
     listRevisions: vi.fn(async () => []),
     restore: vi.fn(async () => ({ ...note, revision: 2 })),
+    deletePermanently: vi.fn(async () => ({ deleted: true })),
     quickCapture: vi.fn(async () => note),
   };
 }
@@ -73,6 +74,10 @@ describe("v2 note routes", () => {
         method: "PATCH",
         body: JSON.stringify({ base_revision: 1, title: "Updated" }),
       }), {}),
+      registry.fetch(request("/api/v2/notes/note-1", {
+        method: "DELETE",
+        body: JSON.stringify({ base_revision: 1 }),
+      }), {}),
       registry.fetch(request("/api/v2/notes/note-1/revisions"), {}),
       registry.fetch(request("/api/v2/notes/note-1/revisions/1/restore", {
         method: "POST",
@@ -84,7 +89,7 @@ describe("v2 note routes", () => {
       }), {}),
     ]);
 
-    expect(responses.map((response: Response) => response.status)).toEqual([200, 201, 200, 200, 200, 200, 201]);
+    expect(responses.map((response: Response) => response.status)).toEqual([200, 201, 200, 200, 200, 200, 200, 201]);
     expect(service.list).toHaveBeenCalledWith(workspace, { cursor: "cursor-1", limit: 25 });
     const mutationWorkspace = { ...workspace, requestId: "req-notes" };
     expect(service.create).toHaveBeenCalledWith(mutationWorkspace, { title: "Draft", content: "Body" });
@@ -94,6 +99,7 @@ describe("v2 note routes", () => {
       title: "Updated",
       source: "autosave",
     });
+    expect(service.deletePermanently).toHaveBeenCalledWith(mutationWorkspace, "note-1", { base_revision: 1 });
     expect(service.listRevisions).toHaveBeenCalledWith(workspace, "note-1");
     expect(service.restore).toHaveBeenCalledWith(mutationWorkspace, "note-1", 1, { base_revision: 1 });
     expect(service.quickCapture).toHaveBeenCalledWith(mutationWorkspace, { content: "Quick thought" });
@@ -130,10 +136,59 @@ describe("v2 note routes", () => {
       method: "POST",
       body: JSON.stringify({ title: "Denied", content: "" }),
     }), {});
+    const deleteResponse = await registry.fetch(request("/api/v2/notes/note-1", {
+      method: "DELETE",
+      body: JSON.stringify({ base_revision: 1 }),
+    }), {});
 
     expect(read.status).toBe(200);
     expect(write.status).toBe(403);
+    expect(deleteResponse.status).toBe(403);
     expect(service.create).not.toHaveBeenCalled();
+    expect(service.deletePermanently).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed permanent deletion input before service invocation", async () => {
+    const worker = await loadWorker();
+    const service = serviceDouble();
+    const registry = (worker.createRouteRegistry as any)({
+      requestId: () => "req-delete-invalid",
+      authenticate: vi.fn(async () => ({ userId: "user-1" })),
+      authorizeWorkspace: vi.fn(async () => workspace),
+    });
+    (worker.registerNoteRoutes as any)(registry, () => service);
+
+    const response = await registry.fetch(request("/api/v2/notes/note-1", {
+      method: "DELETE", body: JSON.stringify({ base_revision: 0 }),
+    }), {});
+
+    expect(response.status).toBe(400);
+    expect(service.deletePermanently).not.toHaveBeenCalled();
+  });
+
+  it("returns the standard error envelope for every permanent deletion classification", async () => {
+    const worker = await loadWorker();
+    const ServiceError = worker.NoteServiceError as new (code: string, message: string, status: number) => Error;
+    const service = serviceDouble();
+    service.deletePermanently.mockImplementation(async (_context: unknown, _noteId: string, input: { base_revision: number }) => {
+      if (input.base_revision === 1) throw new ServiceError("NOTE_NOT_FOUND", "Note not found", 404);
+      if (input.base_revision === 2) throw new ServiceError("NOTE_NOT_TRASHED", "Only trashed notes can be permanently deleted", 409);
+      throw new ServiceError("NOTE_CONFLICT", "The note changed before it could be permanently deleted", 409);
+    });
+    const registry = (worker.createRouteRegistry as any)({
+      requestId: () => "req-delete-classification",
+      authenticate: vi.fn(async () => ({ userId: "user-1" })),
+      authorizeWorkspace: vi.fn(async () => workspace),
+    });
+    (worker.registerNoteRoutes as any)(registry, () => service);
+
+    for (const [base_revision, code, status] of [[1, "NOTE_NOT_FOUND", 404], [2, "NOTE_NOT_TRASHED", 409], [3, "NOTE_CONFLICT", 409]] as const) {
+      const response = await registry.fetch(request("/api/v2/notes/note-1", {
+        method: "DELETE", body: JSON.stringify({ base_revision }),
+      }), {});
+      expect(response.status).toBe(status);
+      expect(await response.json()).toMatchObject({ success: false, error: { code } });
+    }
   });
 
   it("registers note routes in the default Beta worker", async () => {

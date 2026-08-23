@@ -32,6 +32,7 @@ function createRepository(overrides: Record<string, unknown> = {}) {
     updateNote: vi.fn(async () => ({ note: { ...serverNote, revision: 4 }, current: null })),
     listRevisions: vi.fn(async () => []),
     restoreRevision: vi.fn(async () => ({ note: { ...serverNote, revision: 4 }, current: null, revisionFound: true })),
+    deletePermanently: vi.fn(async () => ({ deleted: true, state: "deleted" })),
     ...overrides,
   };
 }
@@ -163,5 +164,28 @@ describe("NoteService", () => {
     await expect(missingRevision.restore(context, "note-1", 99, {
       base_revision: 3,
     })).rejects.toMatchObject({ code: "NOTE_REVISION_NOT_FOUND", status: 404 });
+  });
+
+  it("classifies permanent deletion outcomes without exposing cross-workspace notes", async () => {
+    const worker = await loadWorker();
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const context = { workspaceId: "ws-1", userId: "user-1" };
+
+    for (const [state, expected] of [
+      ["not_found", { code: "NOTE_NOT_FOUND", status: 404 }],
+      ["not_trashed", { code: "NOTE_NOT_TRASHED", status: 409 }],
+      ["conflict", { code: "NOTE_CONFLICT", status: 409 }],
+    ] as const) {
+      const repository = createRepository({ deletePermanently: vi.fn(async () => ({ deleted: false, state })) });
+      const service = new Service(repository);
+      await expect(service.deletePermanently(context, "note-1", { base_revision: 2 })).rejects.toMatchObject(expected);
+    }
+
+    const repository = createRepository();
+    const service = new Service(repository, { clock: () => new Date("2026-08-21T00:00:00.000Z") });
+    await expect(service.deletePermanently(context, "note-1", { base_revision: 2 })).resolves.toEqual({ deleted: true });
+    expect(repository.deletePermanently).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "ws-1", userId: "user-1", noteId: "note-1", baseRevision: 2,
+    }));
   });
 });

@@ -16,6 +16,8 @@ const findNoteTitle = () => screen.findByRole("textbox", { name: "笔记标题" 
 type NoteApiOptions = {
   createNote?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
   listNotes?: (workspaceId: string) => Promise<unknown>;
+  listTrash?: (workspaceId: string) => Promise<unknown>;
+  deletePermanently?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
 };
 
 function createDraftStore(initial: LocalDraft[] = []) {
@@ -65,6 +67,11 @@ function createApiClient(options: NoteApiOptions = {}) {
     if (input.path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
     if (input.path.startsWith("/api/v2/notifications/unread")) return { unread_count: 0 };
     if (input.path === "/api/v2/notes?status=active&limit=50") return options.listNotes?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
+    if (input.path === "/api/v2/notes?status=trashed&limit=50") return options.listTrash?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
+    if (input.path.startsWith("/api/v2/notes/") && input.method === "DELETE") {
+      if (options.deletePermanently) return options.deletePermanently(input);
+      return { deleted: true };
+    }
     if (input.path === "/api/v2/notes" && input.method === "POST") {
       if (options.createNote) return options.createNote(input);
       return {
@@ -140,6 +147,49 @@ function renderWorkspaceWithStore(
 }
 
 describe("live note workspace flow", () => {
+  it("confirms permanent Trash deletion accessibly, prevents duplicates, and preserves retry after failure", async () => {
+    const trashed = { ...serverNoteForFlow(), id: "trashed-1", title: "Trashed note", content: "Keep until confirmed", status: "trashed" as const, revision: 4 };
+    let rejectDelete = true;
+    const apiClient = createApiClient({
+      listTrash: async () => ({ items: [trashed], next_cursor: null }),
+      deletePermanently: async () => {
+        if (rejectDelete) throw new Error("offline");
+        return { deleted: true };
+      },
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "回收站" }));
+    const row = await screen.findByRole("button", { name: /Trashed note/ });
+    fireEvent.click(row);
+    const opener = await screen.findByRole("button", { name: "永久删除" });
+    fireEvent.click(opener);
+
+    const dialog = await screen.findByRole("dialog", { name: "永久删除笔记" });
+    expect(dialog).toHaveTextContent("此操作不可撤销");
+    expect(screen.getByRole("button", { name: "取消" })).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(screen.getByRole("button", { name: "确认永久删除" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(opener).toHaveFocus());
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("Trashed note");
+
+    fireEvent.click(opener);
+    const confirm = await screen.findByRole("button", { name: "确认永久删除" });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(apiClient.request.mock.calls.filter(([request]) => request.method === "DELETE")).toHaveLength(1));
+    expect(await screen.findByRole("alert")).toHaveTextContent("永久删除失败");
+    expect(screen.getByRole("dialog", { name: "永久删除笔记" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("Trashed note");
+
+    rejectDelete = false;
+    fireEvent.click(screen.getByRole("button", { name: "确认永久删除" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "永久删除笔记" })).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /Trashed note/ })).not.toBeInTheDocument();
+  });
+
   it("opens the tablet context drawer so the note creation action is reachable", async () => {
     const apiClient = createApiClient();
     renderWorkspace(apiClient);

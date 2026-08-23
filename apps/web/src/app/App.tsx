@@ -5,7 +5,7 @@ import {
   Search,
   Sparkles,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, KnowledgeDiagnostic, Note, Profile, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient } from "../data/api-client";
@@ -247,6 +247,9 @@ function AuthenticatedWorkspace({
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteMessage, setNoteMessage] = useState<string | null>(null);
   const [noteError, setNoteError] = useState<string | null>(null);
+  const [permanentDeleteOpen, setPermanentDeleteOpen] = useState(false);
+  const [permanentDeletePending, setPermanentDeletePending] = useState(false);
+  const [permanentDeleteError, setPermanentDeleteError] = useState<string | null>(null);
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
   const [serverRetryVersion, setServerRetryVersion] = useState(0);
   const [pendingReconcile, setPendingReconcile] = useState<{ workspaceId: string; entityId: string; result: DraftSyncResult } | null>(null);
@@ -296,10 +299,16 @@ function AuthenticatedWorkspace({
   const draftTitleRef = useRef("");
   const draftContentRef = useRef("");
   const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const permanentDeleteOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const permanentDeleteDialogRef = useRef<HTMLDivElement | null>(null);
+  const permanentDeleteCancelRef = useRef<HTMLButtonElement | null>(null);
+  const permanentDeletePendingRef = useRef(false);
+  const permanentDeleteWasOpenRef = useRef(false);
   const focusInstalledNoteRef = useRef(false);
   const installedNotesRef = useRef(new Map<string, Note>());
   const mountedRef = useRef(true);
   const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
+  permanentDeletePendingRef.current = permanentDeletePending;
   const noteTargets = notes.map((note) => ({
     type: "note" as const,
     id: note.id,
@@ -320,6 +329,37 @@ function AuthenticatedWorkspace({
       inspectorOpenerRef.current = null;
     }
   }, [inspectorOpen]);
+
+  useLayoutEffect(() => {
+    if (!permanentDeleteOpen) {
+      if (permanentDeleteWasOpenRef.current) {
+        permanentDeleteOpenerRef.current?.focus();
+        permanentDeleteWasOpenRef.current = false;
+      }
+      return undefined;
+    }
+    permanentDeleteWasOpenRef.current = true;
+    permanentDeleteCancelRef.current?.focus();
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (!permanentDeletePendingRef.current) setPermanentDeleteOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const dialog = permanentDeleteDialogRef.current;
+      if (!dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>("button:not([disabled])")];
+      if (!focusable.length) return;
+      const activeIndex = focusable.indexOf(document.activeElement as HTMLElement);
+      const nextIndex = event.shiftKey
+        ? activeIndex <= 0 ? focusable.length - 1 : activeIndex - 1
+        : activeIndex < 0 || activeIndex === focusable.length - 1 ? 0 : activeIndex + 1;
+      event.preventDefault();
+      focusable[nextIndex]!.focus();
+    };
+    document.addEventListener("keydown", trapFocus);
+    return () => document.removeEventListener("keydown", trapFocus);
+  }, [permanentDeleteOpen]);
 
   const openInspector = (opener?: HTMLElement) => {
     inspectorOpenerRef.current = opener ?? null;
@@ -457,6 +497,33 @@ function AuthenticatedWorkspace({
     }).catch(() => {
       setNoteError(status === "trashed" ? "移入回收站失败，请稍后重试。" : "恢复笔记失败，请稍后重试。");
     }).finally(() => setNoteSaving(false));
+  };
+
+  const openPermanentDelete = (opener: HTMLButtonElement) => {
+    if (logoutPending || !selectedNote || selectedNote.status !== "trashed") return;
+    permanentDeleteOpenerRef.current = opener;
+    setPermanentDeleteError(null);
+    setPermanentDeleteOpen(true);
+  };
+
+  const deleteSelectedNotePermanently = () => {
+    if (logoutPending || permanentDeletePending || !workspaceId || !selectedNote || selectedNote.status !== "trashed") return;
+    setPermanentDeletePending(true);
+    setPermanentDeleteError(null);
+    void new NotesClient(apiClient, workspaceId).deletePermanently(selectedNote.id, {
+      base_revision: selectedNote.revision,
+    }).then(() => {
+      setNotes((current) => current.filter((note) => note.id !== selectedNote.id));
+      setSelectedNoteId(null);
+      setDraftTitle("");
+      setDraftContent("");
+      draftTitleRef.current = "";
+      draftContentRef.current = "";
+      setNoteMessage("笔记已永久删除");
+      setPermanentDeleteOpen(false);
+    }).catch(() => {
+      setPermanentDeleteError("永久删除失败，请重试。笔记仍保留在回收站中。");
+    }).finally(() => setPermanentDeletePending(false));
   };
 
   const updateActiveDraftInput = (title: string, content: string) => {
@@ -1335,6 +1402,9 @@ function AuthenticatedWorkspace({
                   {selectedNote.status === "trashed" ? "恢复笔记" : "移入回收站"}
                 </button>
               ) : null}
+              {selectedNote?.status === "trashed" ? (
+                <button type="button" className="note-lifecycle-action note-lifecycle-danger" disabled={logoutPending || noteSaving || permanentDeletePending} onClick={(event) => openPermanentDelete(event.currentTarget)}>永久删除</button>
+              ) : null}
               {noteMessage ? <p role="status">{noteMessage}</p> : null}
               {noteError ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
             </div>
@@ -1375,6 +1445,19 @@ function AuthenticatedWorkspace({
         <div className="quick-capture-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickCaptureOpen(false); }}>
           <div className="quick-capture-dialog" role="dialog" aria-modal="true" aria-labelledby="quick-capture-title" onMouseDown={(event) => event.stopPropagation()}>
             <QuickCapturePanel client={new NotesClient(apiClient, workspaceId)} onClose={() => setQuickCaptureOpen(false)} onCaptured={handleQuickCapture} />
+          </div>
+        </div>
+      ) : null}
+      {permanentDeleteOpen && selectedNote ? (
+        <div className="account-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !permanentDeletePending) setPermanentDeleteOpen(false); }}>
+          <div ref={permanentDeleteDialogRef} className="account-confirm-dialog" role="dialog" aria-modal="true" aria-label="永久删除笔记">
+            <h3>永久删除笔记</h3>
+            <p>此操作不可撤销。笔记、其评论和公开分享链接将被永久删除。</p>
+            {permanentDeleteError ? <p className="account-error" role="alert">{permanentDeleteError}</p> : null}
+            <div className="account-actions">
+              <button ref={permanentDeleteCancelRef} type="button" disabled={permanentDeletePending} onClick={() => setPermanentDeleteOpen(false)}>取消</button>
+              <button type="button" className="account-danger-button" disabled={permanentDeletePending} onClick={deleteSelectedNotePermanently}>{permanentDeletePending ? "正在永久删除…" : "确认永久删除"}</button>
+            </div>
           </div>
         </div>
       ) : null}

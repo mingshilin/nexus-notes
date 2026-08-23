@@ -1,5 +1,6 @@
 import type {
   CreateNoteInput,
+  DeleteNoteInput,
   Note,
   NoteRevision,
   QuickCaptureInput,
@@ -75,15 +76,19 @@ export class NotesClient {
   }
 
   create(input: CreateNoteInput, options: NoteCommandOptions = {}) {
-    return this.noteCommand("/api/v2/notes", "POST", input, options.idempotencyKey);
+    return this.noteCommand<Note>("/api/v2/notes", "POST", input, options.idempotencyKey);
   }
 
   update(noteId: string, input: UpdateNoteInput, options: NoteCommandOptions = {}) {
-    return this.noteCommand(`/api/v2/notes/${encodeURIComponent(noteId)}`, "PATCH", input, options.idempotencyKey);
+    return this.noteCommand<Note>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "PATCH", input, options.idempotencyKey);
+  }
+
+  deletePermanently(noteId: string, input: DeleteNoteInput) {
+    return this.noteCommand<{ deleted: true }>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "DELETE", input);
   }
 
   quickCapture(input: QuickCaptureInput) {
-    return this.noteCommand("/api/v2/capture", "POST", input);
+    return this.noteCommand<Note>("/api/v2/capture", "POST", input);
   }
 
   listRevisions(noteId: string, signal?: AbortSignal) {
@@ -101,15 +106,15 @@ export class NotesClient {
   }
 
   restore(noteId: string, revision: number, input: RestoreNoteInput) {
-    return this.noteCommand(
+    return this.noteCommand<Note>(
       `/api/v2/notes/${encodeURIComponent(noteId)}/revisions/${revision}/restore`,
       "POST",
       input,
     );
   }
 
-  private noteCommand(path: string, method: "POST" | "PATCH", body: unknown, idempotencyKey?: string) {
-    return this.client.request<{ note: Note }>({
+  private noteCommand<T extends object>(path: string, method: "POST" | "PATCH" | "DELETE", body: unknown, idempotencyKey?: string) {
+    return this.client.request<{ note: T } | T>({
       path,
       method,
       body,
@@ -120,7 +125,7 @@ export class NotesClient {
         retry: 0,
         idempotencyKey: idempotencyKey ?? this.createId(),
       },
-    }).then(({ note }) => note);
+    }).then((result) => "note" in result ? result.note : result as T);
   }
 
   private headers() {

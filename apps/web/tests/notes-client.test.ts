@@ -79,6 +79,23 @@ describe("NotesClient", () => {
     }));
   });
 
+  it("sends permanent deletion as a non-retryable DELETE command", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ deleted: true })) };
+    const client = new data.NotesClient(api, "ws-1", { createId: () => "delete-operation-1" });
+
+    await expect(client.deletePermanently("note-1", { base_revision: 2 })).resolves.toEqual({ deleted: true });
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/note-1",
+      method: "DELETE",
+      body: { base_revision: 2 },
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "command",
+      policy: expect.objectContaining({ retry: 0, idempotencyKey: "delete-operation-1" }),
+    }));
+  });
+
   it("accepts an explicit idempotency key for retried create and update commands", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async () => ({ note: { ...note, revision: 2 } })) };
