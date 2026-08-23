@@ -31,6 +31,12 @@ describe("live database workspace", () => {
 
     expect(await screen.findByRole("heading", { name: "Projects" })).toBeInTheDocument();
     expect(screen.getByText("Launch")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    const createDatabaseButton = screen.getByRole("button", { name: "新建数据库" });
+    expect(createDatabaseButton).toBeVisible();
+    fireEvent.click(createDatabaseButton);
+    expect(screen.getByRole("form", { name: "新建数据库表单" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "新建数据库名称" })).toBeInTheDocument();
     await waitFor(() => expect(apiClient.request.mock.calls.map(([options]) => options.path)).toEqual(expect.arrayContaining([
       "/api/v2/databases",
       "/api/v2/databases/db-1",

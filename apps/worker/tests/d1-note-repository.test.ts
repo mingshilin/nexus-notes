@@ -188,6 +188,18 @@ describe("D1NoteRepository", () => {
     ]);
   });
 
+  it("applies status, folder, and daily filters before the bounded page limit", async () => {
+    const worker = await loadWorker();
+    const filteredDb = createDb([], null, { results: [{ ...noteRow, daily_date: "2026-08-23" }] });
+    const Repository = worker.D1NoteRepository as new (db: unknown) => any;
+    const repository = new Repository(filteredDb.db);
+
+    await repository.listNotes({ workspaceId: "ws-1", status: "active", folderId: null, dailyDate: "2026-08-23", limit: 20 });
+
+    expect(filteredDb.statements[0]?.sql).toMatch(/status = \?[\s\S]*folder_id IS NULL[\s\S]*daily_date = \?[\s\S]*LIMIT \?/i);
+    expect(filteredDb.statements[0]?.bindings).toEqual(["ws-1", "active", "2026-08-23", 21]);
+  });
+
   it("lists revisions only from the requested workspace and note", async () => {
     const worker = await loadWorker();
     const revision = {

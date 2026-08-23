@@ -544,6 +544,8 @@ describe("AccountCenter", () => {
     expect(screen.getByRole("heading", { name: "工作区" })).toBeInTheDocument();
     fireEvent.click(tabs[0]!);
     expect(screen.getByLabelText("昵称")).toHaveValue("跨标签草稿");
+    const activePanel = screen.getByRole("tabpanel");
+    expect(activePanel).toHaveAttribute("aria-labelledby", "account-tab-profile");
     expect(screen.getAllByRole("tabpanel")).toHaveLength(1);
     expect(screen.queryByRole("heading", { name: "工作区" })).not.toBeInTheDocument();
   });

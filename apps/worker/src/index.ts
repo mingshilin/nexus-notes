@@ -64,5 +64,7 @@ export { registerCollaborationRoutes } from "./routes/collaboration";
 export type { CollaborationRouteDependencies } from "./routes/collaboration";
 export { registerPresenceRoute, signPresenceIdentity } from "./routes/presence";
 export { registerOperationsRoutes } from "./routes/operations";
+export { registerAiRoutes } from "./routes/ai";
+export { AiChatService, AiChatServiceError } from "./ai/ai-chat-service";
 export { createBetaWorker } from "./bootstrap";
 export type { BetaWorkerEnv } from "./routes/health";

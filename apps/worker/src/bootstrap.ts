@@ -45,6 +45,8 @@ import { createObservability, type ObservabilityLogger, type ObservabilityAnalyt
 import { D1ProfileRepository } from "./profile/d1-profile-repository";
 import { ProfileAvatarStore } from "./profile/profile-avatar-store";
 import { ProfileService } from "./profile/profile-service";
+import { AiChatService } from "./ai/ai-chat-service";
+import { registerAiRoutes } from "./routes/ai";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -233,6 +235,14 @@ function createOcrExtractor(env: BetaWorkerEnv) {
   });
 }
 
+function createAiChatService(env: BetaWorkerEnv) {
+  return new AiChatService({
+    apiUrl: env.AI_CHAT_API_URL,
+    apiKey: env.AI_CHAT_API_KEY,
+    model: env.AI_CHAT_MODEL,
+  });
+}
+
 function retryNativeMessage(message: Message<unknown>, delaySeconds: number) {
   message.retry({ delaySeconds });
 }
@@ -268,6 +278,7 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
     },
   });
   registry.register(healthRoute);
+  registerAiRoutes(registry, createAiChatService);
   registerAuthRoutes(registry, (env) => createAuthService(env, options.logger));
   registerProfileRoutes(registry, (env) => createProfileService(env, options.logger));
   registerNoteRoutes(registry, createNoteService);

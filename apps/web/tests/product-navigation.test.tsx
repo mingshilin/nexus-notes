@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
+import type { Note } from "@nexus/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 import type { LocalDraft } from "../src/data/local-store";
@@ -97,6 +98,18 @@ function appApiClient() {
   };
 }
 
+function quickCaptureApi() {
+  const captured = note({ id: "captured-1", title: "临时想法", content: "稍后整理" });
+  return {
+    request: vi.fn(async (request: { path: string; method?: string }) => {
+      if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+      if (request.path === "/api/v2/notes?limit=50") return { items: [], next_cursor: null };
+      if (request.path === "/api/v2/capture" && request.method === "POST") return { note: captured };
+      return { items: [], next_cursor: null };
+    }),
+  };
+}
+
 function draftStore() {
   return {
     saveDraft: vi.fn(async () => undefined),
@@ -108,7 +121,7 @@ function draftStore() {
   };
 }
 
-function note(overrides: Partial<{ id: string; title: string; content: string; revision: number }> = {}) {
+function note(overrides: Partial<Note> = {}) {
   return {
     id: "server-1", workspace_id: "ws-1", folder_id: null, database_id: null, created_by: "u1", updated_by: "u1",
     title: "", content: "", status: "active" as const, is_favorite: false, is_pinned: false, daily_date: null,
@@ -182,6 +195,20 @@ function accountDeletionApi(createNote: Promise<ReturnType<typeof note>>, deleti
 }
 
 describe("ProductNavigation", () => {
+  it("exposes a labeled create-note action in the desktop rail", () => {
+    const onCreateNote = vi.fn();
+    render(<ProductNavigation {...navigationProps({ onCreateNote })} />);
+
+    const createButton = screen.getByRole("button", { name: "新建笔记" });
+    expect(createButton).toBeVisible();
+    expect(createButton).toHaveAttribute("title", "新建笔记（Ctrl/Cmd+N）");
+    fireEvent.click(createButton);
+    expect(onCreateNote).toHaveBeenCalledOnce();
+
+    expect(screen.getByText("个人中心")).toBeVisible();
+    expect(screen.getByRole("button", { name: "账户" })).toHaveAttribute("title", "账户与个人资料");
+  });
+
   it("uses direct Chinese destinations and exact domain callbacks", () => {
     const props = navigationProps();
     render(<ProductNavigation {...props} />);
@@ -274,7 +301,10 @@ describe("ProductNavigation", () => {
     const props = navigationProps({ unreadCount: 7 });
     render(<ProductNavigation {...props} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    const accountTrigger = screen.getByRole("button", { name: "账户" });
+    expect(accountTrigger).toHaveAttribute("title", "账户与个人资料");
+    fireEvent.click(accountTrigger);
+    expect(screen.getByText("个人资料、密码安全与工作区")).toBeVisible();
     fireEvent.click(screen.getByRole("menuitem", { name: "个人中心" }));
     expect(props.onPersonalCenter).toHaveBeenCalledOnce();
 
@@ -345,7 +375,8 @@ describe("App product navigation", () => {
     expect(screen.getByRole("heading", { name: "知识恢复" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "AI 助手" }));
-    expect(screen.getByRole("heading", { name: "AI 助手尚未配置" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "AI 助手" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "输入问题" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Public Beta 重写计划" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
@@ -358,6 +389,130 @@ describe("App product navigation", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
     expect(screen.getByRole("tab", { name: "工作区" })).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByRole("heading", { name: "Public Beta 重写计划" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the main note creation action visible in the empty editor state", async () => {
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+
+    const createButtons = await screen.findAllByRole("button", { name: "新建笔记" });
+    expect(createButtons.length).toBeGreaterThanOrEqual(2);
+    expect(createButtons.some((button) => button.textContent?.includes("新建笔记"))).toBe(true);
+  });
+
+  it("opens Quick Capture from the note list and selects the captured note", async () => {
+    const apiClient = quickCaptureApi();
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "快速捕获" }));
+    expect(screen.getByRole("dialog", { name: "快速捕获" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "快速捕获内容" }), { target: { value: "稍后整理" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存捕获" }));
+
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/capture", method: "POST" })));
+    expect(await screen.findByRole("heading", { name: "临时想法" })).toBeInTheDocument();
+  });
+
+  it("loads note views from server-side filters instead of filtering one stale page", async () => {
+    const apiClient = {
+      request: vi.fn(async (request: { path: string }) => {
+        if (request.path.startsWith("/api/v2/notes")) return { items: [], next_cursor: null };
+        if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+        return { items: [], next_cursor: null };
+      }),
+    };
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/notes?status=active&limit=50" })));
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "收件箱" }));
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/notes?status=active&folder_id=none&limit=50" })));
+    fireEvent.click(screen.getByRole("button", { name: "回收站" }));
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/notes?status=trashed&limit=50" })));
+  });
+
+  it("moves an active note to trash and restores it with the latest revision", async () => {
+    const original = note({ id: "lifecycle-note", title: "Lifecycle note", revision: 1 });
+    let current = original;
+    const apiClient = {
+      request: vi.fn(async (request: { path: string; method?: string; body?: Record<string, unknown> }) => {
+        if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+        if (request.path === "/api/v2/notes?status=active&limit=50") return { items: current.status === "active" ? [current] : [], next_cursor: null };
+        if (request.path === "/api/v2/notes?status=trashed&limit=50") return { items: current.status === "trashed" ? [current] : [], next_cursor: null };
+        if (request.path === "/api/v2/notes/lifecycle-note" && request.method === "PATCH") {
+          current = note({
+            ...current,
+            title: typeof request.body?.title === "string" ? request.body.title : current.title,
+            content: typeof request.body?.content === "string" ? request.body.content : current.content,
+            status: request.body?.status === "trashed" ? "trashed" : "active",
+            revision: Number(request.body?.base_revision) + 1,
+          });
+          return {
+            note: current,
+          };
+        }
+        return { items: [], next_cursor: null };
+      }),
+    };
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Lifecycle note/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "笔记标题" }), { target: { value: "Lifecycle edited" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "笔记内容" }), { target: { value: "Keep this content" } });
+    fireEvent.click(screen.getByRole("button", { name: "移入回收站" }));
+
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/lifecycle-note",
+      method: "PATCH",
+      body: expect.objectContaining({ base_revision: 1, title: "Lifecycle edited", content: "Keep this content", status: "trashed" }),
+    })));
+    expect(await screen.findByRole("button", { name: "恢复笔记" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("Lifecycle edited");
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("Keep this content");
+    expect(screen.queryByRole("button", { name: "保存笔记" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复笔记" }));
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/lifecycle-note",
+      method: "PATCH",
+      body: expect.objectContaining({ base_revision: 2, status: "active" }),
+    })));
+    expect(await screen.findByRole("button", { name: "移入回收站" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("Lifecycle edited");
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("Keep this content");
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    expect(screen.getByRole("button", { name: "全部" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps the active note editable and retryable when moving it to trash fails", async () => {
+    const original = note({ id: "failed-trash-note", title: "Keep active", content: "Keep body", revision: 4 });
+    const apiClient = {
+      request: vi.fn(async (request: { path: string; method?: string }) => {
+        if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+        if (request.path === "/api/v2/notes?status=active&limit=50") return { items: [original], next_cursor: null };
+        if (request.path === "/api/v2/notes/failed-trash-note" && request.method === "PATCH") throw new Error("offline");
+        return { items: [], next_cursor: null };
+      }),
+    };
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Keep active/ }));
+    fireEvent.click(screen.getByRole("button", { name: "移入回收站" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("移入回收站失败");
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toBeEnabled();
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("Keep active");
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("Keep body");
+    expect(screen.getByRole("button", { name: "移入回收站" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "移入回收站" }));
+    await waitFor(() => expect(apiClient.request.mock.calls.filter(([request]) => request.path === "/api/v2/notes/failed-trash-note")).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    expect(screen.getByRole("button", { name: "全部" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("updates the navigation identity from the returned profile", async () => {

@@ -93,7 +93,7 @@ describe("core UX mobile", () => {
 
     fireEvent.click(fab);
     const title = await screen.findByRole("textbox", { name: "笔记标题" });
-    const navigation = screen.getByRole("navigation", { name: "移动端主导航" });
+    const navigation = screen.getByRole("navigation", { name: "移动端主导航", hidden: true });
     expect(title).toHaveFocus();
     fireEvent.focus(title);
     expect(navigation).toHaveAttribute("data-visible", "false");

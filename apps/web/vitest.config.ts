@@ -7,5 +7,7 @@ export default defineConfig({
     environment: "jsdom",
     include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
     setupFiles: ["./tests/setup.ts"],
+    // Browser-layout tests share viewport and focus globals; keep file order deterministic.
+    fileParallelism: false,
   },
 });

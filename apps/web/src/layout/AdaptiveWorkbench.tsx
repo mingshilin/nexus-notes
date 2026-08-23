@@ -10,6 +10,7 @@ export interface AdaptiveWorkbenchProps {
   navigation: ReactNode;
   mobileNavigation?: ReactNode;
   mobileCreateAction?: ReactNode;
+  desktopCreateAction?: ReactNode;
   contextualList?: ReactNode;
   inspector?: ReactNode;
   inspectorOpen: boolean;
@@ -32,10 +33,13 @@ export function useWorkbenchModalOpen() {
   return useContext(WorkbenchModalOpenContext);
 }
 
-function Canvas({ children, mobile = false, modalOpen = false }: { children: ReactNode; mobile?: boolean; modalOpen?: boolean }) {
+function Canvas({ children, desktopCreateAction, mobile = false, modalOpen = false }: { children: ReactNode; desktopCreateAction?: ReactNode; mobile?: boolean; modalOpen?: boolean }) {
   return (
     <main className="workbench-canvas" data-testid={mobile ? "task-pane" : undefined} aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
-      <PageScrollArea scrollOwner={!modalOpen}>{children}</PageScrollArea>
+      <PageScrollArea scrollOwner={!modalOpen}>
+        {!mobile && desktopCreateAction ? <div className="desktop-create-note-bar">{desktopCreateAction}</div> : null}
+        {children}
+      </PageScrollArea>
     </main>
   );
 }
@@ -45,6 +49,7 @@ export function AdaptiveWorkbench({
   navigation,
   mobileNavigation,
   mobileCreateAction,
+  desktopCreateAction,
   contextualList,
   inspector,
   inspectorOpen,
@@ -110,10 +115,10 @@ export function AdaptiveWorkbench({
             {contextualList}
           </main>
         ) : (
-          <Canvas mobile modalOpen={modalOpen}>{children}</Canvas>
+          <Canvas mobile desktopCreateAction={desktopCreateAction} modalOpen={modalOpen}>{children}</Canvas>
         )
       ) : (
-        <Canvas modalOpen={modalOpen}>{children}</Canvas>
+        <Canvas desktopCreateAction={desktopCreateAction} modalOpen={modalOpen}>{children}</Canvas>
       )}
 
       {inspectorModalOpen ? (

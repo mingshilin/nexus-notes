@@ -49,6 +49,19 @@ describe("NotesClient", () => {
     }));
   });
 
+  it("encodes inbox, daily, and trash filters in the list query", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ items: [], next_cursor: null })) };
+    const client = new data.NotesClient(api, "ws-1");
+
+    await client.list({ status: "active", folderId: null, dailyDate: "2026-08-23", limit: 20 });
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes?status=active&folder_id=none&daily_date=2026-08-23&limit=20",
+      policy: expect.objectContaining({ dedupeKey: "notes:ws-1:first:20:active:none:2026-08-23" }),
+    }));
+  });
+
   it("sends revision-aware autosaves as idempotent commands", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async () => ({ note: { ...note, revision: 2 } })) };

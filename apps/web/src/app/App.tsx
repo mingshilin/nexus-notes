@@ -13,6 +13,7 @@ import { ProfileClient } from "../data/profile-client";
 import { OperationsClient } from "../data/operations-client";
 import { AccountCenter } from "../account";
 import { CollaborationClient } from "../data/collaboration-client";
+import { AIChatPanel } from "../ai/AIChatPanel";
 import { KnowledgeClient } from "../data/knowledge-client";
 import { NotesClient } from "../data/notes-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic, type RecoveryFilters } from "../knowledge/KnowledgeRecoveryPanel";
@@ -23,6 +24,7 @@ import { BetaLocalStore } from "../data/local-store";
 import { NoteDraftController, type DraftSyncResult, type NoteDraftStore } from "../notes/note-draft-controller";
 import { NormalizedCache } from "../data/normalized-cache";
 import { ProductNavigation, type AccountSubsection, type ProductDomain } from "../navigation/ProductNavigation";
+import { QuickCapturePanel } from "../notes/QuickCapturePanel";
 import {
   CollaborationCenter,
   InviteRedemptionPage,
@@ -46,9 +48,22 @@ type AppRoute =
   | { kind: "workspace"; workspaceId?: string }
   | { kind: "invite"; token: string }
   | { kind: "share"; token: string };
+type NoteListView = "all" | "inbox" | "today" | "trash";
 type WorkspaceRouteAuthority = { userId: string; workspaceId: string };
 type UserScopedLocalStore = NoteDraftStore & { destroy(): Promise<void> };
 type LogoutPhase = "idle" | "quiescing" | "cleanup" | "cleanup-error";
+
+function localDateKey(date = new Date()) {
+  return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
+}
+
+function noteMatchesListView(note: Note, view: NoteListView, todayDate = localDateKey()) {
+  if (view === "trash") return note.status === "trashed";
+  if (note.status !== "active") return false;
+  if (view === "inbox") return note.folder_id === null;
+  if (view === "today") return note.daily_date === todayDate;
+  return true;
+}
 
 function clearUserScopedBrowserState() {
   if (typeof window === "undefined") return;
@@ -224,6 +239,8 @@ function AuthenticatedWorkspace({
   const [notesLoading, setNotesLoading] = useState(Boolean(workspaceId));
   const [notesError, setNotesError] = useState<string | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
+  const [noteListView, setNoteListView] = useState<NoteListView>("all");
   const [creatingNote, setCreatingNote] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftContent, setDraftContent] = useState("");
@@ -246,6 +263,7 @@ function AuthenticatedWorkspace({
   const [databaseError, setDatabaseError] = useState<string | null>(null);
   const [databaseRefreshVersion, setDatabaseRefreshVersion] = useState(0);
   const [firstDatabaseName, setFirstDatabaseName] = useState("");
+  const [databaseCreateOpen, setDatabaseCreateOpen] = useState(false);
   const [creatingFirstDatabase, setCreatingFirstDatabase] = useState(false);
   const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState<ServiceWorkerUpdate | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -268,6 +286,7 @@ function AuthenticatedWorkspace({
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
   const notificationOpenerRef = useRef<HTMLElement | null>(null);
   const notificationTargetController = useRef<AbortController | null>(null);
+  const noteListViewRef = useRef<NoteListView>(noteListView);
   const [draftController] = useState(() => {
     return new NoteDraftController(localStore);
   });
@@ -359,6 +378,26 @@ function AuthenticatedWorkspace({
     setActivePane("canvas");
   };
 
+  const handleQuickCapture = (note: Note) => {
+    setNotes((current) => [note, ...current.filter((item) => item.id !== note.id)]);
+    setQuickCaptureOpen(false);
+    selectNote(note);
+  };
+
+  const changeNoteListView = (view: NoteListView) => {
+    if (view === noteListView) return;
+    noteListViewRef.current = view;
+    setNoteListView(view);
+    setActivePane("context");
+    if (!activeDraftIdRef.current) {
+      userSelectedNote.current = false;
+      setSelectedNoteId(null);
+      setCreatingNote(false);
+      setDraftTitle("");
+      setDraftContent("");
+    }
+  };
+
   const saveNote = () => {
     if (logoutPending || !workspaceId || noteSaving) return;
     if (creatingNote && activeDraftId) {
@@ -390,6 +429,36 @@ function AuthenticatedWorkspace({
     }).finally(() => setNoteSaving(false));
   };
 
+  const changeSelectedNoteStatus = (status: "active" | "trashed") => {
+    if (logoutPending || !workspaceId || noteSaving || !selectedNote) return;
+    setNoteSaving(true);
+    setNoteMessage(null);
+    setNoteError(null);
+    const contentChanged = draftTitle !== selectedNote.title || draftContent !== selectedNote.content;
+    void new NotesClient(apiClient, workspaceId).update(selectedNote.id, {
+      base_revision: selectedNote.revision,
+      status,
+      source: "manual",
+      ...(contentChanged ? { title: draftTitle, content: draftContent } : {}),
+    }).then((saved) => {
+      const nextView: NoteListView = status === "trashed" ? "trash" : "all";
+      noteListViewRef.current = nextView;
+      installedNotesRef.current.set(saved.id, saved);
+      setNoteListView(nextView);
+      setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
+      setSelectedNoteId(saved.id);
+      setCreatingNote(false);
+      setDraftTitle(saved.title);
+      setDraftContent(saved.content);
+      draftTitleRef.current = saved.title;
+      draftContentRef.current = saved.content;
+      setNoteMessage(status === "trashed" ? "已移入回收站" : "已恢复");
+      setActivePane("canvas");
+    }).catch(() => {
+      setNoteError(status === "trashed" ? "移入回收站失败，请稍后重试。" : "恢复笔记失败，请稍后重试。");
+    }).finally(() => setNoteSaving(false));
+  };
+
   const updateActiveDraftInput = (title: string, content: string) => {
     if (logoutPending) return;
     draftTitleRef.current = title;
@@ -415,7 +484,9 @@ function AuthenticatedWorkspace({
       focusInstalledNoteRef.current = true;
     }
     installedNotesRef.current.set(result.note.id, result.note);
-    setNotes((current) => [result.note, ...current.filter((note) => note.id !== result.note.id)]);
+    setNotes((current) => noteMatchesListView(result.note, noteListViewRef.current)
+      ? [result.note, ...current.filter((note) => note.id !== result.note.id)]
+      : current.filter((note) => note.id !== result.note.id));
     setPendingReconcile({ workspaceId: syncedWorkspaceId, entityId: draftId, result });
     if (!wasActiveDraft) return;
     setSelectedNoteId(result.note.id);
@@ -470,7 +541,7 @@ function AuthenticatedWorkspace({
 
   useEffect(() => {
     if (logoutPending || !pendingReconcile || !workspaceId || pendingReconcile.workspaceId !== workspaceId) return undefined;
-    if (!notes.some((note) => note.id === pendingReconcile.result.note.id)) return undefined;
+    if (!installedNotesRef.current.has(pendingReconcile.result.note.id)) return undefined;
     const { entityId, result } = pendingReconcile;
     let cancelled = false;
     void draftController.reconcile(workspaceId, entityId, result).then((removed) => {
@@ -491,7 +562,7 @@ function AuthenticatedWorkspace({
       if (!cancelled) setNoteError("服务器已创建笔记，但本地草稿清理失败；内容仍已打开。请稍后重试。");
     });
     return () => { cancelled = true; };
-  }, [apiClient, draftController, logoutPending, notes, pendingReconcile, workspaceId]);
+  }, [apiClient, draftController, logoutPending, pendingReconcile, workspaceId]);
 
   const abortRecoveryRequests = () => {
     requestControllers.current.forEach((controller) => controller.abort());
@@ -546,11 +617,19 @@ function AuthenticatedWorkspace({
     const controller = new AbortController();
     setNotesLoading(true);
     setNotesError(null);
-    void new NotesClient(apiClient, workspaceId).list({ limit: 50, signal: controller.signal }).then((page) => {
+    const todayDate = localDateKey();
+    const listOptions = noteListView === "inbox"
+      ? { status: "active" as const, folderId: null, limit: 50, signal: controller.signal }
+      : noteListView === "today"
+        ? { status: "active" as const, dailyDate: todayDate, limit: 50, signal: controller.signal }
+        : noteListView === "trash"
+          ? { status: "trashed" as const, limit: 50, signal: controller.signal }
+          : { status: "active" as const, limit: 50, signal: controller.signal };
+    void new NotesClient(apiClient, workspaceId).list(listOptions).then((page) => {
       if (controller.signal.aborted) return;
-      const activeNotes = page.items.filter((note) => note.status === "active");
+      const activeNotes = page.items.filter((note) => noteMatchesListView(note, noteListView, todayDate));
       const installedNotes = [...installedNotesRef.current.values()]
-        .filter((note) => note.workspace_id === workspaceId && note.status === "active");
+        .filter((note) => note.workspace_id === workspaceId && noteMatchesListView(note, noteListView, todayDate));
       const byId = new Map([...activeNotes, ...installedNotes].map((note) => [note.id, note]));
       setNotes([...byId.values()]);
       if (!activeDraftIdRef.current && !activationInFlight.current && !userSelectedNote.current) {
@@ -565,7 +644,7 @@ function AuthenticatedWorkspace({
       if (!controller.signal.aborted) setNotesLoading(false);
     });
     return () => controller.abort();
-  }, [apiClient, workspaceId]);
+  }, [apiClient, noteListView, workspaceId]);
 
   useEffect(() => {
     if (logoutPending || !workspaceId || notesLoading || activeDraftIdRef.current || userSelectedNote.current) return undefined;
@@ -782,17 +861,21 @@ function AuthenticatedWorkspace({
     return new DatabaseClient(apiClient, workspaceId).listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, viewId, limit, signal });
   }, [apiClient, selectedDatabaseId, workspaceId]);
 
-  const createFirstDatabase = () => {
-    if (!workspaceId || !firstDatabaseName.trim() || creatingFirstDatabase) return;
+  const createDatabaseFromName = (name: string) => {
+    if (!workspaceId || !name.trim() || creatingFirstDatabase) return;
     setCreatingFirstDatabase(true);
     setDatabaseError(null);
-    void new DatabaseClient(apiClient, workspaceId).createDatabase({ name: firstDatabaseName.trim(), description: "" }).then((created) => {
+    void new DatabaseClient(apiClient, workspaceId).createDatabase({ name: name.trim(), description: "" }).then((created) => {
       setDatabases((current) => [...current, created]);
       setSelectedDatabaseId(created.id);
       setFirstDatabaseName("");
+      setDatabaseCreateOpen(false);
+      setActivePane("canvas");
     }).catch(() => setDatabaseError("数据库暂时无法创建，请稍后重试。"))
       .finally(() => setCreatingFirstDatabase(false));
   };
+
+  const createFirstDatabase = () => createDatabaseFromName(firstDatabaseName);
 
   const loadMoreAttachments = () => {
     if (!workspaceId || !attachmentCursor || loading || refreshing) return;
@@ -899,6 +982,8 @@ function AuthenticatedWorkspace({
     contextOpen: activePane === "context",
     logoutPending,
     onChange: changeDomain,
+    onCreateNote: startNewNote,
+    createNoteDisabled: logoutPending,
     onContextToggle: () => setActivePane((pane) => pane === "context" ? "canvas" : "context"),
     onPersonalCenter: () => openAccountSubsection("personal"),
     onNotifications: toggleNotifications,
@@ -913,16 +998,40 @@ function AuthenticatedWorkspace({
       <span>新建笔记</span>
     </button>
   ) : null;
+  const desktopCreateAction = activeDomain === "notes" && activePane !== "context" ? (
+    <button
+      className="editor-new-note-button"
+      type="button"
+      aria-label="新建笔记"
+      aria-keyshortcuts="Control+N Meta+N"
+      title="新建笔记（Ctrl/Cmd+N）"
+      disabled={logoutPending}
+      onClick={startNewNote}
+    >
+      <Plus aria-hidden="true" size={16} />
+      <span>新建笔记</span>
+    </button>
+  ) : null;
 
   const contextualList = (
     <div className="context-content">
       <div className="context-heading">
         <div><small>CREATE</small><h2>所有笔记</h2></div>
-        <button className="primary-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
-          <Plus aria-hidden="true" size={17} />
-          <span>新建笔记</span>
-        </button>
+        <div className="context-heading-actions">
+          <button className="secondary-create-note" type="button" aria-label="快速捕获" onClick={() => setQuickCaptureOpen(true)}>
+            <span>快速捕获</span>
+          </button>
+          <button className="primary-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
+            <Plus aria-hidden="true" size={17} />
+            <span>新建笔记</span>
+          </button>
+        </div>
       </div>
+      <nav className="note-list-views" aria-label="笔记视图">
+        {([["all", "全部"], ["inbox", "收件箱"], ["today", "今日"], ["trash", "回收站"]] as const).map(([view, label]) => (
+          <button key={view} type="button" aria-pressed={noteListView === view} className={noteListView === view ? "active" : ""} onClick={() => changeNoteListView(view)}>{label}</button>
+        ))}
+      </nav>
       <label className="search-field"><Search size={15} /><input aria-label="搜索笔记" placeholder="搜索笔记" /></label>
       {notesLoading ? <p className="database-empty" role="status">正在加载笔记…</p> : null}
       {notesError ? <p className="database-operation-error" role="alert">{notesError}</p> : null}
@@ -946,7 +1055,41 @@ function AuthenticatedWorkspace({
 
   const databaseContextualList = (
     <div className="context-content">
-      <div className="context-heading"><div><small>STRUCTURE</small><h2>数据库</h2></div></div>
+      <div className="context-heading">
+        <div><small>STRUCTURE</small><h2>数据库</h2></div>
+        <button
+          className="primary-create-note"
+          type="button"
+          aria-label="新建数据库"
+          onClick={() => {
+            if (databases.length === 0) {
+              setActivePane("canvas");
+              return;
+            }
+            setFirstDatabaseName("");
+            setDatabaseCreateOpen(true);
+          }}
+        >
+          <Plus aria-hidden="true" size={17} />
+          <span>新建数据库</span>
+        </button>
+      </div>
+      {databaseCreateOpen && databases.length > 0 ? (
+        <form
+          className="database-create-inline"
+          aria-label="新建数据库表单"
+          onSubmit={(event) => {
+            event.preventDefault();
+            createFirstDatabase();
+          }}
+        >
+          <label>数据库名称<input aria-label="新建数据库名称" value={firstDatabaseName} onChange={(event) => setFirstDatabaseName(event.target.value)} autoFocus /></label>
+          <div className="database-create-inline-actions">
+            <button type="button" onClick={() => setDatabaseCreateOpen(false)}>取消</button>
+            <button type="submit" disabled={!firstDatabaseName.trim() || creatingFirstDatabase}>{creatingFirstDatabase ? "创建中…" : "创建数据库"}</button>
+          </div>
+        </form>
+      ) : null}
       {databaseLoading && databases.length === 0 ? <p className="database-empty" role="status">正在加载数据库…</p> : null}
       {databaseError ? <p className="database-operation-error" role="alert">{databaseError}</p> : null}
       {databases.map((database) => (
@@ -1021,13 +1164,7 @@ function AuthenticatedWorkspace({
       {recoveryPanel}
     </section>
   );
-  const aiCanvas = (
-    <section className="product-domain-page product-status-page">
-      <p className="eyebrow">NEXUS AI</p>
-      <h1>AI 助手尚未配置</h1>
-      <p className="product-domain-lead">当前工作区尚未接入 AI 服务，现有笔记与数据库功能不受影响。</p>
-    </section>
-  );
+  const aiCanvas = <AIChatPanel client={apiClient} workspaceId={workspaceId ?? ""} />;
   const accountCanvas = (
     <AccountCenter
       client={profileClient}
@@ -1166,6 +1303,7 @@ function AuthenticatedWorkspace({
         navigation={navigation}
         mobileNavigation={mobileNavigation}
         mobileCreateAction={mobileCreateAction}
+        desktopCreateAction={desktopCreateAction}
         contextualList={activeDomain === "databases" ? databaseContextualList : activeDomain === "notes" ? contextualList : undefined}
         inspector={<div className="inspector-content"><small>页面信息</small><h3>{inspectorTitle}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
         inspectorOpen={inspectorOpen}
@@ -1186,10 +1324,17 @@ function AuthenticatedWorkspace({
           <div className="editor-copy">
             <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
             <h1>{draftTitle.trim() || "未命名笔记"}</h1>
-            <label className="note-editor-field">标题<input ref={titleInputRef} aria-label="笔记标题" disabled={logoutPending} value={draftTitle} onChange={(event) => updateActiveDraftInput(event.target.value, draftContentRef.current)} /></label>
-            <label className="note-editor-field">内容<textarea aria-label="笔记内容" disabled={logoutPending} value={draftContent} onChange={(event) => updateActiveDraftInput(draftTitleRef.current, event.target.value)} /></label>
+            <label className="note-editor-field">标题<input ref={titleInputRef} aria-label="笔记标题" disabled={logoutPending || selectedNote?.status === "trashed"} value={draftTitle} onChange={(event) => updateActiveDraftInput(event.target.value, draftContentRef.current)} /></label>
+            <label className="note-editor-field">内容<textarea aria-label="笔记内容" disabled={logoutPending || selectedNote?.status === "trashed"} value={draftContent} onChange={(event) => updateActiveDraftInput(draftTitleRef.current, event.target.value)} /></label>
             <div className="note-editor-actions">
-              <button type="button" disabled={logoutPending || noteSaving || (!creatingNote && !draftTitle.trim() && !draftContent.trim())} onClick={saveNote}>{creatingNote && noteError ? "重试同步" : "保存笔记"}</button>
+              {selectedNote?.status !== "trashed" ? (
+                <button type="button" disabled={logoutPending || noteSaving || (!creatingNote && !draftTitle.trim() && !draftContent.trim())} onClick={saveNote}>{creatingNote && noteError ? "重试同步" : "保存笔记"}</button>
+              ) : null}
+              {!creatingNote && selectedNote ? (
+                <button type="button" className="note-lifecycle-action" disabled={logoutPending || noteSaving} onClick={() => changeSelectedNoteStatus(selectedNote.status === "trashed" ? "active" : "trashed")}>
+                  {selectedNote.status === "trashed" ? "恢复笔记" : "移入回收站"}
+                </button>
+              ) : null}
               {noteMessage ? <p role="status">{noteMessage}</p> : null}
               {noteError ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
             </div>
@@ -1226,6 +1371,13 @@ function AuthenticatedWorkspace({
         />
         </>
       </AdaptiveWorkbench>
+      {quickCaptureOpen && workspaceId ? (
+        <div className="quick-capture-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickCaptureOpen(false); }}>
+          <div className="quick-capture-dialog" role="dialog" aria-modal="true" aria-labelledby="quick-capture-title" onMouseDown={(event) => event.stopPropagation()}>
+            <QuickCapturePanel client={new NotesClient(apiClient, workspaceId)} onClose={() => setQuickCaptureOpen(false)} onCaptured={handleQuickCapture} />
+          </div>
+        </div>
+      ) : null}
     </>
   );
 }

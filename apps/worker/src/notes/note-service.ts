@@ -36,6 +36,9 @@ export interface NoteRepository {
     workspaceId: string;
     cursor?: string;
     limit: number;
+    status?: Note["status"];
+    folderId?: string | null;
+    dailyDate?: string;
   }): Promise<{ items: Note[]; nextCursor: string | null }>;
   listRevisions(workspaceId: string, noteId: string): Promise<NoteRevision[]>;
   updateNote(input: {
@@ -136,12 +139,15 @@ export class NoteService {
 
   async list(
     context: NoteActorContext,
-    options: { cursor?: string; limit: number },
+    options: { cursor?: string; limit: number; status?: Note["status"]; folderId?: string | null; dailyDate?: string },
   ) {
     const page = await this.repository.listNotes({
       workspaceId: context.workspaceId,
       cursor: options.cursor,
       limit: options.limit,
+      status: options.status,
+      folderId: options.folderId,
+      dailyDate: options.dailyDate,
     });
     return { items: page.items, next_cursor: page.nextCursor };
   }

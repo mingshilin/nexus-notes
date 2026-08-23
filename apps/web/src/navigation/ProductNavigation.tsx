@@ -1,5 +1,5 @@
 import type { AuthUserSummary } from "@nexus/contracts";
-import { Bot, Database, Library, List, NotebookPen, Settings, Users } from "lucide-react";
+import { Bot, Database, Library, List, NotebookPen, Plus, Settings, Users } from "lucide-react";
 import { Fragment, useId } from "react";
 import { AccountMenu } from "../account/AccountMenu";
 import { useWorkbenchModalOpen } from "../layout/AdaptiveWorkbench";
@@ -18,6 +18,8 @@ export interface ProductNavigationProps {
   contextOpen?: boolean;
   logoutPending?: boolean;
   onChange(domain: ProductDomain): void;
+  onCreateNote?(): void;
+  createNoteDisabled?: boolean;
   onContextToggle?(): void;
   onPersonalCenter?(): void;
   onNotifications(opener: HTMLElement): void;
@@ -44,6 +46,8 @@ export function ProductNavigation({
   contextOpen = false,
   logoutPending = false,
   onChange,
+  onCreateNote,
+  createNoteDisabled = false,
   onContextToggle,
   onPersonalCenter = () => onChange("account"),
   onNotifications,
@@ -82,6 +86,20 @@ export function ProductNavigation({
   return (
     <div className={`product-navigation product-navigation-${mode}`}>
       {mode === "rail" ? <div className="brand-mark" aria-label="Nexus Notes">N</div> : null}
+      {mode === "rail" && onCreateNote ? (
+        <button
+          className="product-navigation-create"
+          type="button"
+          aria-label="新建笔记"
+          aria-keyshortcuts="Control+N Meta+N"
+          title="新建笔记（Ctrl/Cmd+N）"
+          disabled={createNoteDisabled}
+          onClick={onCreateNote}
+        >
+          <Plus aria-hidden="true" size={18} />
+          <span>新建笔记</span>
+        </button>
+      ) : null}
       <div className="product-navigation-destinations">
         {destinations.map(({ domain, label, icon }) => destinationButton(domain, label, icon))}
       </div>

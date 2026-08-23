@@ -8,6 +8,9 @@ export interface BetaWorkerEnv {
   ASSETS?: Fetcher;
   FILES?: R2Bucket;
   AI?: OcrAiBinding;
+  AI_CHAT_API_URL?: string;
+  AI_CHAT_API_KEY?: string;
+  AI_CHAT_MODEL?: string;
   JOBS?: Queue<QueueJob>;
   PRESENCE?: DurableObjectNamespace;
   APP_BASE_URL: string;

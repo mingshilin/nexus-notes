@@ -17,6 +17,15 @@ export interface NoteCommandOptions {
   idempotencyKey?: string;
 }
 
+export interface NoteListOptions {
+  cursor?: string;
+  limit?: number;
+  signal?: AbortSignal;
+  status?: Note["status"];
+  folderId?: string | null;
+  dailyDate?: string;
+}
+
 export class NotesClient {
   private readonly createId: () => string;
 
@@ -28,12 +37,16 @@ export class NotesClient {
     this.createId = options.createId ?? (() => crypto.randomUUID());
   }
 
-  list(options: { cursor?: string; limit?: number; signal?: AbortSignal } = {}) {
+  list(options: NoteListOptions = {}) {
     const limit = options.limit ?? 50;
     const params = new URLSearchParams();
+    if (options.status) params.set("status", options.status);
+    if (options.folderId !== undefined) params.set("folder_id", options.folderId ?? "none");
+    if (options.dailyDate) params.set("daily_date", options.dailyDate);
     if (options.cursor) params.set("cursor", options.cursor);
     params.set("limit", String(limit));
     const cursorKey = options.cursor ?? "first";
+    const filterKey = [options.status ?? "", options.folderId === undefined ? "" : options.folderId ?? "none", options.dailyDate ?? ""].join(":");
     return this.client.request<{ items: Note[]; next_cursor: string | null }>({
       path: `/api/v2/notes?${params.toString()}`,
       headers: this.headers(),
@@ -41,7 +54,7 @@ export class NotesClient {
       policy: {
         timeoutMs: 8_000,
         retry: 2,
-        dedupeKey: `notes:${this.workspaceId}:${cursorKey}:${limit}`,
+        dedupeKey: `notes:${this.workspaceId}:${cursorKey}:${limit}${filterKey === "::" ? "" : `:${filterKey}`}`,
         signal: options.signal,
       },
     });

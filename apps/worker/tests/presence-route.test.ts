@@ -31,7 +31,7 @@ async function setup() {
   const authTokens = new worker.SecureTokenService(`auth:${secret}`);
   const tokenHash = await authTokens.hash(rawSession);
   await testDb.db.prepare(
-    "INSERT INTO sessions (id, user_id, token_hash, expires_at, last_seen_at, created_at) VALUES ('session-1', 'user-1', ?, '2026-08-23T00:00:00.000Z', ?, ?)",
+    "INSERT INTO sessions (id, user_id, token_hash, expires_at, last_seen_at, created_at) VALUES ('session-1', 'user-1', ?, '2099-01-01T00:00:00.000Z', ?, ?)",
   ).bind(tokenHash, now, now).run();
   return { worker, db: testDb.db, rawSession };
 }

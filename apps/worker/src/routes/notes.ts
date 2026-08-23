@@ -1,6 +1,7 @@
 import {
   CreateNoteInputSchema,
   QuickCaptureInputSchema,
+  NoteStatusSchema,
   RestoreNoteInputSchema,
   UpdateNoteInputSchema,
 } from "@nexus/contracts";
@@ -23,7 +24,15 @@ function listOptions(request: Request) {
   const limit = Number.isInteger(requestedLimit) && requestedLimit > 0
     ? Math.min(requestedLimit, 100)
     : 50;
-  return { cursor: params.get("cursor") ?? undefined, limit };
+  const rawStatus = params.get("status");
+  const status = rawStatus ? NoteStatusSchema.parse(rawStatus) : undefined;
+  const folderValue = params.get("folder_id");
+  const folderId = folderValue === null ? undefined : folderValue === "none" ? null : folderValue;
+  const dailyDate = params.get("daily_date") ?? undefined;
+  if (dailyDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(dailyDate)) {
+    throw new NoteServiceError("INVALID_DATE", "daily_date must be YYYY-MM-DD", 400);
+  }
+  return { cursor: params.get("cursor") ?? undefined, limit, status, folderId, dailyDate };
 }
 
 function revisionParam(value: string) {

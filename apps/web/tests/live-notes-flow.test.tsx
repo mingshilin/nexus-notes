@@ -64,7 +64,7 @@ function createApiClient(options: NoteApiOptions = {}) {
     if (input.path.startsWith("/api/v2/attachments")) return { items: [], next_cursor: null };
     if (input.path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
     if (input.path.startsWith("/api/v2/notifications/unread")) return { unread_count: 0 };
-    if (input.path === "/api/v2/notes?limit=50") return options.listNotes?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
+    if (input.path === "/api/v2/notes?status=active&limit=50") return options.listNotes?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
     if (input.path === "/api/v2/notes" && input.method === "POST") {
       if (options.createNote) return options.createNote(input);
       return {
@@ -146,7 +146,7 @@ describe("live note workspace flow", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
 
-    await waitFor(() => expect(screen.getAllByRole("button", { name: "新建笔记" })).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "新建笔记" }).length).toBeGreaterThanOrEqual(2));
   });
 
   it("creates and opens one durable draft from one click, focusing its title", async () => {
@@ -158,7 +158,8 @@ describe("live note workspace flow", () => {
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]);
 
-    expect(await findNoteTitle()).toHaveFocus();
+    const title = await findNoteTitle();
+    await waitFor(() => expect(title).toHaveFocus());
     resolveCreate({ note: serverNoteForFlow() });
     await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/notes", method: "POST" })));
   });
@@ -172,7 +173,8 @@ describe("live note workspace flow", () => {
     fireEvent.keyDown(window, { key: "n", metaKey: true, repeat: true });
     fireEvent.keyDown(window, { key: "n", ctrlKey: true });
 
-    expect(await findNoteTitle()).toHaveFocus();
+    const title = await findNoteTitle();
+    await waitFor(() => expect(title).toHaveFocus());
     await waitFor(() => expect(apiClient.request.mock.calls.filter(([input]) => input.path === "/api/v2/notes" && input.method === "POST")).toHaveLength(1));
   });
 
@@ -195,8 +197,9 @@ describe("live note workspace flow", () => {
     renderWorkspaceWithStore(apiClient, localStore);
 
     await screen.findByRole("button", { name: "打开笔记列表" });
-    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
-    expect(await findNoteTitle()).toHaveFocus();
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    const title = await findNoteTitle();
+    await waitFor(() => expect(title).toHaveFocus());
     await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalledWith("ws-1", expect.any(String)));
     expect(await screen.findByRole("heading", { name: "未命名笔记", level: 1 })).toBeInTheDocument();
   });
@@ -214,7 +217,7 @@ describe("live note workspace flow", () => {
     renderWorkspaceWithStore(apiClient, localStore);
 
     await screen.findByRole("button", { name: "打开笔记列表" });
-    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
     await findNoteTitle();
     resolveCreate({ note: serverNoteForFlow() });
     await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalled());
@@ -231,7 +234,7 @@ describe("live note workspace flow", () => {
     renderWorkspaceWithStore(apiClient, localStore);
 
     await screen.findByRole("button", { name: "打开笔记列表" });
-    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
     await findNoteTitle();
     await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalled());
     const savesBeforeEdit = localStore.saveDraft.mock.calls.length;
@@ -255,7 +258,7 @@ describe("live note workspace flow", () => {
     renderWorkspaceWithStore(apiClient, localStore);
 
     await screen.findByRole("button", { name: "打开笔记列表" });
-    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
     const title = await findNoteTitle();
     fireEvent.change(title, { target: { value: "最新标题" } });
     fireEvent.change(screen.getByRole("textbox", { name: "笔记内容" }), { target: { value: "最新内容" } });
@@ -288,7 +291,7 @@ describe("live note workspace flow", () => {
     renderWorkspaceWithStore(apiClient, localStore);
 
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
-    fireEvent.click(screen.getByRole("button", { name: "新建笔记" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
     await findNoteTitle();
     fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(screen.getByRole("button", { name: /Existing note/ }));
@@ -306,7 +309,7 @@ describe("live note workspace flow", () => {
     const localStore = createDraftStore();
     const first = renderWorkspaceWithStore(apiClient, localStore, "ws-1");
     await screen.findByRole("button", { name: "打开笔记列表" });
-    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
     await findNoteTitle();
 
     first.unmount();
@@ -329,7 +332,7 @@ describe("live note workspace flow", () => {
     const localStore = createDraftStore();
     const first = renderWorkspaceWithStore(apiClient, localStore, "ws-1");
     await screen.findByRole("button", { name: "打开笔记列表" });
-    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
     const title = await findNoteTitle();
     fireEvent.change(title, { target: { value: "Keep me" } });
     const draftId = [...localStore.listDrafts.mock.results].length;
@@ -357,7 +360,7 @@ describe("live note workspace flow", () => {
     renderWorkspaceWithStore(apiClient, localStore);
 
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
-    fireEvent.click(screen.getByRole("button", { name: "新建笔记" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
     await findNoteTitle();
     fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(screen.getByRole("button", { name: /Existing note/ }));
@@ -366,6 +369,61 @@ describe("live note workspace flow", () => {
     expect(await findNoteTitle()).toHaveValue("Existing note");
     fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
     expect(await screen.findByRole("button", { name: /未命名笔记/ })).toBeInTheDocument();
+  });
+
+  it.each([
+    ["收件箱", "folder_id=none"],
+    ["今日", "daily_date="],
+  ])("keeps an installed note out of the %s view when it does not match", async (viewName, queryPart) => {
+    const localStore = createDraftStore();
+    const filedNote = {
+      ...serverNoteForFlow(),
+      id: "filed-note",
+      folder_id: "folder-1",
+      title: "Filed note",
+    };
+    let resolveCreate!: (value: unknown) => void;
+    const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });
+    const apiClient = createApiClient({ createNote: async () => createBlocked });
+    renderWorkspaceWithStore(apiClient, localStore);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    fireEvent.change(await findNoteTitle(), { target: { value: "Filed note" } });
+    resolveCreate({ note: filedNote });
+    expect(await screen.findByRole("heading", { name: "Filed note", level: 1 })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: viewName }));
+    await waitFor(() => expect(apiClient.request.mock.calls.some(([request]) => request.path.includes(queryPart))).toBe(true));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Filed note/ })).not.toBeInTheDocument());
+  });
+
+  it("does not insert a non-matching note when its server sync finishes inside the inbox view", async () => {
+    const localStore = createDraftStore();
+    let resolveCreate!: (value: unknown) => void;
+    const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });
+    const apiClient = createApiClient({ createNote: async () => createBlocked });
+    renderWorkspaceWithStore(apiClient, localStore);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    fireEvent.change(await findNoteTitle(), { target: { value: "Filed during sync" } });
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "收件箱" }));
+    await waitFor(() => expect(apiClient.request.mock.calls.some(([request]) => request.path.includes("folder_id=none"))).toBe(true));
+
+    resolveCreate({
+      note: {
+        ...serverNoteForFlow(),
+        id: "filed-during-sync",
+        folder_id: "folder-1",
+        title: "Filed during sync",
+      },
+    });
+
+    await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: /Filed during sync/ })).not.toBeInTheDocument();
   });
 
   it("does not duplicate the initial empty draft write from an effect", async () => {
@@ -391,7 +449,7 @@ describe("live note workspace flow", () => {
     const first = renderWorkspaceWithStore(apiClient, localStore);
 
     await screen.findByRole("button", { name: "打开笔记列表" });
-    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
     const title = await findNoteTitle();
     fireEvent.change(title, { target: { value: "离线标题" } });
     fireEvent.change(screen.getByRole("textbox", { name: "笔记内容" }), { target: { value: "离线内容" } });

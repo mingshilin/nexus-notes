@@ -99,6 +99,7 @@ export function AccountMenu({
         aria-label="账户"
         aria-haspopup="menu"
         aria-expanded={open && !modalOpen}
+        title="账户与个人资料"
         onClick={() => {
           if (modalOpen) return;
           setActiveIndex(enabledIndices[0]!);
@@ -106,6 +107,7 @@ export function AccountMenu({
         }}
       >
         <span className="account-avatar" aria-hidden="true">{(user.displayName || user.email).slice(0, 1).toUpperCase()}</span>
+        <span className="account-trigger-caption">个人中心</span>
         <span className="account-name">{user.displayName || user.email}</span>
       </button>
       {open && !modalOpen ? (
@@ -113,6 +115,7 @@ export function AccountMenu({
           <div className="account-menu-identity">
             <strong>{user.displayName || "Nexus 用户"}</strong>
             <span>{user.email}</span>
+            <small>个人资料、密码安全与工作区</small>
           </div>
           <div className="account-menu-items" ref={menuRef} role="menu" aria-label="账户菜单" onKeyDown={moveMenuFocus}>
             <button ref={(element) => { itemRefs.current[0] = element; }} type="button" role="menuitem" tabIndex={rovingIndex === 0 ? 0 : -1} onFocus={() => setActiveIndex(0)} onClick={() => runAction(onPersonalCenter)}><UserRound aria-hidden="true" size={16} />个人中心</button>

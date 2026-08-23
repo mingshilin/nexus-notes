@@ -147,10 +147,25 @@ export class D1NoteRepository implements NoteRepository {
     ).bind(workspaceId, noteId).first<NoteRow>().then((row) => row ? toNote(row) : null);
   }
 
-  async listNotes(input: { workspaceId: string; cursor?: string; limit: number }) {
+  async listNotes(input: { workspaceId: string; cursor?: string; limit: number; status?: Note["status"]; folderId?: string | null; dailyDate?: string }) {
     const limit = Math.max(1, Math.min(input.limit, 100));
     const conditions = ["workspace_id = ?", "deleted_at IS NULL"];
     const bindings: unknown[] = [input.workspaceId];
+    if (input.status) {
+      conditions.push("status = ?");
+      bindings.push(input.status);
+    }
+    if (input.folderId !== undefined) {
+      if (input.folderId === null) conditions.push("folder_id IS NULL");
+      else {
+        conditions.push("folder_id = ?");
+        bindings.push(input.folderId);
+      }
+    }
+    if (input.dailyDate) {
+      conditions.push("daily_date = ?");
+      bindings.push(input.dailyDate);
+    }
     if (input.cursor) {
       const cursor = decodeCursor(input.cursor);
       conditions.push("(updated_at < ? OR (updated_at = ? AND id < ?))");
