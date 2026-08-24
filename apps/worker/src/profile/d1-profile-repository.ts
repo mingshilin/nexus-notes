@@ -148,7 +148,16 @@ export class D1ProfileRepository implements ProfileRepository {
     const results = await this.db.batch<{ avatar_key: string | null } | { id: string; name: string }>([
       this.db.prepare("SELECT id, name FROM workspaces WHERE owner_user_id = ? AND workspace_type = 'team' ORDER BY lower(name), id").bind(userId),
       this.db.prepare(`SELECT avatar_key FROM users WHERE id = ? AND ${noOwnedTeamWorkspace} LIMIT 1`).bind(userId, userId),
-      this.db.prepare(`DELETE FROM workspaces WHERE owner_user_id = ? AND workspace_type = 'personal' AND ${noOwnedTeamWorkspace}`).bind(userId, userId),
+      // Immutable workspace audit rows prevent a cascading workspace delete. In that
+      // case archive the personal workspace after removing membership instead of
+      // failing the account deletion transaction.
+      this.db.prepare(`DELETE FROM workspaces WHERE owner_user_id = ? AND workspace_type = 'personal' AND NOT EXISTS (
+        SELECT 1 FROM audit_logs WHERE audit_logs.workspace_id = workspaces.id
+      ) AND ${noOwnedTeamWorkspace}`).bind(userId, userId),
+      this.db.prepare(`UPDATE workspaces SET name = '已删除账户空间', slug = 'deleted-' || id, updated_at = ?
+        WHERE owner_user_id = ? AND workspace_type = 'personal'
+          AND EXISTS (SELECT 1 FROM audit_logs WHERE audit_logs.workspace_id = workspaces.id)
+          AND ${noOwnedTeamWorkspace}`).bind(audit.now, userId, userId),
       this.db.prepare(`DELETE FROM workspace_members WHERE user_id = ? AND ${noOwnedTeamWorkspace}`).bind(userId, userId),
       this.db.prepare(`DELETE FROM email_codes WHERE user_id = ? AND ${noOwnedTeamWorkspace}`).bind(userId, userId),
       this.db.prepare(`DELETE FROM password_resets WHERE user_id = ? AND ${noOwnedTeamWorkspace}`).bind(userId, userId),

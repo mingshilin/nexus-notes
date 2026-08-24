@@ -100,6 +100,60 @@ describe("App authentication bootstrap", () => {
     expect(apiClient.request).not.toHaveBeenCalled();
   });
 
+  it("activates the newly created workspace after refreshing the server session", async () => {
+    const personalWorkspace = { id: "ws-1", name: "Personal", slug: "personal", role: "owner" as const, revision: 1 };
+    const createdWorkspace = { id: "ws-new", name: "研究团队", slug: "research-team", role: "owner" as const, revision: 1 };
+    const authClient = {
+      session: vi.fn()
+        .mockResolvedValueOnce({ user: { id: "user-1", email: "user@example.com" }, workspaces: [personalWorkspace], active_workspace_id: "ws-1" })
+        .mockResolvedValueOnce({ user: { id: "user-1", email: "user@example.com" }, workspaces: [personalWorkspace, createdWorkspace], active_workspace_id: "ws-1" }),
+      createWorkspace: vi.fn(async () => createdWorkspace),
+    };
+    const apiClient = { request: vi.fn(async () => ({ items: [], next_cursor: null })) };
+
+    render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+    const accountShortcut = await waitFor(() => {
+      const button = screen.getAllByRole("button", { name: "个人资料与设置" })
+        .find((candidate) => candidate.classList.contains("workspace-quick-start-action"));
+      expect(button).toBeDefined();
+      return button!;
+    });
+    fireEvent.click(accountShortcut);
+    fireEvent.click(await screen.findByRole("tab", { name: "工作区" }));
+    fireEvent.change(screen.getByLabelText("新工作区名称"), { target: { value: "研究团队" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建工作区" }));
+
+    await waitFor(() => expect(authClient.createWorkspace).toHaveBeenCalledWith({ name: "研究团队" }));
+    await waitFor(() => expect(apiClient.request.mock.calls.some(([request]) => request.headers?.["x-workspace-id"] === "ws-new")).toBe(true));
+  });
+
+  it("does not report a duplicate-create retry when the new workspace session refresh fails", async () => {
+    const personalWorkspace = { id: "ws-1", name: "Personal", slug: "personal", role: "owner" as const, revision: 1 };
+    const createdWorkspace = { id: "ws-new", name: "研究团队", slug: "research-team", role: "owner" as const, revision: 1 };
+    const authClient = {
+      session: vi.fn()
+        .mockResolvedValueOnce({ user: { id: "user-1", email: "user@example.com" }, workspaces: [personalWorkspace], active_workspace_id: "ws-1" })
+        .mockRejectedValueOnce(Object.assign(new Error("session refresh unavailable"), { code: "NETWORK_ERROR" })),
+      createWorkspace: vi.fn(async () => createdWorkspace),
+    };
+
+    render(<App authClient={authClient as any} apiClient={{ request: vi.fn(async () => ({ items: [], next_cursor: null })) } as any} turnstileSiteKey="test" />);
+    const accountShortcut = await waitFor(() => {
+      const button = screen.getAllByRole("button", { name: "个人资料与设置" })
+        .find((candidate) => candidate.classList.contains("workspace-quick-start-action"));
+      expect(button).toBeDefined();
+      return button!;
+    });
+    fireEvent.click(accountShortcut);
+    fireEvent.click(await screen.findByRole("tab", { name: "工作区" }));
+    fireEvent.change(screen.getByLabelText("新工作区名称"), { target: { value: "研究团队" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建工作区" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("工作区已创建，但登录状态刷新失败");
+    expect(screen.getByLabelText("新工作区名称")).toHaveValue("研究团队");
+    expect(authClient.createWorkspace).toHaveBeenCalledOnce();
+  });
+
   it("aborts stale recovery requests when the active workspace changes", async () => {
     const authClient = { session: vi.fn(async () => authenticatedSession("ws-1")) };
     const refreshedAuthClient = { session: vi.fn(async () => authenticatedSession("ws-2")) };

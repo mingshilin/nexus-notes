@@ -1,3 +1,6 @@
+import type { Folder, KnowledgeDiagnostic } from "@nexus/contracts";
+import { KnowledgeDiagnosticActions } from "./KnowledgeDiagnosticActions";
+
 export interface RecoveryAttachment {
   id: string;
   filename: string;
@@ -41,6 +44,11 @@ export function KnowledgeRecoveryPanel({
   onFiltersChange,
   onLoadMoreAttachments,
   onLoadMoreDiagnostics,
+  folders = [],
+  onClassifyUnfiled,
+  onMoveOrphansToInbox,
+  onIgnoreOrphans,
+  onMergeDuplicate,
 }: {
   attachments: RecoveryAttachment[];
   diagnostics: RecoveryDiagnostic[];
@@ -62,6 +70,11 @@ export function KnowledgeRecoveryPanel({
   onFiltersChange(filters: RecoveryFilters): void;
   onLoadMoreAttachments(): void;
   onLoadMoreDiagnostics(): void;
+  folders?: Folder[];
+  onClassifyUnfiled?(folderId: string): void;
+  onMoveOrphansToInbox?(): void;
+  onIgnoreOrphans?(): void;
+  onMergeDuplicate?(diagnostic: KnowledgeDiagnostic): void;
 }) {
   const failed = attachments.filter((attachment) => attachment.ocr_status === "failed" || attachment.ocr_status === "dead_letter");
   const empty = attachments.length === 0 && diagnostics.length === 0;
@@ -106,6 +119,17 @@ export function KnowledgeRecoveryPanel({
         </label>
         {(filters.mimeType || filters.ocrStatus) ? <button type="button" className="knowledge-filter-reset" onClick={resetFilters}>清除过滤</button> : null}
       </div>
+      {onClassifyUnfiled && onMoveOrphansToInbox && onIgnoreOrphans && onMergeDuplicate ? (
+        <KnowledgeDiagnosticActions
+          diagnostics={diagnostics as KnowledgeDiagnostic[]}
+          folders={folders}
+          disabled={isRetryPending || uploading}
+          onClassifyUnfiled={onClassifyUnfiled}
+          onMoveOrphansToInbox={onMoveOrphansToInbox}
+          onIgnoreOrphans={onIgnoreOrphans}
+          onMergeDuplicate={onMergeDuplicate}
+        />
+      ) : null}
       {loading && empty ? <p className="knowledge-recovery-state" role="status">正在加载附件与诊断…</p> : null}
       {refreshing ? <p className="knowledge-recovery-state" role="status">正在刷新，保留最近可用数据…</p> : null}
       {attachmentError ? <p className="knowledge-recovery-error" role="alert">{attachmentError}</p> : null}

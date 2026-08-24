@@ -1,5 +1,5 @@
 import { assertPasswordPolicy, normalizeEmail } from "@nexus/domain";
-import type { AuthSession, WorkspaceMembershipSummary } from "@nexus/contracts";
+import { CreateWorkspaceInputSchema, type AuthSession, type CreateWorkspaceInput, type WorkspaceMembershipSummary } from "@nexus/contracts";
 
 export interface AuthUser {
   id: string;
@@ -26,6 +26,7 @@ export interface AuthRepository {
   verifyEmailCodeAndEnsurePersonalWorkspace(codeHash: string, now: string): Promise<{ userId: string } | null | undefined>;
   ensurePersonalWorkspace(userId: string, now: string): Promise<void>;
   listWorkspaceMemberships(userId: string): Promise<AuthWorkspaceMembership[]>;
+  createTeamWorkspace?(input: { userId: string; name: string; now: string }): Promise<WorkspaceMembershipSummary>;
   createSession(input: { userId: string; tokenHash: string; expiresAt: string; now: string; userAgent: string }): Promise<void>;
   createPasswordReset(input: { userId: string; tokenHash: string; expiresAt: string; now: string }): Promise<void>;
   consumePasswordReset(tokenHash: string, now: string): Promise<{ userId: string } | null | undefined>;
@@ -65,8 +66,10 @@ export class AuthServiceError extends Error {
     this.name = "AuthServiceError";
     this.status = code === "INVALID_CREDENTIALS"
       ? 401
-      : code === "EMAIL_EXISTS"
+      : code === "EMAIL_EXISTS" || code === "WORKSPACE_QUOTA_EXCEEDED"
         ? 409
+        : code === "WORKSPACE_UNAVAILABLE"
+          ? 503
         : code === "EMAIL_NOT_VERIFIED" || code.startsWith("CHALLENGE_")
           ? 403
           : 400;
@@ -277,6 +280,26 @@ export class AuthService {
       workspaces,
       active_workspace_id: activeWorkspace?.id ?? null,
     };
+  }
+
+  async createWorkspace(input: CreateWorkspaceInput & { userId: string }): Promise<WorkspaceMembershipSummary> {
+    const parsed = CreateWorkspaceInputSchema.safeParse({ name: input.name });
+    if (!parsed.success) throw new AuthServiceError("WORKSPACE_INPUT_INVALID", "Workspace name is invalid");
+    const createTeamWorkspace = this.dependencies.repository.createTeamWorkspace;
+    if (!createTeamWorkspace) throw new AuthServiceError("WORKSPACE_UNAVAILABLE", "Workspace creation is unavailable");
+
+    try {
+      return await createTeamWorkspace.call(this.dependencies.repository, {
+        userId: input.userId,
+        name: parsed.data.name,
+        now: this.dependencies.clock().toISOString(),
+      });
+    } catch (error) {
+      if (error instanceof Error && /workspace quota exceeded/iu.test(error.message)) {
+        throw new AuthServiceError("WORKSPACE_QUOTA_EXCEEDED", "Workspace quota exceeded");
+      }
+      throw error;
+    }
   }
 
   async logout(sessionId: string) {

@@ -1,9 +1,13 @@
 import type {
+  CalendarFeed,
+  CalendarFeedItem,
+  CalendarFeedQuery,
   SavedSearch,
   SavedSearchFilters,
   SavedSearchInput,
   SearchHit,
   SearchRequest,
+  WorkspaceContext,
 } from "@nexus/contracts";
 import { SavedSearchFiltersSchema } from "@nexus/contracts";
 
@@ -135,6 +139,82 @@ export class D1KnowledgeRepository {
         ? encodeCursor(pageRows[pageRows.length - 1]!)
         : null,
     };
+  }
+
+  async getCalendarFeed(context: WorkspaceContext, query: CalendarFeedQuery): Promise<CalendarFeed> {
+    const result = await this.db.prepare(
+      `SELECT id, kind, date, title, entity_id, note_id, database_id, status
+       FROM (
+         SELECT n.id, 'daily_note' AS kind, n.daily_date AS date, n.title,
+                n.id AS entity_id, n.id AS note_id, NULL AS database_id, n.status
+         FROM notes n
+         WHERE n.workspace_id = ? AND n.daily_date BETWEEN ? AND ?
+           AND n.status = 'active' AND n.deleted_at IS NULL
+         UNION ALL
+         SELECT r.id, 'reminder' AS kind, substr(r.remind_at, 1, 10) AS date,
+                COALESCE(n.title, 'Reminder') AS title, r.id AS entity_id,
+                r.note_id, NULL AS database_id, r.status
+         FROM reminders r
+         LEFT JOIN notes n ON n.workspace_id = r.workspace_id AND n.id = r.note_id
+         WHERE r.workspace_id = ? AND r.user_id = ?
+           AND substr(r.remind_at, 1, 10) BETWEEN ? AND ?
+           AND r.status != 'dismissed'
+         UNION ALL
+         SELECT dr.id, 'database_record' AS kind,
+                json_extract(rv.value_json, '$') AS date,
+                COALESCE(n.title, d.name) AS title, dr.id AS entity_id,
+                dr.note_id, dr.database_id, NULL AS status
+         FROM database_records dr
+         JOIN databases d ON d.workspace_id = dr.workspace_id AND d.id = dr.database_id
+         JOIN database_properties dp ON dp.workspace_id = dr.workspace_id
+           AND dp.database_id = dr.database_id AND dp.type = 'date' AND dp.is_hidden = 0
+         JOIN record_values rv ON rv.workspace_id = dr.workspace_id
+           AND rv.database_id = dr.database_id AND rv.record_id = dr.id AND rv.property_id = dp.id
+         LEFT JOIN notes n ON n.workspace_id = dr.workspace_id AND n.id = dr.note_id
+         WHERE dr.workspace_id = ?
+           AND (
+             ? = 'owner'
+             OR (
+               NOT EXISTS (
+                 SELECT 1 FROM field_permissions denied_direct
+                 WHERE denied_direct.workspace_id = dr.workspace_id
+                   AND denied_direct.database_id = dr.database_id
+                   AND denied_direct.property_id = dp.id
+                   AND denied_direct.subject_type = 'user'
+                   AND denied_direct.subject_id = ?
+                   AND denied_direct.can_read = 0
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM field_permissions denied_role
+                 WHERE denied_role.workspace_id = dr.workspace_id
+                   AND denied_role.database_id = dr.database_id
+                   AND denied_role.property_id = dp.id
+                   AND denied_role.subject_type = 'role'
+                   AND denied_role.subject_id = ?
+                   AND denied_role.can_read = 0
+                   AND NOT EXISTS (
+                     SELECT 1 FROM field_permissions allowed_direct
+                     WHERE allowed_direct.workspace_id = dr.workspace_id
+                       AND allowed_direct.database_id = dr.database_id
+                       AND allowed_direct.property_id = dp.id
+                       AND allowed_direct.subject_type = 'user'
+                       AND allowed_direct.subject_id = ?
+                   )
+               )
+             )
+           )
+           AND json_extract(rv.value_json, '$') BETWEEN ? AND ?
+           AND dr.deleted_at IS NULL
+       )
+       WHERE date IS NOT NULL
+       ORDER BY date ASC, kind ASC, id ASC
+       LIMIT 500`,
+    ).bind(
+      context.workspaceId, query.from, query.to,
+      context.workspaceId, context.userId, query.from, query.to,
+      context.workspaceId, context.role, context.userId, context.role, context.userId, query.from, query.to,
+    ).all<CalendarFeedItem>();
+    return { items: result.results ?? [] };
   }
 
   async createSavedSearch(input: {

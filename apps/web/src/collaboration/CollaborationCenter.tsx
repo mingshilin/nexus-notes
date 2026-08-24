@@ -2,54 +2,34 @@ import type {
   ActivityEntry,
   AuditEntry,
   CollaborationComment,
-  Notification,
   PresenceParticipant,
   PublicShare,
   WorkspaceInvitation,
   WorkspaceMember,
   WorkspaceRoleContract,
 } from "@nexus/contracts";
-import { Bell, Link2, MessageSquare, ShieldCheck, Users, X } from "lucide-react";
+import { Link2, MessageSquare, ShieldCheck, Users, X } from "lucide-react";
 import {
-  createElement,
   useEffect,
   useRef,
   useState,
   type FormEvent,
-  type KeyboardEvent,
-  type ReactNode,
 } from "react";
-import { createPortal } from "react-dom";
 
 import type { CollaborationClient, PresenceConnection } from "../data/collaboration-client";
 import { useWorkbenchModalState } from "../layout/AdaptiveWorkbench";
+import { ModalDialog } from "./CollaborationModal";
+import {
+  collaborationErrorMessage,
+  type CollaborationCommentTarget,
+  type CollaborationShareTarget,
+} from "./collaboration-types";
 
 type Section = "people" | "comments" | "shares" | "activity";
 type PresenceStatus = "connecting" | "connected" | "unavailable";
 type OneTimeLink = { kind: "invitation" | "share"; url: string; opener: HTMLElement | null };
-export type CollaborationCommentTarget = { type: "note" | "database_record"; id: string; label: string };
-export type CollaborationShareTarget = { type: "note" | "database_view"; id: string; label: string };
-export interface NotificationTarget {
-  targetType: "note" | "database_record";
-  targetId: string;
-  commentId: string | null;
-  databaseId?: string;
-}
 
 const sensitiveMetadataKey = /(content|password|token|code|cookie|authorization|attachment.*bytes|body|secret)/iu;
-
-function errorDetails(error: unknown) {
-  return error && typeof error === "object" ? error as { status?: number; code?: string; name?: string } : {};
-}
-
-export function collaborationErrorMessage(error: unknown) {
-  const { status, code, name } = errorDetails(error);
-  if (status === 403 || code === "FORBIDDEN") return "权限不足，无法完成此操作。";
-  if (status === 409 || code === "REVISION_CONFLICT" || code === "CONFLICT") return "数据已发生冲突，请刷新后重试。";
-  if (status === 429 || code === "RATE_LIMITED") return "操作过于频繁，请稍后重试。";
-  if (code === "NETWORK_ERROR" || name === "TypeError") return "网络连接异常，请检查连接后重试。";
-  return "协作服务暂时不可用，请稍后重试。";
-}
 
 function commandId() {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -67,89 +47,6 @@ function upsertById<T extends { id: string }>(items: T[], next: T) {
   return items.some((item) => item.id === next.id)
     ? items.map((item) => item.id === next.id ? next : item)
     : [next, ...items];
-}
-
-function ModalDialog({
-  label,
-  opener,
-  onClose,
-  className = "collaboration-dialog",
-  backdropClassName = "",
-  children,
-}: {
-  label: string;
-  opener: HTMLElement | null;
-  onClose(): void;
-  className?: string;
-  backdropClassName?: string;
-  children(closeRef: { current: HTMLButtonElement | null }): ReactNode;
-}) {
-  const closeRef = useRef<HTMLButtonElement>(null);
-  const setWorkbenchModalOpen = useWorkbenchModalState();
-
-  useEffect(() => {
-    setWorkbenchModalOpen(true);
-    const viewport = window.visualViewport;
-    const updateKeyboardInset = () => {
-      const height = viewport?.height ?? window.innerHeight;
-      const offset = viewport?.offsetTop ?? 0;
-      document.documentElement.style.setProperty("--collaboration-keyboard", `${Math.max(0, window.innerHeight - height - offset)}px`);
-    };
-    updateKeyboardInset();
-    viewport?.addEventListener("resize", updateKeyboardInset);
-    viewport?.addEventListener("scroll", updateKeyboardInset);
-    closeRef.current?.focus();
-    return () => {
-      viewport?.removeEventListener("resize", updateKeyboardInset);
-      viewport?.removeEventListener("scroll", updateKeyboardInset);
-      document.documentElement.style.removeProperty("--collaboration-keyboard");
-      setWorkbenchModalOpen(false);
-      opener?.focus();
-    };
-  }, [opener, setWorkbenchModalOpen]);
-
-  const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onClose();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const focusable = [...event.currentTarget.querySelectorAll<HTMLElement>("a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])")];
-    if (focusable.length === 0) {
-      event.preventDefault();
-      event.currentTarget.focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
-
-  if (typeof document === "undefined") return null;
-  return createPortal(
-    <div className={`collaboration-dialog-backdrop ${backdropClassName}`.trim()} onMouseDown={onClose}>
-      <section
-        className={className}
-        role="dialog"
-        aria-modal="true"
-        aria-label={label}
-        data-scroll-owner="dialog"
-        tabIndex={-1}
-        onKeyDown={handleKeyDown}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        {children(closeRef)}
-      </section>
-    </div>,
-    document.body,
-  );
 }
 
 function OneTimeLinkDialog({ value, onClose }: { value: OneTimeLink; onClose(): void }) {
@@ -190,152 +87,6 @@ function PresenceSummary({ status, participants }: { status: PresenceStatus; par
       {participant.display_name}{participant.state === "typing" ? " 正在输入" : ""}
     </span>)}
   </div>;
-}
-
-export interface NotificationCenterProps {
-  client: CollaborationClient;
-  open: boolean;
-  unreadCount: number;
-  opener?: HTMLElement | null;
-  onClose(): void;
-  onNotificationRead?(count: number): void;
-  onDeepLink?(target: NotificationTarget): void;
-}
-
-export function notificationTargetFromDeepLink(deepLink: string, payload: Record<string, unknown> = {}): NotificationTarget | null {
-  const url = new URL(deepLink, "https://nexus.invalid");
-  const note = url.pathname.match(/^\/notes\/([^/]+)\/?$/u);
-  const routedRecord = url.pathname.match(/^\/databases\/([^/]+)\/records\/([^/]+)\/?$/u);
-  const legacyRecord = url.pathname.match(/^\/databases\/records\/([^/]+)\/?$/u);
-  const match = note ?? routedRecord?.slice(1) ?? legacyRecord;
-  if (!match?.[1]) return null;
-  const databaseId = routedRecord?.[1]
-    ? decodeURIComponent(routedRecord[1])
-    : typeof payload.database_id === "string" && payload.database_id
-      ? payload.database_id
-      : undefined;
-  return {
-    targetType: note ? "note" : "database_record",
-    targetId: decodeURIComponent(routedRecord?.[2] ?? match[1]),
-    commentId: url.searchParams.get("comment"),
-    ...(databaseId ? { databaseId } : {}),
-  };
-}
-
-export function NotificationCenter({ client, open, unreadCount, opener = null, onClose, onNotificationRead, onDeepLink }: NotificationCenterProps) {
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    setSelectedIds(new Set());
-    void client.listNotifications({ limit: 25, signal: controller.signal }).then((page) => {
-      if (controller.signal.aborted) return;
-      setNotifications(page.items);
-      setNextCursor(page.next_cursor);
-    }).catch((reason: unknown) => {
-      if (!controller.signal.aborted) setError(collaborationErrorMessage(reason));
-    }).finally(() => {
-      if (!controller.signal.aborted) setLoading(false);
-    });
-    return () => controller.abort();
-  }, [client, open]);
-
-  if (!open) return null;
-  const markRead = (ids: string[], readAt: string) => {
-    setNotifications((current) => current.map((item) => ids.includes(item.id) ? { ...item, read_at: readAt } : item));
-    setSelectedIds((current) => new Set([...current].filter((id) => !ids.includes(id))));
-    onNotificationRead?.(ids.length);
-  };
-  const run = async (command: () => Promise<void>) => {
-    if (pending) return;
-    setPending(true);
-    setError(null);
-    try {
-      await command();
-    } catch (reason) {
-      setError(collaborationErrorMessage(reason));
-    } finally {
-      setPending(false);
-    }
-  };
-  const openNotification = async (notification: Notification) => {
-    const target = notificationTargetFromDeepLink(notification.deep_link, notification.payload);
-    if (target) onDeepLink?.(target);
-    try {
-      if (!notification.read_at) {
-        const result = await client.readNotification(notification.id, notification.revision);
-        markRead([notification.id], result.read_at);
-      }
-    } catch (reason) {
-      setError(collaborationErrorMessage(reason));
-    }
-  };
-  const loadMore = () => run(async () => {
-    if (!nextCursor) return;
-    const page = await client.listNotifications({ cursor: nextCursor, limit: 25 });
-    setNotifications((current) => {
-      const existing = new Set(current.map((item) => item.id));
-      return [...current, ...page.items.filter((item) => !existing.has(item.id))];
-    });
-    setNextCursor(page.next_cursor);
-  });
-  const readSelected = () => run(async () => {
-    const selected = notifications.filter((item) => selectedIds.has(item.id) && !item.read_at);
-    if (!selected.length) return;
-    const result = await client.readNotifications({
-      notification_ids: selected.map((item) => item.id),
-      base_revisions: Object.fromEntries(selected.map((item) => [item.id, item.revision])),
-    });
-    markRead(result.notification_ids, result.read_at);
-  });
-  const readAll = () => run(async () => {
-    const result = await client.readAllNotifications();
-    setNotifications((current) => current.map((item) => ({ ...item, read_at: item.read_at ?? result.read_at })));
-    setSelectedIds(new Set());
-    onNotificationRead?.(result.count);
-  });
-
-  return <ModalDialog
-    label="通知中心"
-    opener={opener}
-    onClose={onClose}
-    className="collaboration-dialog notification-center"
-    backdropClassName="notification-center-backdrop"
-  >
-    {(closeRef) => <>
-      <header><div><p className="eyebrow">INBOX</p><h2>通知中心</h2></div><button ref={closeRef} type="button" aria-label="关闭通知中心" onClick={onClose}><X size={17} /></button></header>
-      <div className="notification-actions">
-        <button type="button" disabled={pending || selectedIds.size === 0} onClick={() => void readSelected()}>将所选通知标为已读</button>
-        <button type="button" disabled={pending || (unreadCount <= 0 && !nextCursor && notifications.every((item) => item.read_at))} onClick={() => void readAll()}>全部标为已读</button>
-      </div>
-      {loading ? <p role="status">正在加载通知…</p> : null}
-      {error ? <p role="alert" className="collaboration-error">{error}</p> : null}
-      {!loading && !error && notifications.length === 0 ? <p className="collaboration-empty">暂无通知。</p> : null}
-      <div className="notification-list">{notifications.map((notification) => <article className={notification.read_at ? "read" : "unread"} key={notification.id}>
-        <div><label><input type="checkbox" aria-label={`选择通知 ${notification.id}`} disabled={Boolean(notification.read_at) || pending} checked={selectedIds.has(notification.id)} onChange={(event) => setSelectedIds((current) => {
-          const next = new Set(current);
-          if (event.target.checked) next.add(notification.id); else next.delete(notification.id);
-          return next;
-        })} /><strong>{notification.type}</strong></label><time>{new Date(notification.created_at).toLocaleString()}</time></div>
-        <div className="notification-row-actions">
-          <a href={notification.deep_link} onClick={(event) => { event.preventDefault(); void openNotification(notification); }}>打开 {notification.type}</a>
-          {!notification.read_at ? <button type="button" aria-label={`标记通知 ${notification.id} 已读`} disabled={pending} onClick={() => void run(async () => {
-            const result = await client.readNotification(notification.id, notification.revision);
-            markRead(result.notification_ids, result.read_at);
-          })}>标记已读</button> : null}
-        </div>
-      </article>)}</div>
-      {nextCursor ? <button className="notification-load-more" type="button" disabled={pending} onClick={() => void loadMore()}>加载更多通知</button> : null}
-    </>}
-  </ModalDialog>;
 }
 
 export interface CollaborationCenterProps {
@@ -410,8 +161,10 @@ export function CollaborationCenter({
   }, [activeTarget, commentTargetKey, commentTargets]);
 
   useEffect(() => {
-    if (!shareTargets.some((target) => targetKey(target) === shareTargetKey)) setShareTargetKey(shareTargets[0] ? targetKey(shareTargets[0]) : "");
-  }, [shareTargetKey, shareTargets]);
+    const preferred = shareTargets.find((target) => activeTarget && target.type === activeTarget.type && target.id === activeTarget.id);
+    if (preferred) setShareTargetKey(targetKey(preferred));
+    else if (!shareTargets.some((target) => targetKey(target) === shareTargetKey)) setShareTargetKey(shareTargets[0] ? targetKey(shareTargets[0]) : "");
+  }, [activeTarget, shareTargetKey, shareTargets]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -629,12 +382,4 @@ export function CollaborationCenter({
     {!sectionLoading && section === "activity" ? <div className="collaboration-grid"><section className="collaboration-card"><header><div><small>ACTIVITY</small><h2>活动记录</h2></div></header>{activity.length === 0 ? <p className="collaboration-empty">暂无活动记录。</p> : <div className="audit-list">{activity.map((entry) => <article key={entry.id}><header><strong>{entry.action}</strong><time>{new Date(entry.created_at).toLocaleString()}</time></header><p>{entry.target_type}{entry.target_id ? ` / ${entry.target_id}` : ""}</p><Metadata value={entry.metadata} /></article>)}</div>}</section>{canManage ? <section className="collaboration-card"><header><div><small>AUDIT</small><h2>审计日志</h2></div></header>{audit.length === 0 ? <p className="collaboration-empty">暂无审计日志。</p> : <div className="audit-list">{audit.map((entry) => <article key={entry.id}><header><strong>{entry.action}</strong><span>{entry.outcome}</span></header><p>{entry.target_type}{entry.target_id ? ` / ${entry.target_id}` : ""}</p><Metadata value={entry.metadata} /></article>)}</div>}</section> : null}</div> : null}
     {oneTimeLink ? <OneTimeLinkDialog value={oneTimeLink} onClose={() => setOneTimeLink(null)} /> : null}
   </section>;
-}
-
-export function notificationButtonLabel(unreadCount: number) {
-  return `通知，${unreadCount} 条未读`;
-}
-
-export function NotificationButton({ unreadCount, onClick }: { unreadCount: number; onClick(opener: HTMLElement): void }) {
-  return <button className="notification-button" type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => onClick(event.currentTarget)}><Bell aria-hidden="true" size={18} />{unreadCount > 0 ? <span>{unreadCount}</span> : null}</button>;
 }

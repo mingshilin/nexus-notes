@@ -4,7 +4,7 @@ AI 助手通过 Worker 代理 OpenAI-compatible Chat Completions API。浏览器
 
 ## Local
 
-在仓库根目录创建被 `.gitignore` 忽略的 `.dev.vars`：
+在 Worker 项目目录创建被 `.gitignore` 忽略的 `.dev.vars`：
 
 ```text
 AI_CHAT_API_URL=https://provider.example/v1/chat/completions
@@ -16,13 +16,15 @@ AI_CHAT_MODEL=replace-with-a-model
 
 ## Cloudflare Worker
 
-将 `AI_CHAT_API_URL` 和 `AI_CHAT_MODEL` 作为 Worker variables 配置，将 key 写入 Cloudflare Secret：
+生产环境只将 URL 和 model 作为 Worker variables 配置，使用 Worker Secret 保存 key：
 
 ```text
+AI_CHAT_API_URL=https://provider.example/v1/chat/completions
+AI_CHAT_MODEL=provider-model
 npx wrangler secret put AI_CHAT_API_KEY
 ```
 
-也可以在 Cloudflare Worker 控制台的 Settings 中分别设置变量和 secret。生产环境不使用 `VITE_AI_CHAT_API_KEY`，也不要把 key 写入 `wrangler.toml`、`.env.production` 或前端 bundle。
+也可以在 Cloudflare Worker 控制台的 Settings 中分别设置变量和 secret。生产环境不使用 `VITE_AI_CHAT_API_KEY`，也不要把 key 写入 `wrangler.toml`、`.env.production`、`.env.example` 或前端 bundle。
 
 Provider 需要接受如下请求并返回 `choices[0].message.content`：
 

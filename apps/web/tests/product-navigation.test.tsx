@@ -200,6 +200,22 @@ function accountDeletionApi(createNote: Promise<ReturnType<typeof note>>, deleti
 }
 
 describe("ProductNavigation", () => {
+  it("exposes a separate creation-center action in desktop and mobile navigation", () => {
+    const onCreateCenter = vi.fn();
+    const props = { ...navigationProps(), onCreateCenter };
+    const { rerender } = render(createElement(ProductNavigation, { ...props, mode: "rail" } as any));
+
+    const desktopCreateCenter = screen.getByRole("button", { name: "创建中心" });
+    expect(desktopCreateCenter).toBeVisible();
+    fireEvent.click(desktopCreateCenter);
+    expect(onCreateCenter).toHaveBeenCalledOnce();
+
+    rerender(createElement(ProductNavigation, { ...props, mode: "mobile" } as any));
+    const mobileCreateCenter = screen.getByRole("button", { name: "创建中心" });
+    expect(mobileCreateCenter).toBeVisible();
+    expect(screen.getByRole("button", { name: "个人资料与设置" })).toBeVisible();
+  });
+
   it("exposes a labeled create-note action in the desktop rail", () => {
     const onCreateNote = vi.fn();
     render(<ProductNavigation {...navigationProps({ onCreateNote })} />);
@@ -225,6 +241,9 @@ describe("ProductNavigation", () => {
     expect(onPersonalCenter).toHaveBeenCalledOnce();
 
     rerender(<ProductNavigation {...props} mode="mobile" />);
+    const mobileAccount = document.querySelector(".product-navigation-mobile-account");
+    expect(mobileAccount).toBeInTheDocument();
+    expect(mobileAccount).toContainElement(screen.getByRole("button", { name: "个人资料与设置" }));
     expect(screen.getByRole("button", { name: "个人资料与设置" })).toBeVisible();
   });
 
@@ -236,6 +255,7 @@ describe("ProductNavigation", () => {
       ["笔记", "notes"],
       ["数据库", "databases"],
       ["知识整理", "knowledge"],
+      ["提醒", "reminders"],
       ["协作", "collaboration"],
       ["AI 助手", "ai"],
       ["设置", "account"],
@@ -387,6 +407,17 @@ describe("ProductNavigation", () => {
 });
 
 describe("App product navigation", () => {
+  it("opens the command palette with Ctrl+K and navigates through a searched action", async () => {
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+
+    await screen.findByRole("region", { name: "快速开始" });
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    expect(screen.getByRole("dialog", { name: "快速操作" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索命令" }), { target: { value: "数据库" } });
+    fireEvent.click(screen.getByRole("option", { name: /^数据库 /u }));
+    expect(await screen.findByRole("heading", { name: "创建第一个数据库" })).toBeInTheDocument();
+  });
+
   it("exposes explicit first-run actions for creating notes, opening the create center, and editing profile", async () => {
     render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
 
@@ -394,6 +425,59 @@ describe("App product navigation", () => {
     expect(within(quickStart).getByRole("button", { name: "新建笔记" })).toBeVisible();
     expect(within(quickStart).getByRole("button", { name: "创建内容" })).toBeVisible();
     expect(within(quickStart).getByRole("button", { name: "个人资料与设置" })).toBeVisible();
+
+    const primaryNavigation = screen.getByRole("navigation", { name: "主导航" });
+    fireEvent.click(within(primaryNavigation).getByRole("button", { name: "创建中心" }));
+    expect(await screen.findByRole("dialog", { name: "创建内容" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭创建内容" }));
+    fireEvent.click(within(primaryNavigation).getByRole("button", { name: "个人资料与设置" }));
+    expect(await screen.findByRole("heading", { name: "账户中心" })).toBeInTheDocument();
+  });
+
+  it("keeps creation and account actions visible in the note-list context", async () => {
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    const context = screen.getByRole("complementary", { name: "上下文列表" });
+    expect(within(context).getAllByRole("button", { name: "新建笔记" }).length).toBeGreaterThan(0);
+    const createContent = within(context).getByRole("button", { name: "创建内容" });
+    const profile = within(context).getByRole("button", { name: "个人资料与设置（笔记列表）" });
+    expect(createContent).toBeVisible();
+    expect(profile).toBeVisible();
+
+    fireEvent.click(createContent);
+    expect(await screen.findByRole("dialog", { name: "创建内容" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭创建内容" }));
+    fireEvent.click(profile);
+    expect(await screen.findByRole("heading", { name: "账户中心" })).toBeInTheDocument();
+  });
+
+  it("opens the reminder center from the primary creation center", async () => {
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+
+    const primaryNavigation = await screen.findByRole("navigation", { name: "主导航" });
+    fireEvent.click(within(primaryNavigation).getByRole("button", { name: "创建中心" }));
+    fireEvent.click(await screen.findByRole("button", { name: "新建提醒" }));
+
+    expect(await screen.findByRole("heading", { name: "提醒中心" })).toBeInTheDocument();
+  });
+
+  it("loads workspace databases when Web Clipper opens from the notes domain", async () => {
+    const apiClient = {
+      request: vi.fn(async (request: { path: string }) => {
+        if (request.path === "/api/v2/databases") return { items: [{ id: "db-1", name: "Reading List" }] };
+        if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+        return { items: [], next_cursor: null };
+      }),
+    };
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建中心" }));
+    fireEvent.click(screen.getByRole("button", { name: "Web Clipper" }));
+    fireEvent.change(await screen.findByRole("combobox", { name: "剪藏目标" }), { target: { value: "database" } });
+
+    expect(await screen.findByRole("option", { name: "Reading List" })).toBeInTheDocument();
+    expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/databases" }));
   });
 
   it("exposes note organization controls for folder filtering and creation", async () => {
@@ -403,6 +487,35 @@ describe("App product navigation", () => {
     expect(within(organization).getByRole("button", { name: "全部文件夹" })).toBeVisible();
     expect(within(organization).getByRole("textbox", { name: "新建文件夹名称" })).toBeVisible();
     expect(within(organization).getByRole("button", { name: "创建文件夹" })).toBeVisible();
+  });
+
+  it("sends note-list search terms to the server after a short debounce", async () => {
+    const api = appApiClient();
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={api as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    const search = await screen.findByRole("textbox", { name: "搜索笔记" });
+    fireEvent.change(search, { target: { value: "计划" } });
+
+    await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: expect.stringContaining("q=%E8%AE%A1%E5%88%92"),
+    })), { timeout: 1_500 });
+  });
+
+  it("shows a search-specific empty state and supports clearing the query", async () => {
+    const api = appApiClient();
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={api as any} turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    const search = await screen.findByRole("textbox", { name: "搜索笔记" });
+    fireEvent.change(search, { target: { value: "不存在的内容" } });
+
+    expect(await screen.findByRole("button", { name: "清除笔记搜索" })).toBeVisible();
+    expect(await screen.findByText("没有找到匹配笔记。"), "the empty state should distinguish search from an empty workspace").toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "清除笔记搜索" }));
+    expect(search).toHaveValue("");
+    expect(await screen.findByText("暂无笔记，开始记录你的想法。")).toBeVisible();
   });
 
   it("lets users select a folder and create one without losing the input on success", async () => {
@@ -432,13 +545,13 @@ describe("App product navigation", () => {
     expect(screen.getByRole("heading", { name: "知识恢复" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "AI 助手" }));
-    expect(screen.getByRole("heading", { name: "AI 助手" })).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "输入问题" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "AI 助手" })).toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: "输入问题" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Public Beta 重写计划" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
-    expect(screen.getByRole("heading", { name: "账户中心" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "个人资料" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "账户中心" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "总览" })).toHaveAttribute("aria-selected", "true");
     fireEvent.click(screen.getByRole("button", { name: "账户" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "个人中心" }));
     expect(screen.getByRole("tab", { name: "个人资料" })).toHaveAttribute("aria-selected", "true");
@@ -456,14 +569,26 @@ describe("App product navigation", () => {
     expect(createButtons.some((button) => button.textContent?.includes("新建笔记"))).toBe(true);
   });
 
-  it("keeps the create center in the fixed mobile action area on the notes overview", async () => {
+  it("keeps the create center in mobile navigation without duplicating it in the floating action", async () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
     render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
 
     await screen.findByRole("region", { name: "快速开始" });
+    const navigation = screen.getByRole("navigation", { name: "移动端主导航" });
+    expect(within(navigation).getByRole("button", { name: "创建中心" })).toBeVisible();
     const mobileActionArea = document.querySelector(".mobile-create-note");
     expect(mobileActionArea).toBeInTheDocument();
-    expect(within(mobileActionArea as HTMLElement).getByRole("button", { name: "创建内容" })).toBeVisible();
+    expect(within(mobileActionArea as HTMLElement).getByRole("button", { name: "新建笔记" })).toBeVisible();
+    expect(within(mobileActionArea as HTMLElement).queryByRole("button", { name: "创建内容" })).not.toBeInTheDocument();
+  });
+
+  it("keeps direct note creation and profile actions visible in the mobile quick start", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+
+    const quickStart = await screen.findByRole("region", { name: "快速开始" });
+    expect(within(quickStart).getByRole("button", { name: /新建笔记（快速开始）/u })).toBeVisible();
+    expect(within(quickStart).getByRole("button", { name: "个人资料与设置" })).toBeVisible();
   });
 
   it("opens Quick Capture from the note list and selects the captured note", async () => {
@@ -596,6 +721,7 @@ describe("App product navigation", () => {
     };
     render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
     fireEvent.click(await screen.findByRole("button", { name: "设置" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "个人资料" }));
     await waitFor(() => expect(screen.getByLabelText("昵称")).toHaveValue("用户"));
     fireEvent.change(screen.getByLabelText("昵称"), { target: { value: "导航用户" } });
     fireEvent.click(screen.getByRole("button", { name: "保存个人资料" }));

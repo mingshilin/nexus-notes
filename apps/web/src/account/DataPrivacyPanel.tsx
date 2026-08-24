@@ -43,6 +43,8 @@ export function DataPrivacyPanel({ active = true, client, operations, activeWork
   const [exportPending, setExportPending] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportJob, setExportJob] = useState<Job | null>(null);
+  const [exportDownloadPending, setExportDownloadPending] = useState(false);
+  const [exportDownloadError, setExportDownloadError] = useState<string | null>(null);
   const [currentPassword, setCurrentPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -115,8 +117,31 @@ export function DataPrivacyPanel({ active = true, client, operations, activeWork
     setExportPending(false);
     setExportError(null);
     setExportJob(null);
+    setExportDownloadPending(false);
+    setExportDownloadError(null);
     setExportKey((current) => current?.workspaceId === activeWorkspaceId ? current : null);
   }, [activeWorkspaceId, operations]);
+
+  useEffect(() => {
+    if (!active || !operations?.getJob || !exportJob || exportJob.status === "complete" || exportJob.status === "failed" || exportJob.status === "cancelled") return undefined;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const next = await operations.getJob!(exportJob.id, controller.signal);
+        if (controller.signal.aborted || !next) return;
+        setExportJob(next);
+        if (next.status !== "complete" && next.status !== "failed" && next.status !== "cancelled") timer = window.setTimeout(() => void poll(), 1_000);
+      } catch {
+        if (!controller.signal.aborted) timer = window.setTimeout(() => void poll(), 2_000);
+      }
+    };
+    timer = window.setTimeout(() => void poll(), 500);
+    return () => {
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [active, exportJob, operations]);
 
   useLayoutEffect(() => {
     if (!deleteDialogOpen) return undefined;
@@ -193,6 +218,26 @@ export function DataPrivacyPanel({ active = true, client, operations, activeWork
     });
   };
 
+  const downloadExport = () => {
+    if (!operations?.downloadJob || !exportJob || exportJob.status !== "complete" || exportDownloadPending) return;
+    const controller = new AbortController();
+    setExportDownloadPending(true);
+    setExportDownloadError(null);
+    void operations.downloadJob(exportJob.id, controller.signal).then((blob) => {
+      if (typeof URL.createObjectURL !== "function") throw new Error("DOWNLOAD_UNAVAILABLE");
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `nexus-notes-export-${exportJob.id}.${blob.type.includes("zip") ? "zip" : "md"}`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    }).catch(() => {
+      if (mountedRef.current) setExportDownloadError("导出文件下载失败，请稍后重试。任务结果仍保留在工作区。");
+    }).finally(() => {
+      if (mountedRef.current) setExportDownloadPending(false);
+    });
+  };
+
   function closeDeleteDialog(focus: "origin" | "fallback" = "origin", preserveError = false) {
     pendingFocusRef.current = focus === "origin" ? deleteOriginRef.current : deleteHeadingRef.current;
     setDeleteDialogOpen(false);
@@ -257,9 +302,13 @@ export function DataPrivacyPanel({ active = true, client, operations, activeWork
       <section className="account-subpanel" aria-labelledby="backup-heading">
         <h3 id="backup-heading">备份与导出</h3>
         <p>未配置自动备份，可立即导出</p>
-        <button type="button" disabled={!operations || !activeWorkspaceId || exportPending} onClick={requestExport}>{exportPending ? "正在创建导出…" : exportError ? "重试导出" : exportJob ? "再次导出" : "导出全部数据"}</button>
+        <div className="account-actions">
+          <button type="button" disabled={!operations || !activeWorkspaceId || exportPending} onClick={requestExport}>{exportPending ? "正在创建导出…" : exportError ? "重试导出" : exportJob ? "再次导出" : "导出全部数据"}</button>
+          {exportJob?.status === "complete" && operations?.downloadJob ? <button type="button" disabled={exportDownloadPending} onClick={downloadExport}>{exportDownloadPending ? "正在下载…" : "下载导出文件"}</button> : null}
+        </div>
         {exportError ? <p className="account-error" role="alert">{exportError}</p> : null}
-        {exportJob ? <p className="account-status" role="status">导出任务 {exportJob.id}：{exportJob.status}</p> : null}
+        {exportDownloadError ? <p className="account-error" role="alert">{exportDownloadError}</p> : null}
+        {exportJob ? <p className="account-status" role="status">导出任务 {exportJob.id}：{exportJob.status}{exportJob.error_code ? `（${exportJob.error_code}）` : ""}</p> : null}
       </section>
       <section className="account-subpanel account-danger-zone" aria-labelledby="delete-heading">
         <h3 id="delete-heading" ref={deleteHeadingRef} tabIndex={-1}>删除账户</h3>

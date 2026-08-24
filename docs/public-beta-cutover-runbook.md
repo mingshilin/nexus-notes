@@ -95,6 +95,20 @@ The restore copy changes only `workspace_membership_epochs` inserts to `INSERT O
 
 Then rerun the migration/schema and tenant-isolation tests. For R2, first export an object manifest and copy objects to the external backup directory; verify object count, byte totals, and hashes before attempting a restore. Record the backup path, timestamp, D1 export hash, R2 manifest hash, and the restore test result. If the preview database is empty, an empty data export plus the migration version and hash is still the required evidence.
 
+### 2026-08-25 Preview Evidence
+
+- Latest valid external D1 backup: `D:\mingSL\Documents\nexus-notes-beta-backups\20260825-013125\preview-data.sql` (40,844 bytes, SHA-256 `91E93FD5019E4C0CFB732F14B2DDFE9AD0F9A909FD7693428706A8E48E9D400D`). Wrangler's raw export output is retained only in that external directory. The earlier `20260825-000706` directory is an unsuccessful empty attempt and is not release evidence.
+- Disposable local restore: `D:\mingSL\Documents\nexus-notes-restore-runtime\20260825-013125`; all 13 migrations applied before importing the prepared data copy. Post-restore counts were 8 users, 6 workspaces, 5 notes, and 1 database, and the source backup hash remained unchanged.
+- `backup-record.json` and `restore-record.json` are stored beside the external backup. The source SQL was not modified.
+- Preview D1 reported zero Beta and legacy attachment rows, so there were no R2 objects to copy for this snapshot.
+- The remote Preview D1 applied additive migrations `0010_profile_account_center.sql` through `0016_user_ai_configs.sql` successfully. `PRAGMA foreign_key_check` returned no rows; the migration list reports 16 applied migrations.
+- The online Preview now serves the latest Worker deployment `30d3304b-002a-4213-8d2f-3895eb9be493` and the current Beta asset entry `index-DZyvfsPf.js`.
+- Post-deploy online readiness passed: `/api/v2/health` reports `status=ok`, `version=preview`, and `ocr=ready`; CSP, HSTS, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, and `Permissions-Policy` are present; Markdown, OCR, and AI chunks are absent from initial preload.
+- The 390 px online public-shell browser smoke passed with no horizontal overflow or unnamed visible controls and reported `domContentLoadedMs=2266`. The bounded 32-request load gate passed at p95 `19ms`. Successful `/assets/*` responses return `public, max-age=31536000, immutable`, while HTML returns `public, max-age=0, must-revalidate`.
+- Preview secret names include `TURNSTILE_SECRET_KEY`, `RESEND_API_KEY`, and `RATE_LIMIT_SECRET`. `AI_CHAT_API_KEY` is not configured, so the real AI chat gate remains blocked until the operator supplies the provider URL, model, and key through the approved Worker variable/secret channel.
+- Wrangler deploy dry-run completed against the ignored `wrangler.preview.local.toml` without uploading: 16 asset files, Worker bundle `1,442.68 KiB` (`258.22 KiB` gzip upload total), and all Presence DO, Queue, D1, R2, Analytics Engine, Workers AI, and Assets bindings resolved. The active preview config still declares `AI_ENABLED=false`.
+- Authenticated online smoke evidence is stored only in the external Chrome profile and the release test output; the temporary acceptance account was cleaned up. Do not record the reset token, password, verification code, cookie, or profile inside the repository.
+
 ## Cutover Gate
 
 Before any production write, migration, session rotation, secret change, or domain route change, obtain a separate explicit confirmation. The confirmation must name the backup, restore result, target deployment, target D1/R2 bindings, maintenance window, and rollback owner.

@@ -80,6 +80,34 @@ describe("KnowledgeRecoveryPanel", () => {
     expect(screen.getByText("暂无附件或待处理诊断。")).toBeInTheDocument();
   });
 
+  it("exposes batch knowledge actions next to the diagnostics list", async () => {
+    const { KnowledgeRecoveryPanel } = await import("../src/knowledge/KnowledgeRecoveryPanel");
+    const onClassifyUnfiled = vi.fn();
+    const props = {
+      attachments: [],
+      diagnostics: [{ kind: "unfiled_note", entity_id: "note-1", title: "未整理笔记", count: 1 }],
+      folders: [{ id: "folder-1", workspace_id: "ws-1", name: "项目", position: 0, created_at: "2026-08-24T00:00:00.000Z", updated_at: "2026-08-24T00:00:00.000Z" }],
+      filters: { mimeType: "", ocrStatus: "" },
+      loading: false,
+      refreshing: false,
+      onClassifyUnfiled,
+      onMoveOrphansToInbox: vi.fn(),
+      onIgnoreOrphans: vi.fn(),
+      onMergeDuplicate: vi.fn(),
+      onRetry: vi.fn(),
+      onBatchRetry: vi.fn(),
+      onRecover: vi.fn(),
+      onFiltersChange: vi.fn(),
+      onLoadMoreAttachments: vi.fn(),
+      onLoadMoreDiagnostics: vi.fn(),
+    };
+
+    render(<KnowledgeRecoveryPanel {...props} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "未整理笔记目标文件夹" }), { target: { value: "folder-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "批量归类未整理笔记" }));
+    expect(onClassifyUnfiled).toHaveBeenCalledWith("folder-1");
+  });
+
   it("exposes a file picker and forwards a selected attachment for upload", async () => {
     const { KnowledgeRecoveryPanel } = await import("../src/knowledge/KnowledgeRecoveryPanel");
     const onUpload = vi.fn();
@@ -109,6 +137,8 @@ describe("KnowledgeRecoveryPanel", () => {
     expect(css).toMatch(/\.knowledge-recovery\s*\{[^}]*min-width:\s*0/);
     expect(css).toMatch(/\.knowledge-recovery-filters\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit, minmax\(0, 1fr\)\)/);
     expect(css).toMatch(/\.knowledge-filter select\s*\{[^}]*width:\s*100%/);
+    expect(css).toMatch(/\.knowledge-diagnostic-actions\s*\{[^}]*min-width:\s*0/);
+    expect(css).toMatch(/\.knowledge-diagnostic-action-controls\s*\{[^}]*display:\s*flex/);
     expect(css).toMatch(/@media \(max-width: 767px\)[\s\S]*\.knowledge-recovery-heading, \.knowledge-recovery-row\s*\{[^}]*flex-wrap:\s*wrap/);
     expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.knowledge-recovery \*/);
   });

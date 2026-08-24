@@ -88,6 +88,50 @@ describe("KnowledgeClient", () => {
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
   });
 
+  it("caches reminder pages for one minute and invalidates them after snooze or delete", async () => {
+    const data = await loadData();
+    let now = 1_000;
+    const api = { request: vi.fn(async ({ method }: { method?: string }) => method === "DELETE"
+      ? { deleted: true }
+      : method === "POST" ? { reminder: { id: "reminder-1" } }
+        : { items: [], next_cursor: null }) };
+    const client = new data.KnowledgeClient(api, "ws-1", { createId: () => "operation-1", now: () => now });
+
+    await client.listReminderPage({ status: "all", query: "review", limit: 25 });
+    await client.listReminderPage({ status: "all", query: "review", limit: 25 });
+    expect(api.request).toHaveBeenCalledTimes(1);
+
+    now += 60_001;
+    await client.listReminderPage({ status: "all", query: "review", limit: 25 });
+    await client.snoozeReminder("reminder-1", { base_revision: 1, minutes: 10 });
+    await client.listReminderPage({ status: "all", query: "review", limit: 25 });
+    await client.deleteReminder("reminder-1", { base_revision: 2 });
+
+    expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET"])).toEqual([
+      ["/api/v2/reminders?status=all&query=review&limit=25", "GET"],
+      ["/api/v2/reminders?status=all&query=review&limit=25", "GET"],
+      ["/api/v2/reminders/reminder-1/snooze", "POST"],
+      ["/api/v2/reminders?status=all&query=review&limit=25", "GET"],
+      ["/api/v2/reminders/reminder-1", "DELETE"],
+    ]);
+  });
+
+  it("loads a bounded workspace calendar feed with a cancellable query", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ items: [] })) };
+    const client = new data.KnowledgeClient(api, "ws-1");
+    const controller = new AbortController();
+
+    await client.getCalendarFeed({ from: "2026-08-01", to: "2026-08-31" }, controller.signal);
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/calendar/feed?from=2026-08-01&to=2026-08-31",
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: expect.objectContaining({ retry: 2, signal: controller.signal }),
+    }));
+  });
+
   it("maps workspace-scoped attachment filters, retry actions, and diagnostics recovery queries", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async () => ({ items: [], next_cursor: null, queued: [], ineligible: [], duplicate: [], attachment: { id: "attachment-1" }, deleted: true })) };

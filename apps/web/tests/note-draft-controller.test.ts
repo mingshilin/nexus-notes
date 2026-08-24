@@ -56,6 +56,47 @@ const serverNote = (overrides: Partial<{ id: string; title: string; content: str
 });
 
 describe("NoteDraftController", () => {
+  it("rebases a local conflict patch onto the latest server revision", async () => {
+    const store = createStore();
+    const base = serverNote({ id: "server-1", title: "旧服务器标题", content: "旧服务器正文", revision: 2 });
+    await store.saveDraft({
+      workspace_id: "ws-1", entity_id: "local-1", title: "本地标题", content: "本地正文", updated_at: "2026-08-24T00:00:00.000Z",
+      draft_generation: 4, next_patch_generation: 8, server_note: base, server_note_id: base.id, server_revision: base.revision,
+      pending_patch: { key: "local-1:patch:7", generation: 7, base_revision: 2, title: "本地标题", content: "本地正文", source: "manual" },
+    });
+    const latest = serverNote({ id: "server-1", title: "远程标题", content: "远程正文", revision: 6 });
+    const controller = new NoteDraftController(store);
+
+    const resolved = await controller.resolveConflict("ws-1", "local-1", "local", latest);
+
+    expect(resolved).toMatchObject({
+      server_note: latest,
+      pending_patch: { key: "local-1:patch:8", generation: 8, base_revision: 6, title: "本地标题", content: "本地正文" },
+      next_patch_generation: 9,
+    });
+  });
+
+  it("adopts the latest server revision and clears the local conflict patch", async () => {
+    const store = createStore();
+    const latest = serverNote({ id: "server-1", title: "远程标题", content: "远程正文", revision: 6 });
+    await store.saveDraft({
+      workspace_id: "ws-1", entity_id: "local-1", title: "本地标题", content: "本地正文", updated_at: "2026-08-24T00:00:00.000Z",
+      draft_generation: 4, next_patch_generation: 8, server_note: serverNote({ id: "server-1", revision: 2 }), server_note_id: "server-1", server_revision: 2,
+      pending_patch: { key: "local-1:patch:7", generation: 7, base_revision: 2, title: "本地标题", content: "本地正文", source: "manual" },
+    });
+    const controller = new NoteDraftController(store);
+
+    const resolved = await controller.resolveConflict("ws-1", "local-1", "server", latest);
+
+    expect(resolved).toMatchObject({
+      title: "远程标题",
+      content: "远程正文",
+      server_note: latest,
+      server_revision: 6,
+    });
+    expect(resolved?.pending_patch).toBeUndefined();
+  });
+
   it("keeps a newer shared-store PATCH intent when an older controller response resolves last", async () => {
     const store = createStore();
     const base = serverNote({ id: "server-1", title: "Base", content: "Base body", revision: 1 });

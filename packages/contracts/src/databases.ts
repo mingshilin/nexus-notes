@@ -396,6 +396,35 @@ export const CsvImportInputSchema = z.object({
 }).strict();
 export type CsvImportInput = z.infer<typeof CsvImportInputSchema>;
 
+export const CsvPreviewErrorSchema = z.object({
+  row_number: z.number().int().min(2),
+  code: z.string().min(1).max(128),
+  message: z.string().min(1).max(500),
+}).strict();
+export const CsvPreviewSchema = z.object({
+  headers: z.array(z.string().max(160)).max(100),
+  rows: z.array(z.object({
+    row_number: z.number().int().min(2),
+    values: PropertyValuesSchema,
+  }).strict()).max(100),
+  errors: z.array(CsvPreviewErrorSchema).max(100),
+  total_rows: z.number().int().nonnegative(),
+}).strict();
+export type CsvPreview = z.infer<typeof CsvPreviewSchema>;
+
+export const DatabaseStatsSchema = z.object({
+  record_count: z.number().int().nonnegative(),
+  property_count: z.number().int().nonnegative(),
+  view_count: z.number().int().nonnegative(),
+  template_count: z.number().int().nonnegative(),
+  comment_count: z.number().int().nonnegative(),
+  updated_at: TimestampSchema,
+  role: DatabasePermissionRoleSchema,
+  database_permission_count: z.number().int().nonnegative().nullable(),
+  field_permission_count: z.number().int().nonnegative().nullable(),
+}).strict();
+export type DatabaseStats = z.infer<typeof DatabaseStatsSchema>;
+
 export const CsvExportInputSchema = z.object({
   property_ids: z.array(EntityIdSchema).min(1).max(100),
   cursor: z.string().trim().min(1).nullable().default(null),

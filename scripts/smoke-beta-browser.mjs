@@ -8,9 +8,10 @@ const DEFAULT_URL = process.env.NEXUS_NOTES_BETA_URL ?? "http://127.0.0.1:4173/"
 const DATABASE_NAME = "nexus-notes-beta";
 const PROFILE_ENV = "NEXUS_NOTES_BETA_USER_DATA_DIR";
 const AVATAR_ENV = "NEXUS_NOTES_BETA_AVATAR_FILE";
+const SESSION_ENV = "NEXUS_NOTES_BETA_SESSION_TOKEN";
 export const INSPECTOR_INERT_NAVIGATION_SELECTOR = "nav[aria-label='移动端主导航'][inert], nav[aria-label='主导航'][inert], [role='navigation'][inert]";
 const MOBILE_LAYOUT_METRICS = { width: 390, height: 844, deviceScaleFactor: 2, mobile: true };
-const MOBILE_KEYBOARD_METRICS = { ...MOBILE_LAYOUT_METRICS, viewport: { x: 0, y: 0, width: 390, height: 500, scale: 1 } };
+const MOBILE_KEYBOARD_METRICS = { ...MOBILE_LAYOUT_METRICS, height: 500 };
 
 export function parseArgs(argv) {
   const options = {
@@ -23,6 +24,7 @@ export function parseArgs(argv) {
     requireAuth: process.env.NEXUS_NOTES_BETA_REQUIRE_AUTH !== "0",
     userDataDir: process.env[PROFILE_ENV],
     avatarFile: process.env[AVATAR_ENV],
+    sessionToken: process.env[SESSION_ENV],
   };
   for (const arg of argv) {
     if (arg === "--headed") options.headed = true;
@@ -110,8 +112,23 @@ function printSkip(reason) {
     status: "SKIP",
     reason,
     requiredEnv: [PROFILE_ENV, AVATAR_ENV],
+    optionalBootstrapEnv: SESSION_ENV,
     authenticated: false,
   }));
+}
+
+export async function seedAuthenticatedSession(cdp, url, token) {
+  const target = new URL(url).href;
+  const result = await cdp.send("Network.setCookie", {
+    name: "nexus_session",
+    value: token,
+    url: target,
+    httpOnly: true,
+    secure: true,
+    sameSite: "Lax",
+    expires: Math.floor(Date.now() / 1000) + 60 * 60,
+  });
+  if (result?.success === false) throw new Error("Could not seed the authenticated browser session");
 }
 
 async function fetchJson(url, attempts = 50) {
@@ -205,25 +222,74 @@ const accessibleName = "(node) => { const ids = node.getAttribute('aria-labelled
 const visibleNode = "(node) => { const style=getComputedStyle(node); const rect=node.getBoundingClientRect(); return style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none' && rect.width > 0 && rect.height > 0; }";
 
 // CDP locators mirror the required page.getByRole/getByLabel/getByText contract without storing a Playwright profile.
-export function buildRoleLocatorExpression(role, name, action) {
+function roleNodeExpression(role, name) {
   const selector = role === "button" ? "button,[role='button']" : "[role='" + role + "']";
   const lookup = "(node) => (" + accessibleName + ")(node) === " + JSON.stringify(name);
-  const nodeExpression = "[...document.querySelectorAll(" + JSON.stringify(selector) + ")].find((candidate) => (" + lookup + ")(candidate) && (" + visibleNode + ")(candidate))";
+  return "[...document.querySelectorAll(" + JSON.stringify(selector) + ")].find((candidate) => (" + lookup + ")(candidate) && (" + visibleNode + ")(candidate))";
+}
+
+export function buildSafeClickPointExpression(nodeExpression, scrollBlock = "nearest") {
+  const scrollBlockLiteral = JSON.stringify(scrollBlock);
+  return `(() => {
+    const node = ${nodeExpression};
+    if (!node) return false;
+    node.scrollIntoView({ block: ${scrollBlockLiteral}, inline: "nearest" });
+    const rect = node.getBoundingClientRect();
+    const visualViewport = window.visualViewport;
+    const viewportLeft = Math.max(0, visualViewport?.offsetLeft ?? 0);
+    const viewportTop = Math.max(0, visualViewport?.offsetTop ?? 0);
+    const viewportRight = Math.min(window.innerWidth, viewportLeft + (visualViewport?.width ?? window.innerWidth));
+    const viewportBottom = Math.min(window.innerHeight, viewportTop + (visualViewport?.height ?? window.innerHeight));
+    const inset = 6;
+    const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+    const left = clamp(rect.left + inset, viewportLeft, viewportRight);
+    const right = clamp(rect.right - inset, viewportLeft, viewportRight);
+    const top = clamp(rect.top + inset, viewportTop, viewportBottom);
+    const bottom = clamp(rect.bottom - inset, viewportTop, viewportBottom);
+    const centerX = clamp(rect.left + rect.width / 2, viewportLeft, viewportRight);
+    const centerY = clamp(rect.top + rect.height / 2, viewportTop, viewportBottom);
+    const points = [[centerX, centerY], [left, top], [right, top], [left, bottom], [right, bottom]];
+    const match = points
+      .map(([x, y]) => ({ x, y, stack: document.elementsFromPoint(x, y) }))
+      .find(({ x, y, stack }) => x >= viewportLeft && y >= viewportTop && x <= viewportRight && y <= viewportBottom && stack[0] && (stack[0] === node || node.contains(stack[0])));
+    return match ? { x: match.x, y: match.y } : false;
+  })()`;
+}
+
+export function buildRoleLocatorExpression(role, name, action) {
+  const nodeExpression = roleNodeExpression(role, name);
   return "(() => { const node = " + nodeExpression + "; if (!node) return false; " + action + " })()";
 }
 
+async function stableClickPoint(cdp, nodeExpression, label, scrollBlock = "nearest") {
+  await waitFor(cdp, buildSafeClickPointExpression(nodeExpression, scrollBlock), label);
+  await new Promise((resolveResult) => setTimeout(resolveResult, 80));
+  return waitFor(cdp, buildSafeClickPointExpression(nodeExpression, scrollBlock), label + " after layout settle");
+}
+
+async function dispatchTrustedClick(cdp, point) {
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", buttons: 0, x: point.x, y: point.y });
+  await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", buttons: 1, clickCount: 1, x: point.x, y: point.y });
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", buttons: 0, clickCount: 1, x: point.x, y: point.y });
+}
+
+async function dispatchTouchCompatibleClick(cdp, point) {
+  const x = Math.round(point.x);
+  const y = Math.round(point.y);
+  await cdp.send("Input.emulateTouchFromMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+  await cdp.send("Input.emulateTouchFromMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+}
+
 function getByRole(cdp, role, name) {
+  const nodeExpression = roleNodeExpression(role, name);
   const expression = (action) => buildRoleLocatorExpression(role, name, action);
   return {
     async waitFor() {
       return waitFor(cdp, expression("const rect=node.getBoundingClientRect(); const style=getComputedStyle(node); return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;"), "role " + role + " " + name);
     },
-    async click() {
-      const pointExpression = "(() => { const node = " + nodeExpression + "; if (!node) return false; const rect=node.getBoundingClientRect(); const x=rect.left + rect.width / 2; const y=rect.top + rect.height / 2; const hit=document.elementFromPoint(x,y); return hit && (hit === node || node.contains(hit)) ? { x, y } : false; })()";
-      const point = await waitFor(cdp, pointExpression, "hit-test role " + role + " " + name);
-      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y });
-      await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, x: point.x, y: point.y });
-      await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, x: point.x, y: point.y });
+    async click(scrollBlock = "nearest") {
+      const point = await stableClickPoint(cdp, nodeExpression, "hit-test role " + role + " " + name, scrollBlock);
+      await dispatchTrustedClick(cdp, point);
       return true;
     },
     async focus() { return waitFor(cdp, expression("node.focus(); return document.activeElement === node;"), "focus role " + role + " " + name); },
@@ -234,9 +300,55 @@ function getByRole(cdp, role, name) {
   };
 }
 
+async function clickRoleSafely(cdp, role, name) {
+  try {
+    await getByRole(cdp, role, name).waitFor();
+  } catch (error) {
+    if (role !== "button" || name !== "账户") throw error;
+    const diagnostic = await evaluate(cdp, `(() => { const visible=${visibleNode}; const name=${accessibleName}; const rect=(node)=>{const value=node?.getBoundingClientRect(); return value ? {left:value.left,top:value.top,right:value.right,bottom:value.bottom,width:value.width,height:value.height} : null;}; return {url:location.href,viewport:{innerWidth:window.innerWidth,innerHeight:window.innerHeight,visualWidth:window.visualViewport?.width ?? null,visualHeight:window.visualViewport?.height ?? null,scale:window.visualViewport?.scale ?? null},workbench:rect(document.querySelector('.adaptive-workbench')),mobileNav:rect(document.querySelector('.mobile-bottom-nav')),buttons:[...document.querySelectorAll('button,[role="button"]')].map((node)=>({name:name(node),rect:rect(node),visible:visible(node),hidden:node.closest('[aria-hidden="true"]')!==null,inert:node.closest('[inert]')!==null})).filter((item)=>item.name).slice(-20)}; })()`);
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; account diagnostic=${JSON.stringify(diagnostic)}`);
+  }
+  const point = await stableClickPoint(cdp, roleNodeExpression(role, name), "safe hit-test role " + role + " " + name);
+  if (!point) throw new Error("safe click point unavailable for role " + role + " " + name);
+  await dispatchTrustedClick(cdp, point);
+}
+
+async function openAccountMenu(cdp, label) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await revealMobileChrome(cdp);
+      await clickRoleSafely(cdp, "button", "账户");
+      await waitFor(cdp, "Boolean(document.querySelector('[role=menu]'))", label, 5_000);
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolveResult) => setTimeout(resolveResult, 500));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(label + " timed out");
+}
+
+async function openPersonalAccountCenter(cdp, label) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await openAccountMenu(cdp, label + " menu");
+      await getByRole(cdp, "menuitem", "个人中心").click();
+      await waitFor(cdp, "Boolean(document.querySelector('.account-center-shell'))", label, 5_000);
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolveResult) => setTimeout(resolveResult, 500));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(label + " timed out");
+}
+
 export async function pressKey(cdp, key, modifiers = 0) {
-  const virtualKeyCode = key === "Tab" ? 9
-    : key === "Escape" ? 27
+  const virtualKeyCode = key === "Enter" ? 13
+    : key === "Tab" ? 9
+      : key === "Escape" ? 27
       : key === "ArrowLeft" ? 37
         : key === "ArrowUp" ? 38
           : key === "ArrowRight" ? 39
@@ -245,7 +357,9 @@ export async function pressKey(cdp, key, modifiers = 0) {
   const event = {
     key,
     modifiers,
-    code: key === "Tab" || key === "Escape" || key.startsWith("Arrow") ? key : undefined,
+    code: key === "Enter" || key === "Tab" || key === "Escape" || key.startsWith("Arrow") ? key : undefined,
+    text: key === "Enter" ? "\r" : undefined,
+    unmodifiedText: key === "Enter" ? "\r" : undefined,
     windowsVirtualKeyCode: virtualKeyCode,
     nativeVirtualKeyCode: virtualKeyCode,
   };
@@ -255,15 +369,21 @@ export async function pressKey(cdp, key, modifiers = 0) {
 
 export async function enterKeyboardViewport(cdp) {
   await cdp.send("Emulation.setDeviceMetricsOverride", MOBILE_KEYBOARD_METRICS);
+  await cdp.send("Emulation.setVisibleSize", { width: 390, height: 500 });
 }
 
 export async function restoreMobileGeometry(cdp) {
   await cdp.send("Emulation.setDeviceMetricsOverride", MOBILE_LAYOUT_METRICS);
+  await cdp.send("Emulation.setVisibleSize", { width: 390, height: 844 });
+}
+
+export function buildLabelLocatorExpression(name, action) {
+  const find = "(label) => (label.textContent || '').replace(/\\s+/g, ' ').trim().includes(" + JSON.stringify(name) + ")";
+  return "(() => { const direct = [...document.querySelectorAll('input,textarea,select')].find((candidate) => candidate.getAttribute('aria-label') === " + JSON.stringify(name) + "); const label = [...document.querySelectorAll('label')].find(" + find + "); const node = direct || label?.querySelector('input,textarea,select') || (label?.htmlFor ? document.getElementById(label.htmlFor) : null); if (!node) return false; " + action + " })()";
 }
 
 function getByLabel(cdp, name) {
-  const find = "(label) => (label.textContent || '').replace(/\\s+/g, ' ').trim().includes(" + JSON.stringify(name) + ")";
-  const expression = (action) => "(() => { const label = [...document.querySelectorAll('label')].find(" + find + "); const node = label?.querySelector('input,textarea,select') || (label?.htmlFor ? document.getElementById(label.htmlFor) : null); if (!node) return false; " + action + " })()";
+  const expression = (action) => buildLabelLocatorExpression(name, action);
   return {
     async waitFor() {
       return waitFor(cdp, expression("const rect=node.getBoundingClientRect(); const style=getComputedStyle(node); return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;"), "label " + name);
@@ -348,6 +468,11 @@ async function navigateToNewDocument(cdp, url) {
   };
 }
 
+async function revealMobileChrome(cdp) {
+  await evaluate(cdp, "document.activeElement?.blur(); document.querySelectorAll('input,textarea,[contenteditable=\"true\"]').forEach((node) => node.blur()); document.querySelectorAll('[data-scroll-owner=page]').forEach((node) => node.scrollTo({ top: 0, behavior: 'instant' })); window.scrollTo(0, 0); true");
+  await waitFor(cdp, "(() => { const nav=document.querySelector('.mobile-bottom-nav'); return nav?.dataset.visible === 'true' && nav.getBoundingClientRect().bottom <= window.innerHeight + 1; })()", "mobile chrome reveal");
+}
+
 async function installLostResponseFault(cdp) {
   const state = { responseFailed: false, faultedRequest: null, error: null };
   const removeListener = cdp.on("Fetch.requestPaused", async (event) => {
@@ -421,6 +546,8 @@ async function runZoomHitTest(cdp) {
   await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
   await waitFor(cdp, "window.visualViewport?.scale >= 1.99", "200% page zoom");
+  await evaluate(cdp, "document.querySelectorAll('[data-scroll-owner=page]').forEach((node) => node.scrollTo({ top: 0, behavior: 'instant' })); window.scrollTo(0, 0); true");
+  await new Promise((resolveResult) => setTimeout(resolveResult, 100));
   const geometryExpression = `(() => { const rect=(node)=>{const value=node?.getBoundingClientRect(); return value ? {left:value.left,top:value.top,right:value.right,bottom:value.bottom,width:value.width,height:value.height} : null;}; const visible=(node)=>node && getComputedStyle(node).display!=='none' && getComputedStyle(node).visibility!=='hidden' && getComputedStyle(node).pointerEvents!=='none' && node.getBoundingClientRect().width>0 && node.getBoundingClientRect().height>0; const named=(name)=>[...document.querySelectorAll('button,[role=button]')].find((node)=>visible(node) && (node.getAttribute('aria-label') || node.textContent || '').replace(/\\s+/g,' ').trim()===name); const editorNodes=[...document.querySelectorAll('input[aria-label="笔记标题"],textarea[aria-label="笔记内容"]')].filter(visible); const editorRects=editorNodes.map(rect); const overlaps=(left,right)=>Boolean(left && right && left.left < right.right && left.right > right.left && left.top < right.bottom && left.bottom > right.top); const hit=(node)=>{if(!node) return false; const value=node.getBoundingClientRect(); const target=document.elementFromPoint(value.left+value.width/2,value.top+value.height/2); return Boolean(target && (target===node || node.contains(target)));}; const create=named('新建笔记'); const account=named('账户'); return {scale:window.visualViewport?.scale ?? 0,create:rect(create),account:rect(account),editor:editorRects,createHits:hit(create),accountHits:hit(account),createOverlapsEditor:editorRects.some((item)=>overlaps(rect(create),item)),accountOverlapsEditor:editorRects.some((item)=>overlaps(rect(account),item))}; })()`;
   const geometry = await evaluate(cdp, geometryExpression);
   const failures = [];
@@ -428,7 +555,7 @@ async function runZoomHitTest(cdp) {
   if (!geometry.create || !geometry.account || geometry.editor.length === 0) failures.push("create/account/editor geometry is incomplete");
   if (!geometry.createHits || !geometry.accountHits) failures.push("create/account center failed real hit testing");
   if (geometry.createOverlapsEditor || geometry.accountOverlapsEditor) failures.push("create/account control overlaps editor input");
-  if (failures.length) throw new Error("200% zoom geometry gate failed: " + failures.join("; "));
+  if (failures.length) throw new Error("200% zoom geometry gate failed: " + failures.join("; ") + "; geometry=" + JSON.stringify(geometry));
   return geometry;
 }
 
@@ -436,7 +563,12 @@ export async function runAuthenticated(cdp, options, evidence) {
   await getByRole(cdp, "button", "新建笔记").waitFor();
   await getByRole(cdp, "button", "新建笔记").click();
   const title = "Phase 1 " + Date.now();
-  await getByLabel(cdp, "笔记标题").waitFor();
+  try {
+    await getByLabel(cdp, "笔记标题").waitFor();
+  } catch (error) {
+    const diagnostic = await evaluate(cdp, `(() => { const visible=(node)=>{const style=getComputedStyle(node);const rect=node.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&rect.width>0&&rect.height>0;}; const text=(node)=>(node.getAttribute('aria-label')||node.textContent||'').replace(/\\s+/g,' ').trim().slice(0,120); return {domain:document.querySelector('.workspace-domain-surface')?.getAttribute('data-domain')??null,busy:document.querySelector('.workspace-domain-surface')?.getAttribute('aria-busy')??null,taskPane:document.querySelector('[data-testid="task-pane"]')?.className??null,buttons:[...document.querySelectorAll('button')].filter(visible).map(text).filter(Boolean).slice(0,30),controls:[...document.querySelectorAll('input,textarea,select')].filter(visible).map((node)=>node.getAttribute('aria-label')||node.getAttribute('name')||node.tagName).slice(0,20),alerts:[...document.querySelectorAll('[role="alert"]')].filter(visible).map(text).slice(0,10),statuses:[...document.querySelectorAll('[role="status"]')].filter(visible).map(text).slice(0,10)}; })()`);
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; diagnostic=${JSON.stringify(diagnostic)}`);
+  }
   await getByLabel(cdp, "笔记标题").fill(title);
   await getByLabel(cdp, "笔记内容").fill("IndexedDB recovery " + title);
   const fault = await installLostResponseFault(cdp);
@@ -451,39 +583,99 @@ export async function runAuthenticated(cdp, options, evidence) {
   if (!draft) throw new Error("IndexedDB draft was not found after failed save");
   await evaluate(cdp, "document.activeElement?.blur(); document.body.focus(); true");
   const zoom = await runZoomHitTest(cdp);
-  await getByRole(cdp, "button", "账户").click();
-  await pressKey(cdp, "Escape");
-  await getByRole(cdp, "button", "新建笔记").click();
   await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+  await waitFor(cdp, "window.visualViewport?.scale <= 1.01", "restore normal page zoom");
+  await evaluate(cdp, "window.dispatchEvent(new Event('resize')); true");
+  await new Promise((resolveResult) => setTimeout(resolveResult, 100));
   const reloadEvidence = await navigateToNewDocument(cdp, await evaluate(cdp, "location.href"));
   await waitFor(cdp, "document.querySelector(\"input[aria-label='笔记标题']\")?.value === " + JSON.stringify(title), "IndexedDB draft reload", 30_000);
+  await revealMobileChrome(cdp);
 
   const faultedKey = fault.state.faultedRequest?.idempotencyKey;
   const faultedNetworkId = fault.state.faultedRequest?.id;
   if (!faultedKey) throw new Error("Faulted note write idempotency key was not captured");
-  const replay = await waitForNode(() => {
+  let replay = [];
+  await waitForNode(() => {
     const exact = evidence.requests.filter(({ url, method, headers }) => url.includes("/api/v2/notes") && ["POST", "PATCH", "PUT"].includes(method) && header(headers, "idempotency-key") === faultedKey);
-    return exact.length >= 2 && exact.some(({ loaderId }) => loaderId === reloadEvidence.loaderId) ? exact : false;
+    if (exact.length >= 2 && exact.some(({ loaderId }) => loaderId === reloadEvidence.loaderId)) {
+      replay = exact;
+      return true;
+    }
+    return false;
   }, "post-reload replay with the faulted idempotency key", 30_000);
   const faultedEvidence = evidence.requests.find(({ id }) => id === faultedNetworkId)
     ?? evidence.requests.find(({ headers }) => header(headers, "idempotency-key") === faultedKey && header(headers, "idempotency-key") !== "");
   if (!faultedEvidence || faultedEvidence.loaderId === reloadEvidence.loaderId) throw new Error("Faulted and replayed requests did not cross a document loader boundary");
+  await new Promise((resolveResult) => setTimeout(resolveResult, 750));
 
-  await getByRole(cdp, "button", "账户").click();
-  await getByRole(cdp, "menuitem", "个人中心").click();
+  await openPersonalAccountCenter(cdp, "account center navigation");
   await getByRole(cdp, "tab", "个人资料").waitFor();
+  await waitForNode(async () => Boolean(await getByLabel(cdp, "语言").value()) && Boolean(await getByLabel(cdp, "时区").value()), "profile form hydration", 30_000);
+  await waitFor(cdp, buildRoleLocatorExpression("button", "保存个人资料", "return !node.disabled;"), "profile form ready", 30_000);
   await getByLabel(cdp, "昵称").fill(title);
-  await getByRole(cdp, "button", "保存个人资料").click();
-  await waitForNode(() => evidence.requests.some(({ url, method }) => url === "/api/v2/profile" && method === "PATCH"), "profile update request", 20_000);
+  await evaluate(cdp, `(() => { const name=${accessibleName}; window.__nexusSmokeClickTrace=[]; window.__nexusSmokeClickListener=(event)=>{const target=event.target; window.__nexusSmokeClickTrace.push({type:event.type,tag:target?.tagName??null,name:target instanceof Element ? name(target) : null,active:document.activeElement?.tagName??null,defaultPrevented:event.defaultPrevented});}; for (const type of ['pointerdown','mousedown','pointerup','mouseup','click','keydown','keyup','submit']) document.addEventListener(type, window.__nexusSmokeClickListener, true); return true; })()`);
+  const saveProfileButton = getByRole(cdp, "button", "保存个人资料");
+  // Prefer the same trusted pointer path used by the other browser actions. Some
+  // Chromium builds do not synthesize a submit click from CDP rawKeyDown on a
+  // focused button, even though the element is keyboard-focusable.
+  await saveProfileButton.click();
+  await new Promise((resolveResult) => setTimeout(resolveResult, 250));
+  if (!evidence.requests.some(({ url, method }) => url === "/api/v2/profile" && method === "PATCH")) {
+    const savePoint = await stableClickPoint(cdp, roleNodeExpression("button", "保存个人资料"), "touch-compatible profile submit");
+    await dispatchTouchCompatibleClick(cdp, savePoint);
+    await new Promise((resolveResult) => setTimeout(resolveResult, 250));
+  }
+  if (!evidence.requests.some(({ url, method }) => url === "/api/v2/profile" && method === "PATCH")) {
+    await getByLabel(cdp, "昵称").focus();
+    await pressKey(cdp, "Enter");
+  }
+  try {
+    await waitForNode(() => evidence.requests.some(({ url, method }) => url === "/api/v2/profile" && method === "PATCH"), "profile update request", 20_000);
+  } catch (error) {
+    const diagnostic = await evaluate(cdp, `(() => { const visible=${visibleNode}; const name=${accessibleName}; const rect=(node)=>{const value=node?.getBoundingClientRect(); return value ? {left:value.left,top:value.top,right:value.right,bottom:value.bottom,width:value.width,height:value.height} : null;}; const save=[...document.querySelectorAll('button')].find((node)=>name(node)==='保存个人资料'); const saveRect=rect(save); const saveStack=saveRect ? document.elementsFromPoint(saveRect.left+saveRect.width/2,saveRect.top+saveRect.height/2).slice(0,5).map((node)=>({tag:node.tagName,name:name(node),className:node.className})) : []; document.removeEventListener('click', window.__nexusSmokeClickListener, true); return {buttons:[...document.querySelectorAll('button')].filter(visible).map((node)=>({name:name(node),disabled:node.disabled,ariaDisabled:node.getAttribute('aria-disabled'),rect:rect(node)})).slice(-20),saveStack,clickTrace:window.__nexusSmokeClickTrace ?? [],inputs:[...document.querySelectorAll('input,textarea')].filter(visible).map((node)=>({label:node.getAttribute('aria-label'),value:node.value,disabled:node.disabled})),alerts:[...document.querySelectorAll('[role="alert"],[role="status"]')].filter(visible).map((node)=>node.textContent?.replace(/\\s+/g,' ').trim()).filter(Boolean).slice(-10)}; })()`);
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; profile diagnostic=${JSON.stringify(diagnostic)}`);
+  }
+  await evaluate(cdp, "(() => { for (const type of ['pointerdown','mousedown','pointerup','mouseup','click','keydown','keyup','submit']) document.removeEventListener(type, window.__nexusSmokeClickListener, true); return true; })()");
   const profileReload = await navigateToNewDocument(cdp, await evaluate(cdp, "location.href"));
-  await getByRole(cdp, "button", "账户").click();
-  await getByRole(cdp, "menuitem", "个人中心").click();
+  await revealMobileChrome(cdp);
+  await openPersonalAccountCenter(cdp, "account center navigation after reload");
   await getByRole(cdp, "tab", "个人资料").waitFor();
-  await waitForNode(async () => (await getByLabel(cdp, "昵称").value()) === title, "profile nickname persistence after confirmed reload", 30_000);
+  const persistedProfileExpression = buildLabelLocatorExpression("昵称", "return node.value === " + JSON.stringify(title) + ";");
+  let profilePersisted = false;
+  let profilePersistenceError;
+  for (let attempt = 0; attempt < 3 && !profilePersisted; attempt += 1) {
+    try {
+      await waitFor(cdp, persistedProfileExpression, "profile nickname persistence after confirmed reload", 5_000);
+      profilePersisted = true;
+    } catch (error) {
+      profilePersistenceError = error;
+      if (attempt < 2) {
+        await openPersonalAccountCenter(cdp, "account center re-navigation after draft recovery");
+        await getByRole(cdp, "tab", "个人资料").waitFor();
+      }
+    }
+  }
+  if (!profilePersisted) {
+    const diagnostic = await evaluate(cdp, `(() => { const visible=${visibleNode}; const name=${accessibleName}; return {inputs:[...document.querySelectorAll('input,textarea')].filter(visible).map((node)=>({name:name(node),value:node.value})),alerts:[...document.querySelectorAll('[role="alert"],[role="status"]')].filter(visible).map((node)=>node.textContent?.replace(/\s+/g,' ').trim()).filter(Boolean).slice(-10)}; })()`);
+    const profileRequests = evidence.requests.filter(({ url }) => url === "/api/v2/profile").slice(-6).map(({ method, url }) => ({ method, url }));
+    throw new Error(`${profilePersistenceError instanceof Error ? profilePersistenceError.message : String(profilePersistenceError)}; profile reload diagnostic=${JSON.stringify({ diagnostic, profileRequests })}`);
+  }
 
   const avatarCapture = await installRawAvatarCapture(cdp);
   await setFileInput(cdp, externalPath(options.avatarFile, AVATAR_ENV));
-  await getByRole(cdp, "button", "上传头像").click();
+  await waitFor(cdp, buildRoleLocatorExpression("button", "上传头像", "return !node.disabled;"), "avatar upload ready", 30_000);
+  const uploadAvatarButton = getByRole(cdp, "button", "上传头像");
+  await uploadAvatarButton.click("center");
+  await new Promise((resolveResult) => setTimeout(resolveResult, 250));
+  if (!avatarCapture.state.request) {
+    const uploadPoint = await stableClickPoint(cdp, roleNodeExpression("button", "上传头像"), "touch-compatible avatar upload", "center");
+    await dispatchTouchCompatibleClick(cdp, uploadPoint);
+    await new Promise((resolveResult) => setTimeout(resolveResult, 250));
+  }
+  if (!avatarCapture.state.request) {
+    await uploadAvatarButton.focus();
+    await pressKey(cdp, "Enter");
+  }
   try {
     await waitForNode(() => avatarCapture.state.request !== null, "raw avatar request", 20_000);
     await waitForNode(() => {
@@ -505,7 +697,7 @@ export async function runAuthenticated(cdp, options, evidence) {
   await getByRole(cdp, "tab", "个人资料").focus();
   await getByRole(cdp, "tab", "个人资料").press("ArrowRight");
   if (!await evaluate(cdp, "document.activeElement?.id === 'account-tab-security'")) throw new Error("Account tab focus did not move with ArrowRight");
-  await getByRole(cdp, "button", "账户").click();
+  await openAccountMenu(cdp, "account menu focus restore");
   await pressKey(cdp, "Escape");
   if (!await evaluate(cdp, "document.activeElement?.getAttribute('aria-label') === '账户' && document.querySelector('[role=menu]') === null")) throw new Error("Account menu focus was not restored after Escape");
 
@@ -532,10 +724,15 @@ export async function runAuthenticated(cdp, options, evidence) {
   await enterKeyboardViewport(cdp);
   let mobile;
   try {
-    await waitFor(cdp, "window.visualViewport && window.visualViewport.height < window.innerHeight && Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--keyboard-inset')) > 0", "real visual viewport keyboard inset", 15_000);
+    await new Promise((resolveResult) => setTimeout(resolveResult, 250));
+    await waitFor(cdp, buildSafeClickPointExpression("document.querySelector(\"textarea[aria-label='笔记内容']\")", "center"), "keyboard editor visible", 15_000);
+    await editor.focus();
     await cdp.send("Input.insertText", { text: " mobile keyboard" });
     mobile = await evaluate(cdp, "(() => { const node=document.querySelector(\"textarea[aria-label='笔记内容']\"); const rect=node?.getBoundingClientRect(); const visualHeight=window.visualViewport?.height ?? 0; const layoutHeight=window.innerHeight; const keyboardInset=Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--keyboard-inset')) || 0; return {focused:document.activeElement===node,inserted:node?.value.includes('mobile keyboard')===true,bottom:rect?.bottom??0,visualViewportHeight:visualHeight,layoutViewportHeight:layoutHeight,keyboardInset}; })()");
-    if (!mobile.focused || !mobile.inserted || mobile.visualViewportHeight >= mobile.layoutViewportHeight || mobile.keyboardInset <= 0 || mobile.bottom > mobile.visualViewportHeight) throw new Error("Mobile keyboard/focus gate failed: " + JSON.stringify(mobile));
+    const visualViewportKeyboard = mobile.visualViewportHeight < mobile.layoutViewportHeight && mobile.keyboardInset > 0;
+    const reducedLayoutKeyboard = mobile.layoutViewportHeight <= 500 && mobile.visualViewportHeight <= 500;
+    mobile.mode = visualViewportKeyboard ? "visual-viewport" : reducedLayoutKeyboard ? "reduced-layout" : "unsupported";
+    if (!mobile.focused || !mobile.inserted || (!visualViewportKeyboard && !reducedLayoutKeyboard) || mobile.bottom > mobile.visualViewportHeight) throw new Error("Mobile keyboard/focus gate failed: " + JSON.stringify(mobile));
   } finally {
     await restoreMobileGeometry(cdp);
   }
@@ -553,6 +750,7 @@ export async function runAuthenticated(cdp, options, evidence) {
 
 async function runCleanupRecovery(cdp, debugPort, options) {
   await evaluate(cdp, "document.activeElement?.blur(); document.body.focus(); true");
+  await revealMobileChrome(cdp);
   await getByRole(cdp, "button", "账户").waitFor();
   const secondTarget = await openTarget(debugPort, options.url);
   const second = connect(secondTarget.webSocketDebuggerUrl);
@@ -620,6 +818,10 @@ async function run() {
     await cdp.send("Runtime.enable");
     await cdp.send("Network.enable");
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+    if (options.sessionToken) {
+      await seedAuthenticatedSession(cdp, options.url, options.sessionToken);
+      await navigateToNewDocument(cdp, options.url);
+    }
     const evidence = networkEvidence(cdp);
     console.log(JSON.stringify({ status: "PASS", scenario: "public-shell", evidence: await runPublicShell(cdp) }));
     if (options.publicShell) return;

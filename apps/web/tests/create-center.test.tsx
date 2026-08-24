@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useRef, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 import { CreateCenter } from "../src/create/CreateCenter";
@@ -30,6 +30,39 @@ function CreateCenterHarness({ onCreateNote = vi.fn(), onQuickCapture = vi.fn() 
       onTodayNote={vi.fn()}
       onCreateDatabase={vi.fn()}
     />
+  );
+}
+
+function DelayedFocusReturnHarness() {
+  const [open, setOpen] = useState(false);
+  const [backgroundInert, setBackgroundInert] = useState(false);
+  const openerRef = useRef<HTMLButtonElement | null>(null);
+
+  return (
+    <>
+      <div inert={backgroundInert || undefined}>
+        <button
+          ref={openerRef}
+          type="button"
+          onClick={() => {
+            setBackgroundInert(true);
+            setOpen(true);
+          }}
+        >
+          外部创建入口
+        </button>
+      </div>
+      <CreateCenter
+        open={open}
+        onOpenChange={(nextOpen) => {
+          setOpen(nextOpen);
+          if (!nextOpen) window.setTimeout(() => setBackgroundInert(false), 20);
+        }}
+        renderTrigger={false}
+        focusReturnRef={openerRef}
+        onCreateNote={vi.fn()}
+      />
+    </>
   );
 }
 
@@ -172,6 +205,17 @@ describe("CreateCenter", () => {
     await waitFor(() => expect(trigger).toHaveFocus());
   });
 
+  it("waits for a temporarily inert external opener before restoring focus", async () => {
+    render(<DelayedFocusReturnHarness />);
+    const opener = screen.getByRole("button", { name: "外部创建入口" });
+
+    fireEvent.click(opener);
+    fireEvent.click(screen.getByRole("button", { name: "关闭创建内容" }));
+
+    await waitFor(() => expect(opener.closest("[inert]")).toBeNull());
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
   it("is visible in the authenticated App and opens the real quick-capture flow", async () => {
     const apiClient = appApiClient();
     render(
@@ -186,6 +230,16 @@ describe("CreateCenter", () => {
     fireEvent.click(screen.getByRole("button", { name: "创建内容" }));
     fireEvent.click(screen.getByRole("button", { name: "快速捕获" }));
     expect(await screen.findByRole("dialog", { name: "快速捕获" })).toBeInTheDocument();
+  });
+
+  it("keeps creation and account actions visible in the desktop canvas toolbar", async () => {
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+
+    const quickStart = await screen.findByRole("region", { name: "快速开始" });
+    const toolbar = quickStart.closest(".workbench-canvas")?.querySelector(".desktop-create-note-bar");
+    expect(toolbar).not.toBeNull();
+    expect(within(toolbar as HTMLElement).getByRole("button", { name: "打开创建中心" })).toBeVisible();
+    expect(within(toolbar as HTMLElement).getByRole("button", { name: "打开个人资料与设置" })).toBeVisible();
   });
 
   it("keeps a stable feature-map entry when an existing note is selected", async () => {
@@ -263,7 +317,7 @@ describe("CreateCenter", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "账户" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
-    expect(screen.getByRole("tab", { name: "工作区" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("tab", { name: "工作区" })).toHaveAttribute("aria-selected", "true");
     fireEvent.click(screen.getByRole("button", { name: "打开功能地图" }));
     fireEvent.click(screen.getByRole("button", { name: "打开个人中心" }));
 

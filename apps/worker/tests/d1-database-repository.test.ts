@@ -357,6 +357,70 @@ describe("D1 structured database repository", () => {
     expect(second.items[0]?.id).not.toBe(first.items[0]?.id);
   });
 
+  it("summarizes database contents without exposing permission override counts to viewers", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const viewer = context("user-2", "viewer");
+    const database = await repository.createDatabase(owner, { name: "Stats", description: "Overview" });
+    const title = await repository.createProperty(owner, database.id, { name: "Title", type: "text", config: {}, position: 0 });
+    const secret = await repository.createProperty(owner, database.id, { name: "Secret", type: "text", config: {}, position: 1 });
+    const record = await repository.createRecord(owner, database.id, { note_id: null, values: { [title.id]: "Visible", [secret.id]: "Hidden" } });
+    await repository.createView(owner, database.id, {
+      name: "All", type: "table", position: 0,
+      config: { filters: [], sorts: [], grouping: null, visible_columns: [title.id], page_size: 50, settings: {} },
+    });
+    await repository.createTemplate(owner, database.id, { name: "Starter", default_values: { [title.id]: "Draft" } });
+    await repository.createComment(owner, database.id, { record_id: record.id, body: "Review" });
+    await repository.setDatabasePermission(owner, database.id, {
+      subject_type: "user", subject_id: viewer.userId, role: "viewer", base_revision: 1,
+    });
+    await repository.setFieldPermission(owner, database.id, secret.id, {
+      subject_type: "role", subject_id: "viewer", can_read: false, can_write: false, base_revision: 1,
+    });
+
+    await expect(repository.getStats(owner, database.id)).resolves.toMatchObject({
+      record_count: 1,
+      property_count: 2,
+      view_count: 1,
+      template_count: 1,
+      comment_count: 1,
+      role: "owner",
+      database_permission_count: 1,
+      field_permission_count: 1,
+    });
+    await expect(repository.getStats(viewer, database.id)).resolves.toMatchObject({
+      record_count: 1,
+      property_count: 1,
+      view_count: 1,
+      template_count: 1,
+      comment_count: 1,
+      role: "viewer",
+      database_permission_count: null,
+      field_permission_count: null,
+    });
+  });
+
+  it("previews CSV type errors without writing valid or invalid rows", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const database = await repository.createDatabase(owner, { name: "Preview", description: "" });
+    const name = await repository.createProperty(owner, database.id, { name: "Name", type: "text", config: {}, position: 0 });
+    const amount = await repository.createProperty(owner, database.id, { name: "Amount", type: "number", config: {}, position: 1 });
+
+    const preview = await repository.previewCsv(owner, database.id, {
+      csv: "Name,Amount\r\nGood,1.5\r\nBad,not-a-number",
+      header_property_ids: { Name: name.id, Amount: amount.id },
+    });
+
+    expect(preview).toMatchObject({
+      headers: ["Name", "Amount"],
+      total_rows: 2,
+      rows: [{ row_number: 2, values: { [name.id]: "Good", [amount.id]: 1.5 } }],
+      errors: [{ row_number: 3, code: "INVALID_FIELD_VALUE" }],
+    });
+    expect((await repository.listRecords(owner, database.id, { limit: 10 })).items).toEqual([]);
+  });
+
   it("imports CSV atomically and exports only readable fields with formula escaping", async () => {
     const repository = await createRepository();
     const owner = context("user-1");

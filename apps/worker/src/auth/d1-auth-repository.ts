@@ -164,6 +164,29 @@ export class D1AuthRepository implements AuthRepository {
     });
   }
 
+  async createTeamWorkspace(input: { userId: string; name: string; now: string }) {
+    const id = this.createId();
+    const createWorkspace = this.db.prepare(
+      `INSERT INTO workspaces (
+         id, owner_user_id, slug, name, workspace_type, revision, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, 'team', 1, ?, ?)`,
+    ).bind(id, input.userId, `team-${id}`, input.name, input.now, input.now);
+    const createOwnerMembership = this.db.prepare(
+      `INSERT INTO workspace_members (
+         workspace_id, user_id, role, revision, joined_at, updated_at
+       ) VALUES (?, ?, 'owner', 1, ?, ?)`,
+    ).bind(id, input.userId, input.now, input.now);
+
+    await this.db.batch([createWorkspace, createOwnerMembership]);
+    return {
+      id,
+      name: input.name,
+      slug: `team-${id}`,
+      role: "owner" as const,
+      revision: 1,
+    };
+  }
+
   async createSession(input: { userId: string; tokenHash: string; expiresAt: string; now: string; userAgent: string }) {
     await this.db.prepare(
       `INSERT INTO sessions (id, user_id, token_hash, expires_at, last_seen_at, created_at, user_agent)

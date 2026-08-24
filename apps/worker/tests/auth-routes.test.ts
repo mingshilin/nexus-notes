@@ -121,4 +121,35 @@ describe("v2 auth routes", () => {
     expect(service.logout).toHaveBeenCalledWith("session-1");
     expect(logout.headers.get("set-cookie")).toBe("nexus_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
   });
+
+  it("creates a team workspace only for an authenticated session", async () => {
+    const worker = await loadWorker();
+    const service = {
+      createWorkspace: vi.fn(async () => ({
+        id: "team-1",
+        name: "研究团队",
+        slug: "team-team-1",
+        role: "owner" as const,
+        revision: 1,
+      })),
+    };
+    const registry = (worker.createRouteRegistry as any)({
+      requestId: () => "req-workspace-create",
+      authenticate: vi.fn(async () => ({ userId: "user-1", sessionId: "session-1" })),
+    });
+    (worker.registerAuthRoutes as any)(registry, () => service);
+
+    const response = await registry.fetch(new Request("https://beta.test/api/v2/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "  研究团队  " }),
+    }), {});
+
+    expect(response.status).toBe(201);
+    expect(service.createWorkspace).toHaveBeenCalledWith({ userId: "user-1", name: "研究团队" });
+    expect(await response.json()).toMatchObject({
+      success: true,
+      data: { id: "team-1", role: "owner" },
+    });
+  });
 });

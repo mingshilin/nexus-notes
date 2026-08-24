@@ -69,7 +69,7 @@ describe("collaboration center", () => {
     fireEvent.click(screen.getByRole("button", { name: "关闭通知中心" }));
     fireEvent.click(screen.getByRole("button", { name: "协作" }));
     expect(await screen.findByRole("heading", { name: "协作中心" })).toBeInTheDocument();
-    expect(screen.getByText("Lin")).toBeInTheDocument();
+    expect(await screen.findByText("Lin")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Public Beta 重写计划" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "账户" }));

@@ -18,15 +18,17 @@ describe("live database workspace", () => {
   it("loads databases only after navigation and renders the workspace-bound first page", async () => {
     const authClient = { session: vi.fn(async () => authenticatedSession) };
     const apiClient = { request: vi.fn(async ({ path }: { path: string }) => {
-      if (path === "/api/v2/databases") return { items: [database] };
-      if (path === "/api/v2/databases/db-1") return { database, role: "owner", properties: [property], views: [view], templates: [] };
-      if (path === "/api/v2/databases/db-1/records?view_id=table&limit=50") return { items: [record], next_cursor: null };
+      if (path === "/api/v2/databases/bootstrap?limit=50") return {
+        items: [database], selected_database_id: "db-1",
+        bundle: { database, role: "owner", properties: [property], views: [view], templates: [] },
+        records: { items: [record], next_cursor: null },
+      };
       return { items: [], next_cursor: null };
     }) };
     render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
 
     await screen.findByRole("heading", { name: "Public Beta 重写计划" });
-    expect(apiClient.request.mock.calls.map(([options]) => options.path)).not.toContain("/api/v2/databases");
+    expect(apiClient.request.mock.calls.map(([options]) => options.path)).not.toContain("/api/v2/databases/bootstrap?limit=50");
     fireEvent.click(screen.getByRole("button", { name: "数据库" }));
 
     expect(await screen.findByRole("heading", { name: "Projects" })).toBeInTheDocument();
@@ -37,11 +39,10 @@ describe("live database workspace", () => {
     fireEvent.click(createDatabaseButton);
     expect(screen.getByRole("form", { name: "新建数据库表单" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "新建数据库名称" })).toBeInTheDocument();
-    await waitFor(() => expect(apiClient.request.mock.calls.map(([options]) => options.path)).toEqual(expect.arrayContaining([
-      "/api/v2/databases",
-      "/api/v2/databases/db-1",
-      "/api/v2/databases/db-1/records?view_id=table&limit=50",
-    ])));
+    fireEvent.click(screen.getByRole("button", { name: "笔记" }));
+    fireEvent.click(screen.getByRole("button", { name: "数据库" }));
+    await screen.findByRole("heading", { name: "Projects" });
+    expect(apiClient.request.mock.calls.filter(([options]) => options.path === "/api/v2/databases/bootstrap?limit=50")).toHaveLength(1);
     expect(apiClient.request.mock.calls.filter(([options]) => options.path.startsWith("/api/v2/databases")).every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
     expect(document.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);
   });
@@ -49,11 +50,14 @@ describe("live database workspace", () => {
   it("creates the first database from the top-level empty workspace state", async () => {
     const authClient = { session: vi.fn(async () => authenticatedSession) };
     const created = { ...database, id: "db-new", name: "Roadmap" };
+    let databaseCreated = false;
     const apiClient = { request: vi.fn(async ({ path, method }: { path: string; method?: string }) => {
-      if (path === "/api/v2/databases" && method === "POST") return { database: created };
-      if (path === "/api/v2/databases") return { items: [] };
-      if (path === "/api/v2/databases/db-new") return { database: created, role: "owner", properties: [], views: [], templates: [] };
-      if (path.startsWith("/api/v2/databases/db-new/records")) return { items: [], next_cursor: null };
+      if (path === "/api/v2/databases" && method === "POST") { databaseCreated = true; return { database: created }; }
+      if (path.startsWith("/api/v2/databases/bootstrap")) return databaseCreated ? {
+        items: [created], selected_database_id: "db-new",
+        bundle: { database: created, role: "owner", properties: [], views: [], templates: [] },
+        records: { items: [], next_cursor: null },
+      } : { items: [], selected_database_id: null, bundle: null, records: { items: [], next_cursor: null } };
       return { items: [] };
     }) };
     render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
@@ -72,9 +76,11 @@ describe("live database workspace", () => {
     const first = { ...record, values: { name: "First", status: "todo" } };
     const later = { ...record, id: "record-2", values: { name: "Later", status: "done" } };
     const apiClient = { request: vi.fn(async ({ path }: { path: string }) => {
-      if (path === "/api/v2/databases") return { items: [database] };
-      if (path === "/api/v2/databases/db-1") return { database, role: "owner", properties: [property, status], views: [board], templates: [] };
-      if (path === "/api/v2/databases/db-1/records?view_id=board&limit=1") return { items: [first], next_cursor: "board-next" };
+      if (path === "/api/v2/databases/bootstrap?limit=50") return {
+        items: [database], selected_database_id: "db-1",
+        bundle: { database, role: "owner", properties: [property, status], views: [board], templates: [] },
+        records: { items: [first], next_cursor: "board-next" },
+      };
       if (path === "/api/v2/databases/db-1/records?cursor=board-next&view_id=board&limit=100") return { items: [later], next_cursor: null };
       return { items: [], next_cursor: null };
     }) };

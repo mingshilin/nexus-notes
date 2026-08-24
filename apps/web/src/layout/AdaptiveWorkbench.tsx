@@ -85,7 +85,7 @@ export function AdaptiveWorkbench({
   return (
     <WorkbenchModalContext.Provider value={setChildModalOpen}>
       <WorkbenchModalOpenContext.Provider value={modalOpen}>
-      <Surface variant="window" className="adaptive-workbench" data-mode={currentMode} data-has-context={Boolean(contextualList)} data-mobile-chrome-visible={mobile ? mobileChromeVisible : undefined}>
+      <Surface variant="window" className="adaptive-workbench" data-mode={currentMode} data-has-context={Boolean(contextualList)} data-mobile-chrome-visible={mobile ? mobileChromeVisible : undefined} data-zoomed={mobile && mobileChrome.zoomed ? "true" : undefined}>
       {!mobile ? (
         <nav className="workbench-rail" aria-label="主导航" aria-hidden={modalOpen || undefined} inert={modalOpen || undefined}>
           {navigation}

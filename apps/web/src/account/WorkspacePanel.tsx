@@ -17,9 +17,18 @@ export interface WorkspacePanelProps {
   client?: CollaborationClientLike;
   currentUserId?: string;
   onWorkspaceChange(workspaceId: string): void | Promise<void>;
+  onCreateWorkspace?(name: string): Promise<WorkspaceMembershipSummary> | void;
 }
 
-export function WorkspacePanel({ workspaces, activeWorkspaceId, client, currentUserId, onWorkspaceChange }: WorkspacePanelProps) {
+function workspaceCreateError(error: unknown) {
+  const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+  if (code === "WORKSPACE_QUOTA_EXCEEDED") return "已达到工作区上限（每个账户最多 2 个）。";
+  if (code === "WORKSPACE_INPUT_INVALID") return "工作区名称无效，请输入 1 到 160 个字符。";
+  if (code === "WORKSPACE_CREATED_SESSION_REFRESH_FAILED") return "工作区已创建，但登录状态刷新失败。请刷新页面后再继续，避免重复创建。";
+  return "创建工作区失败，请检查网络后重试。";
+}
+
+export function WorkspacePanel({ workspaces, activeWorkspaceId, client, currentUserId, onWorkspaceChange, onCreateWorkspace }: WorkspacePanelProps) {
   const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
   const canManage = activeWorkspace?.role === "owner" && Boolean(client);
   const [switchPendingId, setSwitchPendingId] = useState<string | null>(null);
@@ -33,6 +42,10 @@ export function WorkspacePanel({ workspaces, activeWorkspaceId, client, currentU
   const [memberStatus, setMemberStatus] = useState<string | null>(null);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<"editor" | "viewer">("viewer");
+  const [newWorkspaceName, setNewWorkspaceName] = useState("");
+  const [workspaceCreatePending, setWorkspaceCreatePending] = useState(false);
+  const [workspaceCreateErrorMessage, setWorkspaceCreateErrorMessage] = useState<string | null>(null);
+  const [workspaceCreateStatus, setWorkspaceCreateStatus] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<WorkspaceMember | null>(null);
   const mountedRef = useRef(true);
   const switchPendingRef = useRef(false);
@@ -163,6 +176,24 @@ export function WorkspacePanel({ workspaces, activeWorkspaceId, client, currentU
     });
   };
 
+  const createWorkspace = (event: React.FormEvent) => {
+    event.preventDefault();
+    const name = newWorkspaceName.trim();
+    if (!onCreateWorkspace || !name || workspaceCreatePending) return;
+    setWorkspaceCreatePending(true);
+    setWorkspaceCreateErrorMessage(null);
+    setWorkspaceCreateStatus(null);
+    void Promise.resolve(onCreateWorkspace(name)).then((workspace) => {
+      if (!mountedRef.current) return;
+      setNewWorkspaceName("");
+      setWorkspaceCreateStatus(workspace ? `已创建工作区：${workspace.name}` : "工作区已创建。");
+    }).catch((error: unknown) => {
+      if (mountedRef.current) setWorkspaceCreateErrorMessage(workspaceCreateError(error));
+    }).finally(() => {
+      if (mountedRef.current) setWorkspaceCreatePending(false);
+    });
+  };
+
   const beginMutation = (key: string) => {
     if (!client || mutationPendingRef.current) return null;
     mutationPendingRef.current = true;
@@ -262,6 +293,12 @@ export function WorkspacePanel({ workspaces, activeWorkspaceId, client, currentU
   return (
     <section id="account-panel-workspace" role="tabpanel" aria-labelledby="account-tab-workspace" className="account-panel">
       <div className="account-panel-heading"><div><p className="eyebrow">WORKSPACE</p><h2>工作区</h2><p>切换工作区并查看你在每个空间中的权限。</p></div></div>
+      {onCreateWorkspace ? <form className="account-form account-workspace-create-form" aria-label="创建工作区" onSubmit={createWorkspace}>
+        <label>新工作区名称<input aria-label="新工作区名称" required maxLength={160} value={newWorkspaceName} disabled={workspaceCreatePending} onChange={(event) => setNewWorkspaceName(event.target.value)} /></label>
+        <button type="submit" disabled={workspaceCreatePending || !newWorkspaceName.trim()}>{workspaceCreatePending ? "正在创建…" : "创建工作区"}</button>
+        {workspaceCreateErrorMessage ? <p className="account-error" role="alert">{workspaceCreateErrorMessage}</p> : null}
+        {workspaceCreateStatus ? <p className="account-status" role="status">{workspaceCreateStatus}</p> : null}
+      </form> : null}
       <ul className="account-workspace-list" aria-label="工作区列表">
         {workspaces.map((workspace) => {
           const active = workspace.id === activeWorkspaceId;

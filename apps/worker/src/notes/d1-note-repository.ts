@@ -44,6 +44,14 @@ function encodeCursor(note: Pick<Note, "updated_at" | "id">) {
   return encodeURIComponent(`${note.updated_at}\n${note.id}`);
 }
 
+function searchTokens(query: string) {
+  return query.trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
+}
+
+function ftsToken(token: string) {
+  return `"${token.replaceAll('"', '""')}"*`;
+}
+
 function decodeCursor(cursor: string) {
   const decoded = decodeURIComponent(cursor);
   const separator = decoded.indexOf("\n");
@@ -152,6 +160,13 @@ export class D1NoteRepository implements NoteRepository {
     }
   }
 
+  async hasDatabase(workspaceId: string, databaseId: string) {
+    const row = await this.db.prepare(
+      "SELECT 1 AS present FROM databases WHERE workspace_id = ? AND id = ? LIMIT 1",
+    ).bind(workspaceId, databaseId).first<{ present: number }>();
+    return Boolean(row);
+  }
+
   getNote(workspaceId: string, noteId: string) {
     return this.db.prepare(
       `SELECT ${NOTE_COLUMNS}
@@ -172,35 +187,69 @@ export class D1NoteRepository implements NoteRepository {
     ).bind(workspaceId, dailyDate).first<NoteRow>().then((row) => row ? toNote(row) : null);
   }
 
-  async listNotes(input: { workspaceId: string; cursor?: string; limit: number; status?: Note["status"]; folderId?: string | null; dailyDate?: string }) {
+  async listNotes(input: { workspaceId: string; cursor?: string; limit: number; query?: string; status?: Note["status"]; folderId?: string | null; dailyDate?: string; favorite?: boolean; pinned?: boolean }) {
     const limit = Math.max(1, Math.min(input.limit, 100));
-    const conditions = ["workspace_id = ?", "deleted_at IS NULL"];
+    const queryTokens = searchTokens(input.query ?? "");
+    const hasQuery = queryTokens.length > 0;
+    const noteColumn = hasQuery ? "notes." : "";
+    const conditions = [`${noteColumn}workspace_id = ?`, `${noteColumn}deleted_at IS NULL`];
     const bindings: unknown[] = [input.workspaceId];
+    if (hasQuery) {
+      const hasNonAsciiToken = queryTokens.some((token) => /[^\x00-\x7F]/u.test(token));
+      if (hasNonAsciiToken) {
+        conditions.push(queryTokens.map(() => `lower(
+          COALESCE(sd.title, '') || ' ' || COALESCE(sd.content, '') || ' ' ||
+          COALESCE(sd.tags, '') || ' ' || COALESCE(sd.properties, '') || ' ' ||
+          COALESCE(sd.attachment_names, '') || ' ' || COALESCE(sd.ocr_text, '')
+        ) LIKE ?`).join(" AND "));
+        for (const token of queryTokens) bindings.push(`%${token}%`);
+      } else {
+        conditions.push("search_documents_fts MATCH ?");
+        bindings.push(queryTokens.map(ftsToken).join(" AND "));
+      }
+    }
     if (input.status) {
-      conditions.push("status = ?");
+      conditions.push(`${noteColumn}status = ?`);
       bindings.push(input.status);
     }
     if (input.folderId !== undefined) {
-      if (input.folderId === null) conditions.push("folder_id IS NULL");
+      if (input.folderId === null) conditions.push(`${noteColumn}folder_id IS NULL`);
       else {
-        conditions.push("folder_id = ?");
+        conditions.push(`${noteColumn}folder_id = ?`);
         bindings.push(input.folderId);
       }
     }
     if (input.dailyDate) {
-      conditions.push("daily_date = ?");
+      conditions.push(`${noteColumn}daily_date = ?`);
       bindings.push(input.dailyDate);
+    }
+    if (input.favorite !== undefined) {
+      conditions.push(`${noteColumn}is_favorite = ?`);
+      bindings.push(Number(input.favorite));
+    }
+    if (input.pinned !== undefined) {
+      conditions.push(`${noteColumn}is_pinned = ?`);
+      bindings.push(Number(input.pinned));
     }
     if (input.cursor) {
       const cursor = decodeCursor(input.cursor);
-      conditions.push("(updated_at < ? OR (updated_at = ? AND id < ?))");
+      conditions.push(`(${noteColumn}updated_at < ? OR (${noteColumn}updated_at = ? AND ${noteColumn}id < ?))`);
       bindings.push(cursor.updatedAt, cursor.updatedAt, cursor.id);
     }
+    const selectedColumns = hasQuery ? "notes.*" : NOTE_COLUMNS;
+    const fromClause = hasQuery
+      ? `FROM notes
+       JOIN search_documents sd
+         ON sd.workspace_id = notes.workspace_id
+        AND sd.entity_type = 'note'
+        AND sd.entity_id = notes.id
+       JOIN search_documents_fts ON search_documents_fts.rowid = sd.rowid`
+      : "FROM notes";
     const result = await this.db.prepare(
-      `SELECT ${NOTE_COLUMNS}
-       FROM notes
+      `SELECT ${selectedColumns}
+       ${fromClause}
        WHERE ${conditions.join(" AND ")}
-       ORDER BY updated_at DESC, id DESC
+       ORDER BY ${noteColumn}updated_at DESC, ${noteColumn}id DESC
        LIMIT ?`,
     ).bind(...bindings, limit + 1).all<NoteRow>();
     const rows = result.results ?? [];

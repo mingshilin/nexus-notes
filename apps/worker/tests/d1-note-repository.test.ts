@@ -58,6 +58,22 @@ function createDb(
 }
 
 describe("D1NoteRepository", () => {
+  it("checks database ownership with the caller workspace", async () => {
+    const worker = await loadWorker();
+    const owned = createDb([], { present: 1 });
+    const Repository = worker.D1NoteRepository as new (db: unknown) => any;
+    const ownedRepository = new Repository(owned.db);
+
+    await expect(ownedRepository.hasDatabase("ws-1", "db-1")).resolves.toBe(true);
+    expect(owned.statements[0]?.sql).toMatch(/FROM databases WHERE workspace_id = \? AND id = \?/i);
+    expect(owned.statements[0]?.bindings).toEqual(["ws-1", "db-1"]);
+
+    const missing = createDb([], null);
+    const missingRepository = new Repository(missing.db);
+    await expect(missingRepository.hasDatabase("ws-1", "db-other")).resolves.toBe(false);
+    expect(missing.statements[0]?.bindings).toEqual(["ws-1", "db-other"]);
+  });
+
   it("creates the note, first revision, and sync change in one batch", async () => {
     const worker = await loadWorker();
     expect(worker.D1NoteRepository).toBeTypeOf("function");
@@ -198,6 +214,30 @@ describe("D1NoteRepository", () => {
 
     expect(filteredDb.statements[0]?.sql).toMatch(/status = \?[\s\S]*folder_id IS NULL[\s\S]*daily_date = \?[\s\S]*LIMIT \?/i);
     expect(filteredDb.statements[0]?.bindings).toEqual(["ws-1", "active", "2026-08-23", 21]);
+  });
+
+  it("applies favorite and pinned filters before pagination", async () => {
+    const worker = await loadWorker();
+    const filteredDb = createDb([], null, { results: [{ ...noteRow, is_favorite: 1, is_pinned: 0 }] });
+    const Repository = worker.D1NoteRepository as new (db: unknown) => any;
+    const repository = new Repository(filteredDb.db);
+
+    await repository.listNotes({ workspaceId: "ws-1", status: "active", favorite: true, pinned: false, limit: 20 });
+
+    expect(filteredDb.statements[0]?.sql).toMatch(/status = \?[\s\S]*is_favorite = \?[\s\S]*is_pinned = \?[\s\S]*LIMIT \?/i);
+    expect(filteredDb.statements[0]?.bindings).toEqual(["ws-1", "active", 1, 0, 21]);
+  });
+
+  it("applies full-text note search before pagination", async () => {
+    const worker = await loadWorker();
+    const searchedDb = createDb([], null, { results: [{ ...noteRow, title: "项目计划" }] });
+    const Repository = worker.D1NoteRepository as new (db: unknown) => any;
+    const repository = new Repository(searchedDb.db);
+
+    await repository.listNotes({ workspaceId: "ws-1", query: "计划 项目", limit: 20 });
+
+    expect(searchedDb.statements[0]?.sql).toMatch(/lower\([\s\S]*LIKE \?/i);
+    expect(searchedDb.statements[0]?.bindings).toEqual(["ws-1", "%计划%", "%项目%", 21]);
   });
 
   it("lists revisions only from the requested workspace and note", async () => {

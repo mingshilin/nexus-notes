@@ -52,6 +52,8 @@ export function SecurityPanel({ active = true, client, profile, sessions, loadin
   const [revokeTarget, setRevokeTarget] = useState<AccountSession | null>(null);
   const [revokePending, setRevokePending] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
+  const [revokeOthersPending, setRevokeOthersPending] = useState(false);
+  const [revokeOthersStatus, setRevokeOthersStatus] = useState<string | null>(null);
   const revokeOriginRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const dialogCancelRef = useRef<HTMLButtonElement | null>(null);
@@ -241,6 +243,18 @@ export function SecurityPanel({ active = true, client, profile, sessions, loadin
     });
   };
 
+  const revokeOtherSessions = () => {
+    if (!client.revokeOtherSessions || revokeOthersPending) return;
+    setRevokeOthersPending(true);
+    setRevokeOthersStatus(null);
+    setRevokeError(null);
+    void client.revokeOtherSessions().then(({ revoked }) => {
+      setRevokeOthersStatus(`已撤销 ${revoked} 个其他会话。`);
+      onSessionsRefresh();
+    }).catch(() => setRevokeError("撤销其他会话失败，请重试。"))
+      .finally(() => setRevokeOthersPending(false));
+  };
+
   const revokeDialog = revokeTarget ? createPortal(
     <div className="account-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !revokePendingRef.current) closeRevokeDialog("origin"); }}>
       <div ref={dialogRef} className="account-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="revoke-dialog-heading">
@@ -281,7 +295,7 @@ export function SecurityPanel({ active = true, client, profile, sessions, loadin
         {passwordStatus ? <p className="account-status" role="status">{passwordStatus}</p> : null}
       </section>
       <section className="account-subpanel" aria-labelledby="sessions-heading">
-        <div className="account-subpanel-heading"><h3 id="sessions-heading" ref={sessionsHeadingRef} tabIndex={-1}>登录会话</h3><button type="button" onClick={onRetry} disabled={loading}>刷新</button></div>
+        <div className="account-subpanel-heading"><h3 id="sessions-heading" ref={sessionsHeadingRef} tabIndex={-1}>登录会话</h3><div className="account-actions">{client.revokeOtherSessions ? <button type="button" onClick={revokeOtherSessions} disabled={revokeOthersPending}>{revokeOthersPending ? "正在撤销…" : "撤销其他全部会话"}</button> : null}<button type="button" onClick={onRetry} disabled={loading}>刷新</button></div></div>
         <ul className="account-session-list" aria-label="登录会话">
           {sessions.map((session) => <li key={session.id} className="account-session-row" aria-label={`${session.current ? "当前会话" : "其他会话"} ${session.user_agent || "未知设备"}`}>
             <div><strong>{session.current ? "当前会话" : "其他会话"}</strong><span>{session.user_agent || "未知设备"}</span><small>创建于 {formatTimestamp(session.created_at)}，最近活动 {formatTimestamp(session.last_seen_at)}</small></div>
@@ -289,6 +303,7 @@ export function SecurityPanel({ active = true, client, profile, sessions, loadin
           </li>)}
         </ul>
         {revokeError && !revokeTarget ? <p className="account-error" role="alert">{revokeError}</p> : null}
+        {revokeOthersStatus ? <p className="account-status" role="status">{revokeOthersStatus}</p> : null}
       </section>
       {revokeDialog}
     </section>

@@ -6,7 +6,7 @@ async function loadWorker() {
   return (await import("../src")) as WorkerExports;
 }
 
-const context = { workspaceId: "ws-1", userId: "user-1" };
+const context = { workspaceId: "ws-1", userId: "user-1", role: "viewer", capabilities: new Set<string>() };
 
 describe("KnowledgeService", () => {
   it("forces search and saved-search operations into the caller context", async () => {
@@ -47,6 +47,9 @@ describe("KnowledgeService", () => {
       getGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
       listReminders: vi.fn(async () => []), createReminder: vi.fn(async () => ({ id: "reminder-1" })),
       updateReminder: vi.fn(async () => ({ reminder: null, current: serverReminder })),
+      listReminderPage: vi.fn(async () => ({ items: [], nextCursor: "cursor-2" })),
+      snoozeReminder: vi.fn(async () => ({ reminder: { id: "reminder-1", revision: 3 }, current: null })),
+      deleteReminder: vi.fn(async () => true),
     };
     const Service = worker.KnowledgeService as new (...args: any[]) => any;
     const service = new Service(repository, { clock: () => new Date("2026-08-21T00:00:00.000Z") });
@@ -66,6 +69,13 @@ describe("KnowledgeService", () => {
     expect(repository.setNoteTags).toHaveBeenCalledWith("ws-1", "note-1", ["tag-1"], "2026-08-21T00:00:00.000Z");
     expect(repository.getGraph).toHaveBeenCalledWith("ws-1", "note-1");
     expect(repository.listReminders).toHaveBeenCalledWith("ws-1", "user-1", true);
+    await expect(service.listReminderPage(context, { status: "overdue", limit: 25 })).resolves.toEqual({
+      items: [], next_cursor: "cursor-2",
+    });
+    await expect(service.snoozeReminder(context, "reminder-1", { base_revision: 2, minutes: 60 })).resolves.toEqual({
+      id: "reminder-1", revision: 3,
+    });
+    await expect(service.deleteReminder(context, "reminder-1", { base_revision: 3 })).resolves.toBeUndefined();
     await expect(service.updateReminder(context, "reminder-1", {
       base_revision: 1, status: "dismissed",
     })).rejects.toMatchObject({
@@ -88,5 +98,19 @@ describe("KnowledgeService", () => {
     await expect(service.createReminder(context, {
       note_id: "foreign-note", remind_at: "2026-08-22T00:00:00.000Z",
     })).rejects.toMatchObject({ code: "REMINDER_NOTE_NOT_FOUND", status: 404 });
+  });
+
+  it("scopes calendar feed reads to the workspace and requested date range", async () => {
+    const worker = await loadWorker();
+    const repository = {
+      getCalendarFeed: vi.fn(async () => ({ items: [] })),
+    };
+    const Service = worker.KnowledgeService as new (...args: any[]) => any;
+    const service = new Service(repository);
+
+    await expect(service.getCalendarFeed(context, { from: "2026-08-01", to: "2026-08-31" })).resolves.toEqual({ items: [] });
+    expect(repository.getCalendarFeed).toHaveBeenCalledWith(context, {
+      from: "2026-08-01", to: "2026-08-31",
+    });
   });
 });

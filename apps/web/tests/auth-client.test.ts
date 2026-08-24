@@ -49,6 +49,34 @@ describe("AuthClient", () => {
     await expect(new Client({ request }).session()).rejects.toThrow();
   });
 
+  it("creates a workspace with the shared input and membership contracts", async () => {
+    const web = await loadWeb();
+    const request = vi.fn(async () => ({
+      id: "workspace-2",
+      name: "Research",
+      slug: "team-workspace-2",
+      role: "owner",
+      revision: 1,
+    }));
+    const Client = web.AuthClient as new (client: unknown) => {
+      createWorkspace(input: { name: string }): Promise<unknown>;
+    };
+
+    await expect(new Client({ request }).createWorkspace({ name: "  Research  " })).resolves.toEqual({
+      id: "workspace-2",
+      name: "Research",
+      slug: "team-workspace-2",
+      role: "owner",
+      revision: 1,
+    });
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/workspaces",
+      method: "POST",
+      body: { name: "Research" },
+      requestClass: "command",
+    }));
+  });
+
   it("does not send Turnstile for ordinary login unless a challenge token exists", async () => {
     const web = await loadWeb();
     expect(web.AuthClient).toBeTypeOf("function");

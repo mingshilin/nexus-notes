@@ -14,6 +14,10 @@ export const WorkspaceMembershipSummarySchema = z.object({
   revision: z.number().int().positive(),
 }).strict();
 
+export const CreateWorkspaceInputSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+}).strict();
+
 export const AuthSessionSchema = z.object({
   user: AuthUserSummarySchema,
   workspaces: z.array(WorkspaceMembershipSummarySchema),
@@ -22,4 +26,5 @@ export const AuthSessionSchema = z.object({
 
 export type AuthUserSummary = z.infer<typeof AuthUserSummarySchema>;
 export type WorkspaceMembershipSummary = z.infer<typeof WorkspaceMembershipSummarySchema>;
+export type CreateWorkspaceInput = z.infer<typeof CreateWorkspaceInputSchema>;
 export type AuthSession = z.infer<typeof AuthSessionSchema>;

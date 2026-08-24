@@ -4,6 +4,7 @@ import type {
   DeleteNoteInput,
   Note,
   NoteRevision,
+  ClipperInput,
   QuickCaptureInput,
   RestoreNoteInput,
   UpdateNoteInput,
@@ -26,7 +27,7 @@ export interface CreateNoteRecordInput {
   dailyDate: string | null;
   isFavorite: boolean;
   isPinned: boolean;
-  source: "manual";
+  source: "manual" | "import";
   now: string;
   requestId?: string;
 }
@@ -34,14 +35,18 @@ export interface CreateNoteRecordInput {
 export interface NoteRepository {
   createNote(input: CreateNoteRecordInput): Promise<Note>;
   openOrCreateDaily(input: CreateNoteRecordInput): Promise<Note>;
+  hasDatabase(workspaceId: string, databaseId: string): Promise<boolean>;
   getNote(workspaceId: string, noteId: string): Promise<Note | null>;
   listNotes(input: {
     workspaceId: string;
     cursor?: string;
     limit: number;
+    query?: string;
     status?: Note["status"];
     folderId?: string | null;
     dailyDate?: string;
+    favorite?: boolean;
+    pinned?: boolean;
   }): Promise<{ items: Note[]; nextCursor: string | null }>;
   listRevisions(workspaceId: string, noteId: string): Promise<NoteRevision[]>;
   updateNote(input: {
@@ -106,6 +111,25 @@ function quickCaptureTitle(input: QuickCaptureInput) {
     .map((line) => line.trim())
     .find(Boolean);
   return (firstLine ?? "Untitled note").slice(0, 160);
+}
+
+function clipperTitle(input: ClipperInput, sourceUrl?: string) {
+  if (input.title?.trim()) return input.title.trim().slice(0, 160);
+  if (sourceUrl) return sourceUrl.slice(0, 160);
+  return "Web Clip";
+}
+
+function clipperUrl(input: ClipperInput) {
+  if (!input.url) return undefined;
+  return new URL(input.url).toString();
+}
+
+function clipperContent(input: ClipperInput, sourceUrl?: string) {
+  const content = sourceUrl ? `Source: ${sourceUrl}\n\n${input.content}` : input.content;
+  if (content.length > 200_000) {
+    throw new NoteServiceError("CLIPPER_CONTENT_TOO_LARGE", "Clipped content is too large", 400);
+  }
+  return content;
 }
 
 function mapRepositoryError(error: unknown): never {
@@ -177,17 +201,77 @@ export class NoteService {
     });
   }
 
+  async clipperCapture(context: NoteActorContext, input: ClipperInput) {
+    const sourceUrl = clipperUrl(input);
+    const content = clipperContent(input, sourceUrl);
+    const title = clipperTitle(input, sourceUrl);
+
+    if (input.target === "daily") {
+      const dailyDate = this.options.clock().toISOString().slice(0, 10);
+      let daily: Note;
+      try {
+        daily = await this.repository.openOrCreateDaily({
+          id: this.options.createId(),
+          workspaceId: context.workspaceId,
+          userId: context.userId,
+          title: `Daily Note ${dailyDate}`,
+          content,
+          folderId: null,
+          databaseId: null,
+          dailyDate,
+          isFavorite: false,
+          isPinned: false,
+          source: "import",
+          now: this.options.clock().toISOString(),
+          requestId: context.requestId,
+        });
+      } catch (error) {
+        return mapRepositoryError(error);
+      }
+      if (daily.content === content) return daily;
+      const nextContent = daily.content ? `${daily.content}\n\n${content}` : content;
+      const result = await this.repository.updateNote({
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+        noteId: daily.id,
+        baseRevision: daily.revision,
+        patch: { content: nextContent, source: "import" },
+        now: this.options.clock().toISOString(),
+        requestId: context.requestId,
+      });
+      if (!result.note) {
+        throw new NoteServiceError("NOTE_CONFLICT", "The daily note changed before the clip could be appended", 409, {
+          server_note: result.current,
+        });
+      }
+      return result.note;
+    }
+
+    if (input.target === "database" && input.database_id && !(await this.repository.hasDatabase(context.workspaceId, input.database_id))) {
+      throw new NoteServiceError("DATABASE_NOT_FOUND", "Database not found", 404);
+    }
+
+    return this.create(context, {
+      title,
+      content,
+      database_id: input.target === "database" ? input.database_id : null,
+    });
+  }
+
   async list(
     context: NoteActorContext,
-    options: { cursor?: string; limit: number; status?: Note["status"]; folderId?: string | null; dailyDate?: string },
+    options: { cursor?: string; limit: number; query?: string; status?: Note["status"]; folderId?: string | null; dailyDate?: string; favorite?: boolean; pinned?: boolean },
   ) {
     const page = await this.repository.listNotes({
       workspaceId: context.workspaceId,
       cursor: options.cursor,
       limit: options.limit,
+      ...(options.query ? { query: options.query } : {}),
       status: options.status,
       folderId: options.folderId,
       dailyDate: options.dailyDate,
+      ...(options.favorite !== undefined ? { favorite: options.favorite } : {}),
+      ...(options.pinned !== undefined ? { pinned: options.pinned } : {}),
     });
     return { items: page.items, next_cursor: page.nextCursor };
   }

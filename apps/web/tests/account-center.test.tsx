@@ -525,24 +525,24 @@ describe("AccountCenter", () => {
     expect(revokeSession).toHaveBeenCalledWith("s2");
   });
 
-  it("implements the four-tab ARIA and keyboard contract without resetting panels", async () => {
+  it("implements the account-tab ARIA and keyboard contract without resetting panels", async () => {
     renderCenter();
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.map((tab) => tab.textContent)).toEqual(["个人资料", "安全", "工作区", "数据与隐私"]);
-    expect(tabs[0]).toHaveAttribute("aria-controls", "account-panel-profile");
-    expect(tabs[0]).toHaveAttribute("aria-selected", "true");
-    expect(tabs[0]).toHaveAttribute("tabindex", "0");
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["总览", "个人资料", "安全", "工作区", "偏好与通知", "数据与隐私"]);
+    expect(tabs[1]).toHaveAttribute("aria-controls", "account-panel-profile");
+    expect(tabs[1]).toHaveAttribute("aria-selected", "true");
+    expect(tabs[1]).toHaveAttribute("tabindex", "0");
     await waitFor(() => expect(screen.getByLabelText("昵称")).toHaveValue("用户"));
     fireEvent.change(screen.getByLabelText("昵称"), { target: { value: "跨标签草稿" } });
-    fireEvent.keyDown(tabs[0]!, { key: "ArrowRight" });
-    expect(tabs[1]).toHaveFocus();
-    fireEvent.keyDown(tabs[1]!, { key: "End" });
-    expect(tabs[3]).toHaveFocus();
-    fireEvent.keyDown(tabs[3]!, { key: "Home" });
+    fireEvent.keyDown(tabs[1]!, { key: "ArrowRight" });
+    expect(tabs[2]).toHaveFocus();
+    fireEvent.keyDown(tabs[2]!, { key: "End" });
+    expect(tabs[5]).toHaveFocus();
+    fireEvent.keyDown(tabs[5]!, { key: "Home" });
     expect(tabs[0]).toHaveFocus();
-    fireEvent.click(tabs[2]!);
+    fireEvent.click(tabs[3]!);
     expect(screen.getByRole("heading", { name: "工作区" })).toBeInTheDocument();
-    fireEvent.click(tabs[0]!);
+    fireEvent.click(tabs[1]!);
     expect(screen.getByLabelText("昵称")).toHaveValue("跨标签草稿");
     const activePanel = screen.getByRole("tabpanel");
     expect(activePanel).toHaveAttribute("aria-labelledby", "account-tab-profile");
@@ -593,6 +593,28 @@ describe("AccountCenter", () => {
     expect(screen.getByText("你在此工作区拥有编辑权限，只有所有者可以管理成员。" )).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "成员管理" })).not.toBeInTheDocument();
     editorView.unmount();
+  });
+
+  it("exposes team workspace creation in the workspace tab and forwards the trimmed name", async () => {
+    const createWorkspace = vi.fn(async () => ({
+      id: "ws-new",
+      name: "研究团队",
+      slug: "team-ws-new",
+      role: "owner" as const,
+      revision: 1,
+    }));
+    renderCenter({
+      workspaces: [workspaces[0]],
+      activeWorkspaceId: "ws-1",
+      onCreateWorkspace: createWorkspace,
+    });
+
+    fireEvent.click(await screen.findByRole("tab", { name: "工作区" }));
+    fireEvent.change(screen.getByLabelText("新工作区名称"), { target: { value: "  研究团队  " } });
+    fireEvent.click(screen.getByRole("button", { name: "创建工作区" }));
+
+    await waitFor(() => expect(createWorkspace).toHaveBeenCalledWith("研究团队"));
+    expect(await screen.findByRole("status")).toHaveTextContent("研究团队");
   });
 
   it("switches exactly once, deduplicates pending activation, and keeps the active workspace on failure", async () => {

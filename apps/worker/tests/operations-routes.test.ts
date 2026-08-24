@@ -18,6 +18,7 @@ describe("Task 9 operations routes", () => {
     registerOperationsRoutes(registry, () => ({
       createJob: async () => job,
       getJob: async () => job,
+      cancelJob: async () => ({ ...job, status: "cancelled", revision: 2 }),
       listJobs: async () => [job],
       createFeedback: async () => feedback,
       getUsage: async () => usage,
@@ -28,6 +29,8 @@ describe("Task 9 operations routes", () => {
     expect(definitions.map(({ method, path }) => `${method} ${path}`)).toEqual([
       "POST /api/v2/operations/jobs",
       "GET /api/v2/operations/jobs/:jobId",
+      "DELETE /api/v2/operations/jobs/:jobId",
+      "GET /api/v2/operations/jobs/:jobId/file",
       "GET /api/v2/operations/jobs",
       "POST /api/v2/operations/feedback",
       "GET /api/v2/operations/usage",
@@ -37,6 +40,7 @@ describe("Task 9 operations routes", () => {
     ]);
     expect(definitions.find((definition) => definition.path === "/api/v2/operations/status")).toMatchObject({ auth: "public" });
     expect(definitions.find((definition) => definition.path === "/api/v2/admin/jobs")).toMatchObject({ auth: "workspace", minimumRole: "owner" });
+    expect(definitions.find((definition) => definition.path === "/api/v2/operations/jobs/:jobId/file")).toMatchObject({ auth: "workspace" });
   });
 
   it("serves a safe public operations status without requiring a session", async () => {

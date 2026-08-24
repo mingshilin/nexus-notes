@@ -1,63 +1,96 @@
 import {
+  Archive,
   Bell,
   Boxes,
+  Command,
   LayoutGrid,
+  Pin,
   Plus,
   Search,
+  Share2,
   Sparkles,
+  Star,
+  UserRound,
+  X,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { MAX_UPLOAD_BYTES, SUPPORTED_ATTACHMENT_MIME_TYPES } from "@nexus/contracts";
-import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, Profile, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useTransition, type ReactNode } from "react";
+import { MAX_UPLOAD_BYTES, NoteSchema, SUPPORTED_ATTACHMENT_MIME_TYPES } from "@nexus/contracts";
+import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, NoteLink, NoteRevision, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient, ApiClientError } from "../data/api-client";
-import { ProfileClient } from "../data/profile-client";
-import { OperationsClient } from "../data/operations-client";
-import { AccountCenter } from "../account";
 import { CollaborationClient } from "../data/collaboration-client";
-import { AIChatPanel } from "../ai/AIChatPanel";
-import { KnowledgeClient } from "../data/knowledge-client";
-import { NotesClient } from "../data/notes-client";
+import { NoteAiActions } from "../ai/NoteAiActions";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic, type RecoveryFilters } from "../knowledge/KnowledgeRecoveryPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
-import { AdaptiveWorkbench } from "../layout/AdaptiveWorkbench";
 import { useWorkbenchMode } from "../layout/use-mobile-layout";
-import { DatabaseClient, type DatabaseBundle } from "../data/database-client";
+import type { DatabaseClient, DatabaseBundle } from "../data/database-client";
 import { BetaLocalStore } from "../data/local-store";
 import { NoteDraftController, type DraftSyncResult, type NoteDraftStore } from "../notes/note-draft-controller";
 import { NormalizedCache } from "../data/normalized-cache";
+import { useWorkspaceSync } from "../data/use-workspace-sync";
+import type { SyncChange } from "../data/sync-engine";
 import { ProductNavigation, type AccountSubsection, type ProductDomain } from "../navigation/ProductNavigation";
 import { QuickCapturePanel } from "../notes/QuickCapturePanel";
+import { WebClipperPanel } from "../notes/WebClipperPanel";
 import { NoteOrganizationPanel } from "../notes/NoteOrganizationPanel";
 import { NoteTagPanel } from "../notes/NoteTagPanel";
-import { CreateCenter, type CreateActionResult } from "../create";
+import { NoteEditorSurface } from "../notes/NoteEditorSurface";
+import { NoteConflictPanel } from "../notes/NoteConflictPanel";
+import { NoteLinksPanel } from "../notes/NoteLinksPanel";
+import { NoteHistoryPanel } from "../notes/NoteHistoryPanel";
+import { MarkdownPreview } from "../notes/MarkdownPreview";
+import { CommandPalette, type CommandAction } from "../commands/CommandPalette";
+import { CreateCenter, ImportExportCenter, type CreateActionResult } from "../create";
 import { FeatureHub } from "../features";
+import { InviteRedemptionPage } from "../collaboration/InviteRedemptionPage";
+import { PublicSharePage } from "../collaboration/PublicSharePage";
+import { NotificationCenter, notificationButtonLabel } from "../collaboration/NotificationCenter";
+import type { CollaborationCommentTarget, CollaborationShareTarget, NotificationTarget } from "../collaboration/collaboration-types";
+import { useWorkspaceClients } from "./use-workspace-clients";
+import { WorkspaceShell } from "./WorkspaceShell";
 import {
-  CollaborationCenter,
-  InviteRedemptionPage,
-  NotificationCenter,
-  PublicSharePage,
-  notificationButtonLabel,
-  type CollaborationCommentTarget,
-  type CollaborationShareTarget,
-  type NotificationTarget,
-} from "../collaboration";
+  loadAccountCenter,
+  loadAIChatPanel,
+  loadCollaborationCenter,
+  loadDatabaseWorkbench,
+  loadKnowledgeCalendarPanel,
+  loadKnowledgeGraphPanel,
+  loadKnowledgeSearchPanel,
+  loadReminderPanel,
+  preloadWorkspaceDomain,
+} from "./workspace-domain-loader";
 
 const LazyDatabaseWorkbench = lazy(async () => {
-  const module = await import("../databases/DatabaseWorkbench");
+  const module = await loadDatabaseWorkbench();
   return { default: module.DatabaseWorkbench };
 });
 const LazyKnowledgeSearchPanel = lazy(async () => {
-  const module = await import("../knowledge/KnowledgeSearchPanel");
+  const module = await loadKnowledgeSearchPanel();
   return { default: module.KnowledgeSearchPanel };
 });
 const LazyKnowledgeGraphPanel = lazy(async () => {
-  const module = await import("../knowledge/KnowledgeGraphPanel");
+  const module = await loadKnowledgeGraphPanel();
   return { default: module.KnowledgeGraphPanel };
 });
+const LazyKnowledgeCalendarPanel = lazy(async () => {
+  const module = await loadKnowledgeCalendarPanel();
+  return { default: module.KnowledgeCalendarPanel };
+});
 const LazyReminderPanel = lazy(async () => {
-  const module = await import("../reminders/ReminderPanel");
+  const module = await loadReminderPanel();
   return { default: module.ReminderPanel };
+});
+const LazyAccountCenter = lazy(async () => {
+  const module = await loadAccountCenter();
+  return { default: module.AccountCenter };
+});
+const LazyAIChatPanel = lazy(async () => {
+  const module = await loadAIChatPanel();
+  return { default: module.AIChatPanel };
+});
+const LazyCollaborationCenter = lazy(async () => {
+  const module = await loadCollaborationCenter();
+  return { default: module.CollaborationCenter };
 });
 
 const defaultAuthClient = new AuthClient(new ApiClient());
@@ -67,11 +100,17 @@ type AppRoute =
   | { kind: "workspace"; workspaceId?: string }
   | { kind: "invite"; token: string }
   | { kind: "share"; token: string };
-type NoteListView = "all" | "inbox" | "today" | "trash";
+type NoteListView = "all" | "inbox" | "today" | "favorites" | "pinned" | "archived" | "trash";
 type WorkspaceRouteAuthority = { userId: string; workspaceId: string };
-type WorkspaceModal = "create" | "quick-capture" | "permanent-delete";
+type WorkspaceModal = "create" | "quick-capture" | "web-clipper" | "import" | "permanent-delete";
 type UserScopedLocalStore = NoteDraftStore & { destroy(): Promise<void> };
 type LogoutPhase = "idle" | "quiescing" | "cleanup" | "cleanup-error";
+type NoteConflictState = {
+  workspaceId: string;
+  entityId: string;
+  local: { title: string; content: string };
+  server: Note;
+};
 
 function permanentDeleteErrorMessage(error: unknown) {
   const candidate = error instanceof ApiClientError
@@ -103,9 +142,12 @@ function localDateKey(date = new Date()) {
 
 function noteMatchesListView(note: Note, view: NoteListView, todayDate = localDateKey()) {
   if (view === "trash") return note.status === "trashed";
+  if (view === "archived") return note.status === "archived";
   if (note.status !== "active") return false;
   if (view === "inbox") return note.folder_id === null;
   if (view === "today") return note.daily_date === todayDate;
+  if (view === "favorites") return note.is_favorite;
+  if (view === "pinned") return note.is_pinned;
   return true;
 }
 
@@ -254,6 +296,7 @@ function AuthenticatedWorkspace({
   onRetryLogout,
   onDiagnosticNavigate,
   onWorkspaceChange,
+  onCreateWorkspace,
   onDeleted,
 }: {
   apiClient: ApiClient;
@@ -270,36 +313,56 @@ function AuthenticatedWorkspace({
   onLogout(): void;
   onRetryLogout(): void;
   onWorkspaceChange(workspaceId: string): void | Promise<void>;
+  onCreateWorkspace(name: string): Promise<WorkspaceMembershipSummary>;
   onDeleted(): void;
   onDiagnosticNavigate?: (diagnostic: KnowledgeDiagnostic) => void;
 }) {
-  const workbenchMode = useWorkbenchMode();
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
   const [activeDomain, setActiveDomain] = useState<ProductDomain>("notes");
-  const [accountSubsection, setAccountSubsection] = useState<AccountSubsection>("personal");
-  const [collaborationClient] = useState(() => new CollaborationClient(apiClient, workspaceId ?? ""));
-  const [knowledgeClient] = useState(() => new KnowledgeClient(apiClient, workspaceId ?? ""));
-  const [operationsClient] = useState(() => new OperationsClient(apiClient, workspaceId ?? ""));
-  const [profileClient] = useState(() => new ProfileClient(apiClient));
+  const [requestedDomain, setRequestedDomain] = useState<ProductDomain>("notes");
+  const [domainPending, startDomainTransition] = useTransition();
+  const [accountSubsection, setAccountSubsection] = useState<AccountSubsection>("overview");
+  const workspaceClients = useWorkspaceClients(apiClient, workspaceId ?? "");
+  const collaborationClient = workspaceClients.collaboration;
+  const databaseClient = workspaceClients.databases;
+  const knowledgeClient = workspaceClients.knowledge;
+  const notesClient = workspaceClients.notes;
+  const operationsClient = workspaceClients.operations;
+  const profileClient = workspaceClients.profile;
+  const transitionToDomain = useCallback((domain: ProductDomain) => {
+    setRequestedDomain(domain);
+    setActivePane("canvas");
+    startDomainTransition(() => setActiveDomain(domain));
+  }, []);
   const [navigationUser, setNavigationUser] = useState(user);
   const [unreadCount, setUnreadCount] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [notes, setNotes] = useState<Note[]>([]);
   const [notesLoading, setNotesLoading] = useState(Boolean(workspaceId));
   const [notesError, setNotesError] = useState<string | null>(null);
+  const [notesRefreshVersion, setNotesRefreshVersion] = useState(0);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderLoading, setFolderLoading] = useState(Boolean(workspaceId));
   const [noteFolderFilter, setNoteFolderFilter] = useState<string | null>(null);
+  const [noteSearchQuery, setNoteSearchQuery] = useState("");
+  const [debouncedNoteSearchQuery, setDebouncedNoteSearchQuery] = useState("");
   const [tags, setTags] = useState<Tag[]>([]);
   const [noteTagIds, setNoteTagIds] = useState<Record<string, string[]>>({});
   const [noteTagsLoading, setNoteTagsLoading] = useState(false);
   const [noteTagsSaving, setNoteTagsSaving] = useState(false);
   const [noteTagsError, setNoteTagsError] = useState<string | null>(null);
+  const [linkedNoteIds, setLinkedNoteIds] = useState<string[]>([]);
+  const [backlinks, setBacklinks] = useState<NoteLink[]>([]);
+  const [noteLinksLoading, setNoteLinksLoading] = useState(false);
+  const [noteLinksSaving, setNoteLinksSaving] = useState(false);
+  const [noteLinksError, setNoteLinksError] = useState<string | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [workspaceModal, setWorkspaceModal] = useState<WorkspaceModal | null>(null);
   const createCenterOpen = workspaceModal === "create";
   const quickCaptureOpen = workspaceModal === "quick-capture";
+  const webClipperOpen = workspaceModal === "web-clipper";
+  const importCenterOpen = workspaceModal === "import";
   const permanentDeleteOpen = workspaceModal === "permanent-delete";
   const setCreateCenterOpen = useCallback((open: boolean) => {
     setWorkspaceModal((current) => open
@@ -310,6 +373,11 @@ function AuthenticatedWorkspace({
     setWorkspaceModal((current) => open
       ? current === null || current === "quick-capture" ? "quick-capture" : current
       : current === "quick-capture" ? null : current);
+  }, []);
+  const setImportCenterOpen = useCallback((open: boolean) => {
+    setWorkspaceModal((current) => open
+      ? current === null || current === "import" ? "import" : current
+      : current === "import" ? null : current);
   }, []);
   const setPermanentDeleteOpen = useCallback((open: boolean) => {
     setWorkspaceModal((current) => open
@@ -325,18 +393,33 @@ function AuthenticatedWorkspace({
   const [dailyNoteOpening, setDailyNoteOpening] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftContent, setDraftContent] = useState("");
+  const [editorMode, setEditorMode] = useState<"edit" | "preview">("edit");
   const [draftFolderId, setDraftFolderId] = useState<string | null>(null);
+  const [draftDatabaseId, setDraftDatabaseId] = useState<string | null>(null);
+  const [noteDatabases, setNoteDatabases] = useState<Database[]>([]);
+  const [noteDatabasesLoading, setNoteDatabasesLoading] = useState(false);
+  const [noteDatabasesError, setNoteDatabasesError] = useState<string | null>(null);
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteMessage, setNoteMessage] = useState<string | null>(null);
   const [noteError, setNoteError] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [noteRevisions, setNoteRevisions] = useState<NoteRevision[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyRefreshVersion, setHistoryRefreshVersion] = useState(0);
+  const [restoringRevision, setRestoringRevision] = useState<number | null>(null);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
   const [permanentDeletePending, setPermanentDeletePending] = useState(false);
   const [permanentDeleteError, setPermanentDeleteError] = useState<string | null>(null);
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
   const [serverRetryVersion, setServerRetryVersion] = useState(0);
+  const [noteConflict, setNoteConflict] = useState<NoteConflictState | null>(null);
+  const [resolvingConflict, setResolvingConflict] = useState(false);
   const [pendingReconcile, setPendingReconcile] = useState<{ workspaceId: string; entityId: string; result: DraftSyncResult } | null>(null);
   const [selectedDatabaseRecordId, setSelectedDatabaseRecordId] = useState<string | null>(null);
   const [selectedCommentId, setSelectedCommentId] = useState<string | null>(null);
-  const [collaborationInitialSection, setCollaborationInitialSection] = useState<"people" | "comments">("people");
+  const [collaborationInitialSection, setCollaborationInitialSection] = useState<"people" | "comments" | "shares">("people");
   const [databases, setDatabases] = useState<Database[]>([]);
   const [selectedDatabaseId, setSelectedDatabaseId] = useState<string | null>(null);
   const [databaseBundle, setDatabaseBundle] = useState<DatabaseBundle | null>(null);
@@ -368,10 +451,12 @@ function AuthenticatedWorkspace({
   const retryControllers = useRef(new Set<AbortController>());
   const databaseControllers = useRef(new Set<AbortController>());
   const databaseCache = useRef(new NormalizedCache());
+  const databaseSelectionSync = useRef<string | null>(null);
   const attachmentQueryIdentity = useRef<string | null>(null);
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
   const notificationOpenerRef = useRef<HTMLElement | null>(null);
   const notificationTargetController = useRef<AbortController | null>(null);
+  const historyController = useRef<AbortController | null>(null);
   const noteListViewRef = useRef<NoteListView>(noteListView);
   const [draftController] = useState(() => {
     return new NoteDraftController(localStore);
@@ -383,6 +468,14 @@ function AuthenticatedWorkspace({
   const draftTitleRef = useRef("");
   const draftContentRef = useRef("");
   const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const createCenterFocusTargetRef = useRef<HTMLButtonElement | null>(null);
+  const openCreateCenter = useCallback((opener?: HTMLButtonElement | null) => {
+    const active = typeof document !== "undefined" && document.activeElement instanceof HTMLButtonElement
+      ? document.activeElement
+      : null;
+    createCenterFocusTargetRef.current = opener ?? active;
+    setCreateCenterOpen(true);
+  }, [setCreateCenterOpen]);
   const permanentDeleteOpenerRef = useRef<HTMLButtonElement | null>(null);
   const permanentDeleteDialogRef = useRef<HTMLDivElement | null>(null);
   const permanentDeleteCancelRef = useRef<HTMLButtonElement | null>(null);
@@ -394,6 +487,7 @@ function AuthenticatedWorkspace({
   const installedNotesRef = useRef(new Map<string, Note>());
   const mountedRef = useRef(true);
   const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
+  const workbenchMode = useWorkbenchMode();
   permanentDeletePendingRef.current = permanentDeletePending;
   const visibleNotes = noteFolderFilter === null
     ? notes
@@ -405,6 +499,58 @@ function AuthenticatedWorkspace({
   }));
   const userId = user.id;
 
+  const applyWorkspaceSyncChange = useCallback(async (change: SyncChange) => {
+    if (change.entity_type !== "note") return;
+    if (change.kind === "delete") {
+      setNotes((current) => current.filter((note) => note.id !== change.entity_id));
+      if (activeDraftIdRef.current === change.entity_id) {
+        setNoteError("当前笔记已在其他设备删除，本地草稿仍保留。请先处理本地内容。");
+      }
+      return;
+    }
+    const parsed = NoteSchema.safeParse(change.payload);
+    if (!parsed.success) return;
+    const note = parsed.data;
+    if (activeDraftIdRef.current === note.id) {
+      setNoteConflict({
+        workspaceId: note.workspace_id,
+        entityId: note.id,
+        local: { title: draftTitleRef.current, content: draftContentRef.current },
+        server: note,
+      });
+      return;
+    }
+    setNotes((current) => current.some((item) => item.id === note.id)
+      ? current.map((item) => item.id === note.id ? note : item)
+      : [note, ...current]);
+  }, []);
+
+  const handleWorkspaceSyncConflict = useCallback((operation: SyncOperation, result: SyncOperationResult) => {
+    if (operation.entity_type !== "note" || !workspaceId || result.status !== "conflict") return;
+    const localTitle = typeof operation.patch.title === "string" ? operation.patch.title : draftTitleRef.current;
+    const localContent = typeof operation.patch.content === "string" ? operation.patch.content : draftContentRef.current;
+    void notesClient.get(operation.entity_id).then((server) => {
+      if (activeDraftIdRef.current !== operation.entity_id) return;
+      setNoteConflict({
+        workspaceId,
+        entityId: operation.entity_id,
+        local: { title: localTitle, content: localContent },
+        server,
+      });
+    }).catch(() => {
+      setNoteError("离线同步发生冲突，服务器版本暂时无法加载。本地草稿仍保留，可稍后重试。");
+    });
+  }, [notesClient, workspaceId]);
+
+  const workspaceSync = useWorkspaceSync({
+    apiClient,
+    store: localStore,
+    workspaceId,
+    enabled: !logoutPending,
+    applyChange: applyWorkspaceSyncChange,
+    onConflict: handleWorkspaceSyncConflict,
+  });
+
   useEffect(() => {
     if (!workspaceId) {
       setFolders([]);
@@ -414,7 +560,7 @@ function AuthenticatedWorkspace({
     }
     const controller = new AbortController();
     setFolderLoading(true);
-    void new KnowledgeClient(apiClient, workspaceId).listFolders(controller.signal).then((items) => {
+    void knowledgeClient.listFolders(controller.signal).then((items) => {
       if (!controller.signal.aborted) setFolders(items);
     }).catch(() => {
       if (!controller.signal.aborted) setFolders([]);
@@ -422,7 +568,43 @@ function AuthenticatedWorkspace({
       if (!controller.signal.aborted) setFolderLoading(false);
     });
     return () => controller.abort();
-  }, [apiClient, workspaceId]);
+  }, [knowledgeClient, workspaceId]);
+
+  useEffect(() => {
+    if (!workspaceId || !selectedNoteId || creatingNote) {
+      setLinkedNoteIds([]);
+      setBacklinks([]);
+      setNoteLinksLoading(false);
+      setNoteLinksError(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setNoteLinksLoading(true);
+    setNoteLinksError(null);
+    void Promise.all([knowledgeClient.listNoteLinks(selectedNoteId, controller.signal), knowledgeClient.listBacklinks(selectedNoteId, controller.signal)]).then(([links, incoming]) => {
+      if (controller.signal.aborted) return;
+      setLinkedNoteIds(links.map((link) => link.target_note_id));
+      setBacklinks(incoming);
+    }).catch(() => {
+      if (!controller.signal.aborted) setNoteLinksError("笔记链接暂时无法加载，当前内容不受影响。请重试。");
+    }).finally(() => {
+      if (!controller.signal.aborted) setNoteLinksLoading(false);
+    });
+    return () => controller.abort();
+  }, [creatingNote, knowledgeClient, selectedNoteId, workspaceId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedNoteSearchQuery(noteSearchQuery.trim().slice(0, 500));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [noteSearchQuery]);
+
+  useEffect(() => {
+    // A query belongs to one workspace; never carry it into another tenant.
+    setNoteSearchQuery("");
+    setDebouncedNoteSearchQuery("");
+  }, [workspaceId]);
 
   useEffect(() => {
     if (!workspaceId) {
@@ -432,13 +614,13 @@ function AuthenticatedWorkspace({
       return undefined;
     }
     const controller = new AbortController();
-    void new KnowledgeClient(apiClient, workspaceId).listTags(controller.signal).then((items) => {
+    void knowledgeClient.listTags(controller.signal).then((items) => {
       if (!controller.signal.aborted) setTags(items);
     }).catch(() => {
       if (!controller.signal.aborted) setTags([]);
     });
     return () => controller.abort();
-  }, [apiClient, workspaceId]);
+  }, [knowledgeClient, workspaceId]);
 
   const closePermanentDeleteDialog = (focusTarget: "origin" | "fallback" = "origin") => {
     permanentDeleteFocusTargetRef.current = focusTarget;
@@ -452,9 +634,12 @@ function AuthenticatedWorkspace({
     };
   }, [draftController, draftControllerRef]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!inspectorOpen && inspectorOpenerRef.current) {
-      inspectorOpenerRef.current.focus();
+      const opener = inspectorOpenerRef.current.isConnected
+        ? inspectorOpenerRef.current
+        : document.querySelector<HTMLElement>('button[aria-label="打开检查器"]');
+      if (opener && !opener.closest("[inert]")) opener.focus();
       inspectorOpenerRef.current = null;
     }
   }, [inspectorOpen]);
@@ -519,6 +704,10 @@ function AuthenticatedWorkspace({
     activationInFlight.current = true;
     userSelectedNote.current = true;
     setFeatureMapOpen(false);
+    setHistoryOpen(false);
+    setEditorMode("edit");
+    setNoteConflict(null);
+    setResolvingConflict(false);
     setNoteError(null);
     try {
       const draft = await draftController.create(workspaceId);
@@ -531,17 +720,16 @@ function AuthenticatedWorkspace({
       setDraftTitle(draft.title);
       setDraftContent(draft.content);
       setDraftFolderId(null);
+      setDraftDatabaseId(null);
       setNoteMessage(null);
       setNoteError(null);
-      setActiveDomain("notes");
-      setActivePane("canvas");
+      transitionToDomain("notes");
       return { status: "completed" };
     } catch {
       const message = "本地草稿保存失败，未创建临时笔记。请重试。";
       setNotesError(message);
       setNoteError(message);
-      setActiveDomain("notes");
-      setActivePane("canvas");
+      transitionToDomain("notes");
       return { status: "rejected", message };
     } finally {
       activationInFlight.current = false;
@@ -550,6 +738,12 @@ function AuthenticatedWorkspace({
 
   const selectNote = (note: Note) => {
     setFeatureMapOpen(false);
+    setHistoryOpen(false);
+    setEditorMode("edit");
+    setNoteRevisions([]);
+    setHistoryError(null);
+    setNoteConflict(null);
+    setResolvingConflict(false);
     activeDraftIdRef.current = null;
     setActiveDraftId(null);
     userSelectedNote.current = true;
@@ -559,6 +753,7 @@ function AuthenticatedWorkspace({
     setDraftTitle(note.title);
     setDraftContent(note.content);
     setDraftFolderId(note.folder_id);
+    setDraftDatabaseId(note.database_id);
     draftTitleRef.current = note.title;
     draftContentRef.current = note.content;
     setNoteMessage(null);
@@ -567,6 +762,34 @@ function AuthenticatedWorkspace({
     setSelectedCommentId(null);
     setResolvedNotificationRecord(null);
     setActivePane("canvas");
+  };
+
+  const restoreSelectedRevision = (revision: NoteRevision) => {
+    if (logoutPending || role === "viewer" || !workspaceId || !selectedNote || restoringRevision !== null) return;
+    setRestoringRevision(revision.revision);
+    setHistoryError(null);
+    void notesClient.restore(selectedNote.id, revision.revision, {
+      base_revision: selectedNote.revision,
+    }).then((saved) => {
+      installedNotesRef.current.set(saved.id, saved);
+      setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
+      setSelectedNoteId(saved.id);
+      setCreatingNote(false);
+      setDraftTitle(saved.title);
+      setDraftContent(saved.content);
+      setDraftFolderId(saved.folder_id);
+      setDraftDatabaseId(saved.database_id);
+      draftTitleRef.current = saved.title;
+      draftContentRef.current = saved.content;
+      setNoteMessage(`已恢复版本 ${revision.revision}`);
+      setHistoryOpen(false);
+      setEditorMode("edit");
+    }).catch((error: unknown) => {
+      const code = error instanceof ApiClientError ? error.code : "";
+      setHistoryError(code === "NOTE_CONFLICT"
+        ? "笔记已发生变化，历史版本没有覆盖当前内容。请重新加载历史后再试。"
+        : "版本恢复失败，当前内容仍保留。请重试。");
+    }).finally(() => setRestoringRevision(null));
   };
 
   const selectFolderFilter = (folderId: string | null) => {
@@ -582,12 +805,13 @@ function AuthenticatedWorkspace({
       setDraftTitle("");
       setDraftContent("");
       setDraftFolderId(null);
+      setDraftDatabaseId(null);
     }
   };
 
   const createFolder = async (name: string) => {
     if (!workspaceId) throw new Error("Workspace is required");
-    const folder = await new KnowledgeClient(apiClient, workspaceId).createFolder({ name });
+    const folder = await knowledgeClient.createFolder({ name });
     setFolders((current) => [...current, folder].sort((left, right) => left.position - right.position || left.name.localeCompare(right.name)));
     selectFolderFilter(folder.id);
   };
@@ -609,7 +833,7 @@ function AuthenticatedWorkspace({
     setDailyNoteOpening(true);
     setNoteError(null);
     try {
-      const note = await new NotesClient(apiClient, workspaceId).openOrCreateDaily(dailyDate);
+      const note = await notesClient.openOrCreateDaily(dailyDate);
       installedNotesRef.current.set(note.id, note);
       focusInstalledNoteRef.current = true;
       setNotes((current) => [note, ...current.filter((item) => item.id !== note.id)]);
@@ -631,11 +855,18 @@ function AuthenticatedWorkspace({
     selectNote(note);
   };
 
+  const handleWebClipperCapture = (note: Note) => {
+    setNotes((current) => [note, ...current.filter((item) => item.id !== note.id)]);
+    setWorkspaceModal(null);
+    selectNote(note);
+  };
+
   const changeNoteListView = (view: NoteListView) => {
     if (view === noteListView) return;
     setFeatureMapOpen(false);
     noteListViewRef.current = view;
     setNoteListView(view);
+    if (view !== "all") setNoteFolderFilter(null);
     setActivePane("context");
     if (!activeDraftIdRef.current) {
       userSelectedNote.current = false;
@@ -644,6 +875,7 @@ function AuthenticatedWorkspace({
       setDraftTitle("");
       setDraftContent("");
       setDraftFolderId(null);
+      setDraftDatabaseId(null);
     }
   };
 
@@ -651,7 +883,7 @@ function AuthenticatedWorkspace({
     if (!workspaceId || role === "viewer") throw new Error("当前工作区没有标签编辑权限。");
     setNoteTagsError(null);
     try {
-      const created = await new KnowledgeClient(apiClient, workspaceId).createTag({ name, color: "" });
+      const created = await knowledgeClient.createTag({ name, color: "" });
       setTags((current) => current.some((tag) => tag.id === created.id) ? current : [...current, created].sort((left, right) => left.name.localeCompare(right.name)));
       return created;
     } catch (error) {
@@ -667,7 +899,7 @@ function AuthenticatedWorkspace({
     setNoteTagIds((current) => ({ ...current, [noteId]: nextTagIds }));
     setNoteTagsSaving(true);
     setNoteTagsError(null);
-    void new KnowledgeClient(apiClient, workspaceId).setNoteTags(noteId, { tag_ids: nextTagIds }).then(() => {
+    void knowledgeClient.setNoteTags(noteId, { tag_ids: nextTagIds }).then(() => {
       if (mountedRef.current && selectedNoteId === noteId) setNoteMessage("标签已保存");
     }).catch(() => {
       if (!mountedRef.current) return;
@@ -676,6 +908,51 @@ function AuthenticatedWorkspace({
     }).finally(() => {
       if (mountedRef.current) setNoteTagsSaving(false);
     });
+  };
+
+  const applyAiContent = (content: string, action: "summary" | "tasks") => {
+    if (logoutPending || !workspaceId || creatingNote || role === "viewer" || !selectedNote || selectedNote.status === "trashed") return;
+    const heading = action === "summary" ? "AI 摘要" : "AI 提取的任务";
+    const separator = draftContentRef.current.trim() ? "\n\n" : "";
+    updateActiveDraftInput(
+      draftTitleRef.current,
+      `${draftContentRef.current}${separator}## ${heading}\n\n${content.trim()}`,
+    );
+    setNoteMessage("AI 结果已加入草稿，请确认后保存笔记");
+    setNoteError(null);
+  };
+
+  const applyAiTags = async (suggestedNames: string[]) => {
+    if (logoutPending || !workspaceId || creatingNote || role === "viewer" || !selectedNote || selectedNote.status === "trashed") return;
+    const noteId = selectedNote.id;
+    const existingIds = noteTagIds[noteId] ?? [];
+    const nextIds = [...existingIds];
+    for (const name of suggestedNames) {
+      const normalizedName = name.trim().toLocaleLowerCase();
+      if (!normalizedName) continue;
+      const existing = tags.find((tag) => tag.name.trim().toLocaleLowerCase() === normalizedName);
+      const tag = existing ?? await createNoteTag(name.trim());
+      if (!nextIds.includes(tag.id)) nextIds.push(tag.id);
+    }
+    await knowledgeClient.setNoteTags(noteId, { tag_ids: nextIds });
+    setNoteTagIds((current) => ({ ...current, [noteId]: nextIds }));
+    setNoteMessage("AI 标签建议已应用");
+    setNoteTagsError(null);
+  };
+
+  const saveSelectedNoteLinks = async (targetNoteIds: string[]) => {
+    if (logoutPending || !workspaceId || !selectedNoteId || creatingNote || role === "viewer" || noteLinksSaving) return;
+    setNoteLinksSaving(true);
+    setNoteLinksError(null);
+    try {
+      await knowledgeClient.setNoteLinks(selectedNoteId, { target_note_ids: targetNoteIds });
+      setLinkedNoteIds([...targetNoteIds]);
+      setNoteMessage("笔记链接已保存");
+    } catch {
+      setNoteLinksError("笔记链接保存失败，请重试。当前选择已保留。");
+    } finally {
+      setNoteLinksSaving(false);
+    }
   };
 
   const saveNote = () => {
@@ -688,12 +965,12 @@ function AuthenticatedWorkspace({
     setNoteSaving(true);
     setNoteMessage(null);
     setNoteError(null);
-    const client = new NotesClient(apiClient, workspaceId);
-    const request = client.update(selectedNote.id, {
+    const request = notesClient.update(selectedNote.id, {
         base_revision: selectedNote.revision,
         title: draftTitle,
         content: draftContent,
         folder_id: draftFolderId,
+        database_id: draftDatabaseId,
         source: "manual",
       });
     void request.then((saved) => {
@@ -703,29 +980,33 @@ function AuthenticatedWorkspace({
       setDraftTitle(saved.title);
       setDraftContent(saved.content);
       setDraftFolderId(saved.folder_id);
+      setDraftDatabaseId(saved.database_id);
       draftTitleRef.current = saved.title;
       draftContentRef.current = saved.content;
       setNoteMessage("已保存");
+      setEditorMode("edit");
     }).catch(() => {
       setNoteError("笔记保存失败，请稍后重试。未保存的内容仍保留在当前编辑器中。");
     }).finally(() => setNoteSaving(false));
   };
 
-  const changeSelectedNoteStatus = (status: "active" | "trashed") => {
+  const changeSelectedNoteStatus = (status: "active" | "archived" | "trashed") => {
     if (logoutPending || !workspaceId || noteSaving || !selectedNote) return;
     setNoteSaving(true);
     setNoteMessage(null);
     setNoteError(null);
     const contentChanged = draftTitle !== selectedNote.title || draftContent !== selectedNote.content;
     const folderChanged = draftFolderId !== selectedNote.folder_id;
-    void new NotesClient(apiClient, workspaceId).update(selectedNote.id, {
+    const databaseChanged = draftDatabaseId !== selectedNote.database_id;
+    void notesClient.update(selectedNote.id, {
       base_revision: selectedNote.revision,
       status,
       source: "manual",
       ...(contentChanged ? { title: draftTitle, content: draftContent } : {}),
       ...(folderChanged ? { folder_id: draftFolderId } : {}),
+      ...(databaseChanged ? { database_id: draftDatabaseId } : {}),
     }).then((saved) => {
-      const nextView: NoteListView = status === "trashed" ? "trash" : "all";
+      const nextView: NoteListView = status === "trashed" ? "trash" : status === "archived" ? "archived" : "all";
       noteListViewRef.current = nextView;
       installedNotesRef.current.set(saved.id, saved);
       setNoteListView(nextView);
@@ -735,12 +1016,43 @@ function AuthenticatedWorkspace({
       setDraftTitle(saved.title);
       setDraftContent(saved.content);
       setDraftFolderId(saved.folder_id);
+      setDraftDatabaseId(saved.database_id);
       draftTitleRef.current = saved.title;
       draftContentRef.current = saved.content;
       setNoteMessage(status === "trashed" ? "已移入回收站" : "已恢复");
+      setEditorMode("edit");
       setActivePane("canvas");
     }).catch(() => {
       setNoteError(status === "trashed" ? "移入回收站失败，请稍后重试。" : "恢复笔记失败，请稍后重试。");
+    }).finally(() => setNoteSaving(false));
+  };
+
+  const toggleSelectedNoteFlag = (field: "is_favorite" | "is_pinned") => {
+    if (logoutPending || role === "viewer" || noteSaving || !workspaceId || !selectedNote || selectedNote.status === "trashed") return;
+    const nextValue = !selectedNote[field];
+    setNoteSaving(true);
+    setNoteMessage(null);
+    setNoteError(null);
+    void notesClient.update(selectedNote.id, {
+      base_revision: selectedNote.revision,
+      [field]: nextValue,
+      source: "manual",
+    }).then((saved) => {
+      setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
+      installedNotesRef.current.set(saved.id, saved);
+      setSelectedNoteId(saved.id);
+      setDraftTitle(saved.title);
+      setDraftContent(saved.content);
+      setDraftFolderId(saved.folder_id);
+      setDraftDatabaseId(saved.database_id);
+      draftTitleRef.current = saved.title;
+      draftContentRef.current = saved.content;
+      setNoteMessage(field === "is_favorite"
+        ? nextValue ? "已加入收藏" : "已取消收藏"
+        : nextValue ? "已置顶" : "已取消置顶");
+      setEditorMode("edit");
+    }).catch(() => {
+      setNoteError(field === "is_favorite" ? "收藏状态保存失败，请重试。" : "置顶状态保存失败，请重试。");
     }).finally(() => setNoteSaving(false));
   };
 
@@ -756,7 +1068,7 @@ function AuthenticatedWorkspace({
     if (logoutPending || permanentDeletePending || !workspaceId || !selectedNote || selectedNote.status !== "trashed") return;
     setPermanentDeletePending(true);
     setPermanentDeleteError(null);
-    void new NotesClient(apiClient, workspaceId).deletePermanently(selectedNote.id, {
+    void notesClient.deletePermanently(selectedNote.id, {
       base_revision: selectedNote.revision,
     }).then(() => {
       setNotes((current) => current.filter((note) => note.id !== selectedNote.id));
@@ -764,6 +1076,8 @@ function AuthenticatedWorkspace({
       setDraftTitle("");
       setDraftContent("");
       setDraftFolderId(null);
+      setDraftDatabaseId(null);
+      setEditorMode("edit");
       draftTitleRef.current = "";
       draftContentRef.current = "";
       setNoteMessage("笔记已永久删除");
@@ -808,9 +1122,51 @@ function AuthenticatedWorkspace({
     setDraftTitle(result.note.title);
     setDraftContent(result.note.content);
     setDraftFolderId(result.note.folder_id);
+    setDraftDatabaseId(result.note.database_id);
     draftTitleRef.current = result.note.title;
     draftContentRef.current = result.note.content;
     setNoteMessage("已保存");
+  };
+
+  const resolveNoteConflict = async (resolution: "local" | "server") => {
+    const conflict = noteConflict;
+    if (
+      resolvingConflict
+      || !conflict
+      || !workspaceId
+      || conflict.workspaceId !== workspaceId
+      || activeDraftIdRef.current !== conflict.entityId
+    ) return;
+
+    setResolvingConflict(true);
+    setNoteError(null);
+    try {
+      const resolved = await draftController.resolveConflict(
+        workspaceId,
+        conflict.entityId,
+        resolution,
+        conflict.server,
+      );
+      if (!resolved) throw new Error("Conflict draft is no longer available");
+
+      setNoteConflict(null);
+      if (resolution === "local") {
+        setNoteMessage("已保留本地版本，正在基于最新服务器版本重试同步。");
+        setServerRetryVersion((version) => version + 1);
+      } else {
+        setDraftTitle(conflict.server.title);
+        setDraftContent(conflict.server.content);
+        setDraftFolderId(conflict.server.folder_id);
+        setDraftDatabaseId(conflict.server.database_id);
+        draftTitleRef.current = conflict.server.title;
+        draftContentRef.current = conflict.server.content;
+        setNoteMessage("已采用服务器版本，本地草稿已更新，可继续编辑。");
+      }
+    } catch {
+      setNoteError("冲突恢复失败，本地和服务器版本均已保留。请重试。");
+    } finally {
+      setResolvingConflict(false);
+    }
   };
 
   useEffect(() => () => {
@@ -826,8 +1182,14 @@ function AuthenticatedWorkspace({
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
-      if (event.key.toLowerCase() !== "n" || (!event.ctrlKey && !event.metaKey) || event.repeat || isEditableTarget(event.target)) return;
-      if (permanentDeleteOpen) return;
+      if ((!event.ctrlKey && !event.metaKey) || event.repeat || permanentDeleteOpen) return;
+      const key = event.key.toLowerCase();
+      if (key === "k") {
+        event.preventDefault();
+        openCommandPalette();
+        return;
+      }
+      if (key !== "n" || isEditableTarget(event.target)) return;
       event.preventDefault();
       void startNewNote();
     };
@@ -841,11 +1203,24 @@ function AuthenticatedWorkspace({
     let active = true;
     setNoteSaving(true);
     setNoteError(null);
-    void draftController.sync(workspaceId, draftId, new NotesClient(apiClient, workspaceId)).then((result) => {
+    void draftController.sync(workspaceId, draftId, notesClient).then((result) => {
       installSyncedDraft(workspaceId, draftId, result);
-    }).catch(() => {
+    }).catch((error: unknown) => {
       if (active && mountedRef.current && activeDraftIdRef.current === draftId) {
-        setNoteError("笔记同步失败，草稿仍保留在本地。请重试。");
+        const serverCandidate = error instanceof ApiClientError && error.code === "NOTE_CONFLICT"
+          ? NoteSchema.safeParse(error.details?.server_note)
+          : null;
+        if (serverCandidate?.success && serverCandidate.data.workspace_id === workspaceId) {
+          setNoteConflict({
+            workspaceId,
+            entityId: draftId,
+            local: { title: draftTitleRef.current, content: draftContentRef.current },
+            server: serverCandidate.data,
+          });
+          setNoteError("检测到服务器已有新版本，请选择要保留的内容。");
+        } else {
+          setNoteError("笔记同步失败，草稿仍保留在本地。请重试。");
+        }
       }
     }).finally(() => {
       if (active && mountedRef.current) setNoteSaving(false);
@@ -868,7 +1243,7 @@ function AuthenticatedWorkspace({
         return;
       }
       setPendingReconcile(null);
-      void draftController.sync(workspaceId, entityId, new NotesClient(apiClient, workspaceId)).then((next) => {
+      void draftController.sync(workspaceId, entityId, notesClient).then((next) => {
         installSyncedDraft(workspaceId, entityId, next);
       }).catch(() => {
         if (mountedRef.current && activeDraftIdRef.current === entityId) {
@@ -929,6 +1304,8 @@ function AuthenticatedWorkspace({
       setCreatingNote(false);
       setNotesLoading(false);
       setNotesError(null);
+      setNoteSearchQuery("");
+      setDebouncedNoteSearchQuery("");
       return undefined;
     }
     const controller = new AbortController();
@@ -940,15 +1317,25 @@ function AuthenticatedWorkspace({
       ? { status: "active" as const, folderId: null, limit: 50, signal: controller.signal }
       : noteListView === "today"
         ? { status: "active" as const, dailyDate: todayDate, limit: 50, signal: controller.signal }
-        : noteListView === "trash"
-          ? { status: "trashed" as const, limit: 50, signal: controller.signal }
-          : { status: "active" as const, folderId: selectedFolderId, limit: 50, signal: controller.signal };
-    void new NotesClient(apiClient, workspaceId).list(listOptions).then((page) => {
+        : noteListView === "favorites"
+          ? { status: "active" as const, favorite: true, limit: 50, signal: controller.signal }
+          : noteListView === "pinned"
+            ? { status: "active" as const, pinned: true, limit: 50, signal: controller.signal }
+            : noteListView === "archived"
+              ? { status: "archived" as const, limit: 50, signal: controller.signal }
+              : noteListView === "trash"
+                ? { status: "trashed" as const, limit: 50, signal: controller.signal }
+                : { status: "active" as const, folderId: selectedFolderId, limit: 50, signal: controller.signal };
+    const listOptionsWithSearch = debouncedNoteSearchQuery
+      ? { ...listOptions, query: debouncedNoteSearchQuery }
+      : listOptions;
+    void notesClient.list(listOptionsWithSearch).then((page) => {
       if (controller.signal.aborted) return;
       const activeNotes = page.items.filter((note) => noteMatchesListView(note, noteListView, todayDate));
       const installedNotes = [...installedNotesRef.current.values()]
         .filter((note) => note.workspace_id === workspaceId
           && noteMatchesListView(note, noteListView, todayDate)
+          && (!debouncedNoteSearchQuery || [note.title, note.content].join("\n").toLocaleLowerCase().includes(debouncedNoteSearchQuery.toLocaleLowerCase()))
           && (noteFolderFilter === null || note.folder_id === noteFolderFilter));
       const byId = new Map([...activeNotes, ...installedNotes].map((note) => [note.id, note]));
       setNotes([...byId.values()]);
@@ -964,7 +1351,7 @@ function AuthenticatedWorkspace({
       if (!controller.signal.aborted) setNotesLoading(false);
     });
     return () => controller.abort();
-  }, [apiClient, noteFolderFilter, noteListView, workspaceId]);
+  }, [apiClient, debouncedNoteSearchQuery, noteFolderFilter, noteListView, notesRefreshVersion, workspaceId]);
 
   useEffect(() => {
     if (logoutPending || !workspaceId || notesLoading || activeDraftIdRef.current || userSelectedNote.current) return undefined;
@@ -981,8 +1368,7 @@ function AuthenticatedWorkspace({
       setDraftContent(draft.content);
       setNoteMessage(null);
       setNoteError("已恢复本地草稿，服务器同步失败时可重试。");
-      setActiveDomain("notes");
-      setActivePane("canvas");
+      transitionToDomain("notes");
     }).catch(() => {
       if (!cancelled) setNotesError("本地草稿恢复失败。你仍可以尝试新建笔记。");
     });
@@ -995,16 +1381,40 @@ function AuthenticatedWorkspace({
       setDraftTitle(selectedNote.title);
       setDraftContent(selectedNote.content);
       setDraftFolderId(selectedNote.folder_id);
+      setDraftDatabaseId(selectedNote.database_id);
       draftTitleRef.current = selectedNote.title;
       draftContentRef.current = selectedNote.content;
     } else {
       setDraftTitle("");
       setDraftContent("");
       setDraftFolderId(null);
+      setDraftDatabaseId(null);
       draftTitleRef.current = "";
       draftContentRef.current = "";
     }
   }, [creatingNote, selectedNote]);
+
+  useEffect(() => {
+    if (!workspaceId || !selectedNoteId || creatingNote) {
+      setNoteDatabasesLoading(false);
+      setNoteDatabasesError(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setNoteDatabasesLoading(true);
+    setNoteDatabasesError(null);
+    void databaseClient.listDatabases(controller.signal).then((items) => {
+      if (!controller.signal.aborted) setNoteDatabases(items);
+    }).catch((error: unknown) => {
+      if (!isAborted(error, controller.signal)) {
+        setNoteDatabases([]);
+        setNoteDatabasesError("数据库列表暂时无法加载。保存笔记不受影响，可稍后重试。");
+      }
+    }).finally(() => {
+      if (!controller.signal.aborted) setNoteDatabasesLoading(false);
+    });
+    return () => controller.abort();
+  }, [creatingNote, databaseClient, selectedNoteId, workspaceId]);
 
   useEffect(() => {
     if (!workspaceId || !selectedNoteId || creatingNote) {
@@ -1015,7 +1425,7 @@ function AuthenticatedWorkspace({
     const controller = new AbortController();
     setNoteTagsLoading(true);
     setNoteTagsError(null);
-    void new KnowledgeClient(apiClient, workspaceId).listNoteTags(selectedNoteId, controller.signal).then((items) => {
+    void knowledgeClient.listNoteTags(selectedNoteId, controller.signal).then((items) => {
       if (controller.signal.aborted) return;
       setNoteTagIds((current) => ({ ...current, [selectedNoteId]: items.map((tag) => tag.id) }));
     }).catch(() => {
@@ -1025,6 +1435,29 @@ function AuthenticatedWorkspace({
     });
     return () => controller.abort();
   }, [apiClient, creatingNote, selectedNoteId, workspaceId]);
+
+  useEffect(() => {
+    historyController.current?.abort();
+    if (!historyOpen || !workspaceId || !selectedNoteId || creatingNote) {
+      setHistoryLoading(false);
+      return undefined;
+    }
+    const controller = new AbortController();
+    historyController.current = controller;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    void notesClient.listRevisions(selectedNoteId, controller.signal).then((items) => {
+      if (!controller.signal.aborted) setNoteRevisions(items);
+    }).catch(() => {
+      if (!controller.signal.aborted) setHistoryError("版本历史暂时无法加载，当前内容不受影响。请重试。");
+    }).finally(() => {
+      if (!controller.signal.aborted) setHistoryLoading(false);
+    });
+    return () => {
+      controller.abort();
+      if (historyController.current === controller) historyController.current = null;
+    };
+  }, [apiClient, creatingNote, historyOpen, historyRefreshVersion, selectedNoteId, workspaceId]);
 
   useEffect(() => {
     if (!workspaceId || !collaborationEnabled) {
@@ -1057,6 +1490,7 @@ function AuthenticatedWorkspace({
     abortRetryRequests();
     abortDatabaseRequests();
     notificationTargetController.current?.abort();
+    historyController.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -1084,14 +1518,13 @@ function AuthenticatedWorkspace({
     setRefreshing(hasCachedData);
     setAttachmentError(null);
     setDiagnosticError(null);
-    const knowledge = new KnowledgeClient(apiClient, workspaceId);
     void Promise.allSettled([
-      knowledge.listAttachments({
+      knowledgeClient.listAttachments({
         mime_type: (filters.mimeType as Attachment["mime_type"]) || undefined,
         ocr_status: (filters.ocrStatus as OcrStatus) || undefined,
         limit: 50,
       }, controller.signal),
-      knowledge.getKnowledgeDiagnostics({ limit: 50 }, controller.signal),
+      knowledgeClient.getKnowledgeDiagnostics({ limit: 50 }, controller.signal),
     ]).then(([attachmentResult, diagnosticResult]) => {
       if (controller.signal.aborted) return;
       if (attachmentResult.status === "fulfilled") {
@@ -1117,10 +1550,14 @@ function AuthenticatedWorkspace({
     });
 
     return () => abortRecoveryRequests();
-  }, [apiClient, workspaceId, filters.mimeType, filters.ocrStatus, refreshVersion]);
+  }, [filters.mimeType, filters.ocrStatus, knowledgeClient, refreshVersion, workspaceId]);
 
   useEffect(() => {
     if (activeDomain !== "databases") return undefined;
+    if (selectedDatabaseId && databaseSelectionSync.current === selectedDatabaseId && databaseBundle?.database.id === selectedDatabaseId) {
+      databaseSelectionSync.current = null;
+      return undefined;
+    }
     abortDatabaseRequests();
     if (!workspaceId) {
       setDatabases([]);
@@ -1131,83 +1568,65 @@ function AuthenticatedWorkspace({
       return undefined;
     }
     const controller = createDatabaseRequest();
-    const client = new DatabaseClient(apiClient, workspaceId);
-    setDatabaseLoading(true);
+    setDatabaseLoading(!databaseBundle && databases.length === 0);
     setDatabaseError(null);
-    void client.listDatabases(controller.signal).then((items) => {
+    void databaseClient.bootstrap({
+      databaseId: selectedDatabaseId ?? undefined,
+      limit: databaseBundle?.views[0]?.config.page_size ?? 50,
+      signal: controller.signal,
+    }).then((bootstrap) => {
       if (controller.signal.aborted) return;
-      setDatabases(items);
-      setSelectedDatabaseId((current) => items.some((database) => database.id === current) ? current : items[0]?.id ?? null);
-    }).catch((error: unknown) => {
-      if (!isAborted(error, controller.signal)) setDatabaseError("数据库列表暂时无法加载。");
-    }).finally(() => {
-      databaseControllers.current.delete(controller);
-      if (!controller.signal.aborted) setDatabaseLoading(false);
-    });
-    return () => controller.abort();
-  }, [activeDomain, apiClient, databaseRefreshVersion, workspaceId]);
-
-  useEffect(() => {
-    if (activeDomain !== "databases" || !workspaceId || !selectedDatabaseId) {
-      if (!selectedDatabaseId) {
-        setDatabaseBundle(null);
-        setDatabaseRecords([]);
-        setDatabaseRecordsNextCursor(null);
-      }
-      return undefined;
-    }
-    const controller = createDatabaseRequest();
-    const client = new DatabaseClient(apiClient, workspaceId);
-    setDatabaseLoading(true);
-    setDatabaseError(null);
-    setDatabaseBundle(null);
-    setDatabaseRecords([]);
-    setDatabaseRecordsNextCursor(null);
-    void client.getDatabase(selectedDatabaseId, controller.signal).then(async (bundle) => {
-      const page = await client.listRecords(selectedDatabaseId, {
-        // The first bounded page must align with the active saved view's cursor chain.
-        viewId: bundle.views[0]?.id,
-        limit: bundle.views[0]?.config.page_size ?? 50,
-        signal: controller.signal,
-      });
-      return [bundle, page] as const;
-    }).then(([bundle, page]) => {
-      if (controller.signal.aborted) return;
-      const targetRecord = resolvedNotificationRecord?.database_id === bundle.database.id
-        && !page.items.some((record) => record.id === resolvedNotificationRecord.id)
+      setDatabases(bootstrap.items);
+      databaseSelectionSync.current = bootstrap.selected_database_id;
+      setSelectedDatabaseId(bootstrap.selected_database_id);
+      setDatabaseBundle(bootstrap.bundle);
+      const targetRecord = bootstrap.bundle && resolvedNotificationRecord?.database_id === bootstrap.bundle.database.id
+        && !bootstrap.records.items.some((record) => record.id === resolvedNotificationRecord.id)
         ? resolvedNotificationRecord
         : null;
-      const records = targetRecord ? [targetRecord, ...page.items] : page.items;
-      setDatabaseBundle(bundle);
+      const records = targetRecord ? [targetRecord, ...bootstrap.records.items] : bootstrap.records.items;
       setDatabaseRecords(records);
-      setDatabaseRecordsNextCursor(page.next_cursor);
-      setSelectedDatabaseRecordId((current) => current ?? records[0]?.id ?? null);
-      databaseCache.current.writeEntity({ workspaceId, type: "database", id: bundle.database.id, revision: bundle.database.revision, data: bundle.database });
-      for (const property of bundle.properties) {
-        databaseCache.current.writeEntity({ workspaceId, type: "database-property", id: property.id, revision: property.revision, data: property });
-      }
-      for (const record of records) {
-        databaseCache.current.writeEntity({ workspaceId, type: "database-record", id: record.id, revision: record.revision, data: record });
+      setDatabaseRecordsNextCursor(bootstrap.records.next_cursor);
+      setSelectedDatabaseRecordId((current) => current && records.some((record) => record.id === current) ? current : records[0]?.id ?? null);
+      if (bootstrap.bundle) {
+        databaseCache.current.writeEntity({ workspaceId, type: "database", id: bootstrap.bundle.database.id, revision: bootstrap.bundle.database.revision, data: bootstrap.bundle.database });
+        for (const property of bootstrap.bundle.properties) {
+          databaseCache.current.writeEntity({ workspaceId, type: "database-property", id: property.id, revision: property.revision, data: property });
+        }
+        for (const record of records) {
+          databaseCache.current.writeEntity({ workspaceId, type: "database-record", id: record.id, revision: record.revision, data: record });
+        }
       }
     }).catch((error: unknown) => {
-      if (!isAborted(error, controller.signal)) setDatabaseError("数据库内容暂时无法加载。");
+      if (!isAborted(error, controller.signal)) setDatabaseError("数据库内容暂时无法加载，保留最近可用数据。");
     }).finally(() => {
       databaseControllers.current.delete(controller);
       if (!controller.signal.aborted) setDatabaseLoading(false);
     });
     return () => controller.abort();
-  }, [activeDomain, apiClient, databaseRefreshVersion, resolvedNotificationRecord, selectedDatabaseId, workspaceId]);
+  }, [activeDomain, databaseBundle, databaseClient, databaseRefreshVersion, databases.length, resolvedNotificationRecord, selectedDatabaseId, workspaceId]);
+
+  useEffect(() => {
+    if (!webClipperOpen || !workspaceId) return undefined;
+    const controller = new AbortController();
+    void databaseClient.listDatabases(controller.signal).then((items) => {
+      if (!controller.signal.aborted) setDatabases(items);
+    }).catch(() => {
+      // The clipper remains usable for Inbox and Daily when database discovery is unavailable.
+    });
+    return () => controller.abort();
+  }, [databaseClient, webClipperOpen, workspaceId]);
 
   const requestDatabasePage = useCallback(({ cursor, limit, viewId, signal }: { cursor: string | null; limit: number; viewId?: string; signal?: AbortSignal }) => {
     if (!workspaceId || !selectedDatabaseId) return Promise.resolve({ items: [], next_cursor: null });
-    return new DatabaseClient(apiClient, workspaceId).listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, viewId, limit, signal });
-  }, [apiClient, selectedDatabaseId, workspaceId]);
+    return databaseClient.listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, viewId, limit, signal });
+  }, [databaseClient, selectedDatabaseId, workspaceId]);
 
   const createDatabaseFromName = (name: string) => {
     if (!workspaceId || !name.trim() || creatingFirstDatabase) return;
     setCreatingFirstDatabase(true);
     setDatabaseError(null);
-    void new DatabaseClient(apiClient, workspaceId).createDatabase({ name: name.trim(), description: "" }).then((created) => {
+    void databaseClient.createDatabase({ name: name.trim(), description: "" }).then((created) => {
       setDatabases((current) => [...current, created]);
       setSelectedDatabaseId(created.id);
       setFirstDatabaseName("");
@@ -1222,7 +1641,7 @@ function AuthenticatedWorkspace({
   const openDatabaseCreation = () => {
     setFeatureMapOpen(false);
     setFirstDatabaseName("");
-    setActiveDomain("databases");
+    transitionToDomain("databases");
     setActivePane(databases.length > 0 ? "context" : "canvas");
     setDatabaseCreateOpen(databases.length > 0);
   };
@@ -1231,8 +1650,7 @@ function AuthenticatedWorkspace({
     if (!workspaceId || !attachmentCursor || loading || refreshing) return;
     const controller = createRecoveryRequest();
     setRefreshing(true);
-    const knowledge = new KnowledgeClient(apiClient, workspaceId);
-    void knowledge.listAttachments({
+    void knowledgeClient.listAttachments({
       mime_type: (filters.mimeType as Attachment["mime_type"]) || undefined,
       ocr_status: (filters.ocrStatus as OcrStatus) || undefined,
       cursor: attachmentCursor,
@@ -1254,8 +1672,7 @@ function AuthenticatedWorkspace({
     if (!workspaceId || !diagnosticCursor || loading || refreshing) return;
     const controller = createRecoveryRequest();
     setRefreshing(true);
-    const knowledge = new KnowledgeClient(apiClient, workspaceId);
-    void knowledge.getKnowledgeDiagnostics({ cursor: diagnosticCursor, limit: 50 }, controller.signal).then((page) => {
+    void knowledgeClient.getKnowledgeDiagnostics({ cursor: diagnosticCursor, limit: 50 }, controller.signal).then((page) => {
       if (controller.signal.aborted) return;
       setDiagnostics((current) => [...current, ...page.items]);
       setDiagnosticCursor(page.next_cursor);
@@ -1274,11 +1691,10 @@ function AuthenticatedWorkspace({
     if (ids.length === 0) return;
     setRetryingIds(new Set(ids));
     setRetryFeedback(null);
-    const knowledge = new KnowledgeClient(apiClient, workspaceId);
     const controller = createRetryRequest();
     const retry = ids.length === 1
-      ? knowledge.retryAttachmentOcr(ids[0], controller.signal)
-      : knowledge.retryAttachmentOcrBatch(ids, controller.signal);
+      ? knowledgeClient.retryAttachmentOcr(ids[0], controller.signal)
+      : knowledgeClient.retryAttachmentOcrBatch(ids, controller.signal);
     void retry.then((result) => {
       if (controller.signal.aborted) return;
       setRetryFeedback(recoveryFeedback(result));
@@ -1294,65 +1710,185 @@ function AuthenticatedWorkspace({
     });
   };
 
-  const uploadAttachment = (file: File) => {
-    if (!workspaceId || role === "viewer" || uploadingAttachment) return;
+  const updateDiagnosticNotes = async (
+    items: KnowledgeDiagnostic[],
+    patchFor: (note: Note) => { folder_id?: string | null; database_id?: string | null },
+  ) => {
+    if (!workspaceId || role === "viewer" || items.length === 0) return;
+    const updated: Note[] = [];
+    let failed = 0;
+    for (const item of items) {
+      try {
+        const current = await notesClient.get(item.entity_id);
+        updated.push(await notesClient.update(current.id, {
+          base_revision: current.revision,
+          ...patchFor(current),
+          source: "manual",
+        }));
+      } catch {
+        failed += 1;
+      }
+    }
+    if (updated.length > 0) {
+      updated.forEach((note) => installedNotesRef.current.set(note.id, note));
+      setNotes((current) => {
+        const byId = new Map(current.map((note) => [note.id, note]));
+        updated.forEach((note) => byId.set(note.id, note));
+        return [...byId.values()];
+      });
+    }
+    setRetryFeedback(failed > 0
+      ? `已处理 ${updated.length} 篇，${failed} 篇失败；失败项仍保留，可重试。`
+      : `已处理 ${updated.length} 篇笔记。`);
+    setRefreshVersion((version) => version + 1);
+  };
+
+  const classifyUnfiledNotes = (folderId: string) => {
+    if (!folderId) return;
+    void updateDiagnosticNotes(
+      diagnostics.filter((item) => item.kind === "unfiled_note"),
+      () => ({ folder_id: folderId, database_id: null }),
+    );
+  };
+
+  const moveOrphansToInbox = () => {
+    void updateDiagnosticNotes(
+      diagnostics.filter((item) => item.kind === "orphan_note"),
+      () => ({ folder_id: null }),
+    );
+  };
+
+  const ignoreOrphans = () => {
+    setDiagnostics((current) => current.filter((item) => item.kind !== "orphan_note"));
+    setRetryFeedback("已暂时隐藏当前页面的孤立笔记诊断；刷新后仍可恢复查看。");
+  };
+
+  const mergeDuplicateNotes = async (diagnostic: KnowledgeDiagnostic) => {
+    if (!workspaceId || role === "viewer" || diagnostic.kind !== "duplicate_title") return;
+    try {
+      const page = await notesClient.list({ query: diagnostic.title, limit: 100 });
+      const title = diagnostic.title.trim().toLocaleLowerCase();
+      const matches = page.items
+        .filter((note) => note.status === "active" && note.title.trim().toLocaleLowerCase() === title)
+        .sort((left, right) => right.updated_at.localeCompare(left.updated_at) || right.id.localeCompare(left.id));
+      if (matches.length < 2) throw new Error("当前没有足够的同名笔记可合并。");
+      const [primary, ...duplicates] = matches;
+      const mergedContent = [
+        primary.content,
+        ...duplicates.map((note) => `\n\n---\n\n# ${note.title || "未命名笔记"}\n\n${note.content}`),
+      ].join("").trim();
+      const saved = await notesClient.update(primary.id, {
+        base_revision: primary.revision,
+        content: mergedContent,
+        source: "manual",
+      });
+      installedNotesRef.current.set(saved.id, saved);
+      for (const duplicate of duplicates) {
+        const archived = await notesClient.update(duplicate.id, {
+          base_revision: duplicate.revision,
+          status: "archived",
+          source: "manual",
+        });
+        installedNotesRef.current.set(archived.id, archived);
+      }
+      setNotes((current) => current.map((note) => {
+        if (note.id === saved.id) return saved;
+        const archived = duplicates.find((item) => item.id === note.id);
+        return archived ? { ...archived, status: "archived" as const } : note;
+      }));
+      setRetryFeedback(`已合并 ${matches.length} 篇同名笔记，重复副本已归档，可在归档列表恢复。`);
+      setRefreshVersion((version) => version + 1);
+    } catch (error) {
+      setDiagnosticError(error instanceof Error ? error.message : "同名笔记合并失败，内容未删除。请重试。");
+    }
+  };
+
+  const uploadAttachment = (file: File, insertIntoEditor = false) => {
+    const targetNoteId = selectedNoteId;
+    if (!workspaceId || role === "viewer" || uploadingAttachment) return Promise.resolve();
     const mimeType = file.type;
     if (!isSupportedAttachmentMime(mimeType)) {
       setUploadError("不支持这个附件类型。请上传 PDF、JPG、PNG、WEBP 或纯文本文件。");
-      return;
+      if (insertIntoEditor) setNoteError("附件类型不受支持，正文内容未改变。");
+      return Promise.resolve();
     }
     if (file.size <= 0 || file.size > MAX_UPLOAD_BYTES) {
       setUploadError("附件必须大于 0 且不超过 25 MB。");
-      return;
+      if (insertIntoEditor) setNoteError("附件大小不符合要求，正文内容未改变。");
+      return Promise.resolve();
     }
 
     setUploadingAttachment(true);
     setUploadError(null);
-    const knowledge = new KnowledgeClient(apiClient, workspaceId);
     let reservedId: string | null = null;
-    void (async () => {
+    return (async () => {
       try {
-        const reserved = await knowledge.createAttachmentUpload({
+        const reserved = await knowledgeClient.createAttachmentUpload({
           filename: file.name,
           mime_type: mimeType,
           size_bytes: file.size,
           note_id: selectedNoteId,
         });
         reservedId = reserved.id;
-        const uploaded = await knowledge.uploadAttachmentContent(reserved.id, await file.arrayBuffer());
-        const completed = await knowledge.completeAttachmentUpload(uploaded.id);
+        const uploaded = await knowledgeClient.uploadAttachmentContent(reserved.id, await file.arrayBuffer());
+        const completed = await knowledgeClient.completeAttachmentUpload(uploaded.id);
         setAttachments((current) => [completed, ...current.filter((attachment) => attachment.id !== completed.id)]);
         setRetryFeedback(`已上传 ${file.name}，OCR 已加入队列。`);
+        if (insertIntoEditor && targetNoteId && targetNoteId === selectedNoteId && !creatingNote) {
+          const safeLabel = file.name.replace(/[\[\]\r\n]/gu, "_");
+          const link = `[${safeLabel}](/api/v2/attachments/${encodeURIComponent(completed.id)}/file)`;
+          const separator = draftContentRef.current.trim() ? "\n\n" : "";
+          updateActiveDraftInput(draftTitleRef.current, `${draftContentRef.current}${separator}${link}`);
+          setNoteError(null);
+          setNoteMessage("附件已插入正文，保存笔记后生效。");
+        }
         setRefreshVersion((version) => version + 1);
       } catch {
-        if (reservedId) await knowledge.deleteAttachment(reservedId).catch(() => undefined);
+        if (reservedId) await knowledgeClient.deleteAttachment(reservedId).catch(() => undefined);
         setUploadError("附件上传失败，请重新选择文件。未完成的上传会自动清理。");
+        if (insertIntoEditor) setNoteError("附件上传失败，正文内容仍保留。请重试。");
       } finally {
         if (mountedRef.current) setUploadingAttachment(false);
       }
     })();
   };
 
-  const changeDomain = (domain: ProductDomain) => {
-    if (domain === "collaboration") setCollaborationInitialSection("people");
+  const changeDomain = (domain: ProductDomain, options?: { collaborationSection?: "people" | "comments" | "shares" }) => {
+    if (domain === "collaboration") setCollaborationInitialSection(options?.collaborationSection ?? "people");
+    if (domain === "account") setAccountSubsection("overview");
     setFeatureMapOpen(false);
-    setActiveDomain(domain);
-    setActivePane("canvas");
+    transitionToDomain(domain);
   };
   useEffect(() => {
     setNavigationUser((current) => current.id === user.id && current.email === user.email && current.displayName === user.displayName ? current : user);
   }, [user.displayName, user.email, user.id]);
+  useEffect(() => {
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const preload = () => {
+      for (const domain of ["databases", "knowledge", "reminders", "account"] as const) {
+        void preloadWorkspaceDomain(domain).catch(() => undefined);
+      }
+    };
+    const idleHandle = idleWindow.requestIdleCallback?.(preload, { timeout: 2_000 });
+    const timer = idleHandle === undefined ? window.setTimeout(preload, 500) : undefined;
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (idleHandle !== undefined) idleWindow.cancelIdleCallback?.(idleHandle);
+    };
+  }, []);
   const handleProfileChange = (next: Profile) => {
     setNavigationUser((current) => ({ ...current, email: next.email, displayName: next.display_name || next.email }));
   };
   const openAccountSubsection = (subsection: AccountSubsection) => {
-    setAccountSubsection(subsection);
     changeDomain("account");
+    setAccountSubsection(subsection);
   };
   const openFeatureMap = () => {
     setFeatureMapOpen(true);
-    setActiveDomain("notes");
-    setActivePane("canvas");
+    transitionToDomain("notes");
   };
   const navigateFeatureMap = (domain: Parameters<typeof changeDomain>[0]) => {
     if (domain === "account") {
@@ -1361,6 +1897,55 @@ function AuthenticatedWorkspace({
     }
     changeDomain(domain);
   };
+  const closeCommandPalette = () => {
+    setCommandPaletteOpen(false);
+    setCommandPaletteQuery("");
+  };
+  const openCommandPalette = () => {
+    setFeatureMapOpen(false);
+    setCommandPaletteQuery("");
+    setCommandPaletteOpen(true);
+  };
+  const runCommand = (callback: () => void | Promise<unknown>) => {
+    closeCommandPalette();
+    void callback();
+  };
+  const commandActions: CommandAction[] = [
+    {
+      id: "new-note",
+      label: "新建笔记",
+      description: "立即打开可编辑的新笔记草稿",
+      keywords: ["创建", "note", "new"],
+      shortcut: "Ctrl/Cmd+N",
+      onSelect: () => runCommand(() => { void startNewNote(); }),
+    },
+    ...(workspaceId ? [{
+      id: "today-note",
+      label: "打开今日笔记",
+      description: "打开或创建今天的每日笔记",
+      keywords: ["daily", "today"],
+      onSelect: () => runCommand(() => { void openTodayNote(); }),
+    }, {
+      id: "quick-capture",
+      label: "快速捕获",
+      description: "先记录内容，稍后再整理",
+      keywords: ["capture", "inbox"],
+      onSelect: () => runCommand(() => setQuickCaptureOpen(true)),
+    }] : []),
+    {
+      id: "create-center",
+      label: "创建内容",
+      description: "打开笔记、数据库、提醒和导入入口",
+      keywords: ["create", "import"],
+      onSelect: () => runCommand(() => setCreateCenterOpen(true)),
+    },
+    { id: "databases", label: "数据库", description: "打开结构化数据库工作区", keywords: ["table", "board", "calendar"], onSelect: () => runCommand(() => changeDomain("databases")) },
+    { id: "knowledge", label: "知识整理", description: "搜索、附件恢复和知识图谱", keywords: ["search", "graph", "ocr"], onSelect: () => runCommand(() => changeDomain("knowledge")) },
+    { id: "reminders", label: "提醒", description: "查看和管理提醒", keywords: ["reminder", "calendar"], onSelect: () => runCommand(() => changeDomain("reminders")) },
+    { id: "collaboration", label: "协作", description: "成员、评论、通知和分享", keywords: ["team", "comment", "share"], onSelect: () => runCommand(() => changeDomain("collaboration")) },
+    { id: "ai", label: "AI 助手", description: "打开安全的服务端 AI 对话", keywords: ["assistant", "chat", "人工智能"], onSelect: () => runCommand(() => changeDomain("ai")) },
+    { id: "account", label: "个人资料与设置", description: "修改个人信息、密码、安全和工作区", keywords: ["profile", "settings", "password"], onSelect: () => runCommand(() => openAccountSubsection("personal")) },
+  ];
   const changeWorkspace = async (nextWorkspaceId: string) => {
     if (!workspaceId || nextWorkspaceId === workspaceId) return;
     try {
@@ -1376,7 +1961,7 @@ function AuthenticatedWorkspace({
     }
   };
   const productNavigationProps = {
-    active: activeDomain,
+    active: requestedDomain,
     user: navigationUser,
     unreadCount,
     collaborationEnabled,
@@ -1384,6 +1969,8 @@ function AuthenticatedWorkspace({
     contextOpen: activePane === "context",
     logoutPending,
     onChange: changeDomain,
+    onPrefetch: (domain: ProductDomain) => { void preloadWorkspaceDomain(domain).catch(() => undefined); },
+    onCreateCenter: openCreateCenter,
     onCreateNote: startNewNote,
     createNoteDisabled: logoutPending,
     onContextToggle: () => setActivePane((pane) => pane === "context" ? "canvas" : "context"),
@@ -1394,14 +1981,20 @@ function AuthenticatedWorkspace({
   };
   const navigation = <ProductNavigation {...productNavigationProps} mode="rail" />;
   const mobileNavigation = <ProductNavigation {...productNavigationProps} mode="mobile" />;
-  const createCenterAction = (
+  const createCenterDialog = (
     <CreateCenter
       open={createCenterOpen}
       onOpenChange={setCreateCenterOpen}
+      renderTrigger={false}
+      focusReturnRef={createCenterFocusTargetRef}
       disabled={logoutPending}
       onCreateNote={workspaceId ? startNewNote : undefined}
       onQuickCapture={workspaceId ? () => {
         replaceWorkspaceModal("quick-capture");
+        return { status: "completed" };
+      } : undefined}
+      onWebClipper={workspaceId ? () => {
+        replaceWorkspaceModal("web-clipper");
         return { status: "completed" };
       } : undefined}
       onTodayNote={workspaceId ? openTodayNote : undefined}
@@ -1409,7 +2002,33 @@ function AuthenticatedWorkspace({
         openDatabaseCreation();
         return { status: "completed" };
       } : undefined}
-    />
+      onCreateReminder={workspaceId ? () => {
+        changeDomain("reminders");
+        return { status: "completed" };
+      } : undefined}
+      onImport={workspaceId ? () => {
+        replaceWorkspaceModal("import");
+        return { status: "completed" };
+      } : undefined}
+      />
+  );
+  const createCenterAction = (
+    <button className="create-center-trigger" type="button" aria-label={activeDomain === "notes" && !selectedNote && !creatingNote && workbenchMode !== "mobile" ? "打开创建中心" : "创建内容"} title="打开创建中心" disabled={logoutPending} onClick={(event) => openCreateCenter(event.currentTarget)}>
+      <Plus aria-hidden="true" size={17} />
+      <span>创建内容</span>
+    </button>
+  );
+  const createCenterQuickStartTrigger = (
+    <button className="create-center-trigger" type="button" aria-label="创建内容" title="打开创建中心" disabled={logoutPending} onClick={(event) => openCreateCenter(event.currentTarget)}>
+      <Plus aria-hidden="true" size={17} />
+      <span>创建内容</span>
+    </button>
+  );
+  const desktopAccountAction = (
+    <button className="create-center-trigger workspace-account-trigger" type="button" aria-label="打开个人资料与设置" title="个人资料、密码、安全与工作区" disabled={logoutPending} onClick={() => openAccountSubsection("personal")}>
+      <UserRound aria-hidden="true" size={16} />
+      <span>个人资料与设置</span>
+    </button>
   );
   const featureMapAction = (
     <button className="feature-map-trigger" type="button" aria-label="打开功能地图" aria-pressed={featureMapOpen} onClick={openFeatureMap}>
@@ -1418,22 +2037,17 @@ function AuthenticatedWorkspace({
     </button>
   );
   const showWorkspaceOverview = activeDomain === "notes" && !selectedNote && !creatingNote;
-  const mobileCreateAction = activePane !== "context" ? (
-      <div className="mobile-create-actions">
-        {featureMapAction}
-        {createCenterAction}
-        {activeDomain === "notes" ? (
-        <button className="mobile-create-note-button" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
-          <Plus aria-hidden="true" size={20} />
-          <span>新建笔记</span>
-        </button>
-      ) : null}
-    </div>
+  const mobileCreateAction = activePane !== "context" && activeDomain === "notes" ? (
+    <button className="mobile-create-note-button" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
+      <Plus aria-hidden="true" size={20} />
+      <span>新建笔记</span>
+    </button>
   ) : null;
   const desktopCreateAction = (
     <div className="desktop-create-actions">
       {featureMapAction}
-      {!showWorkspaceOverview ? createCenterAction : null}
+      {createCenterAction}
+      {desktopAccountAction}
       {activeDomain === "notes" && !showWorkspaceOverview ? (
         <button
           className="editor-new-note-button"
@@ -1459,6 +2073,14 @@ function AuthenticatedWorkspace({
           <button className="secondary-create-note" type="button" aria-label="快速捕获" onClick={() => setQuickCaptureOpen(true)}>
             <span>快速捕获</span>
           </button>
+          <button className="secondary-create-note context-entry-action" type="button" aria-label="创建内容" onClick={(event) => openCreateCenter(event.currentTarget)}>
+            <Plus aria-hidden="true" size={15} />
+            <span>创建内容</span>
+          </button>
+          <button className="secondary-create-note context-entry-action" type="button" aria-label="个人资料与设置（笔记列表）" onClick={() => openAccountSubsection("personal")}>
+            <UserRound aria-hidden="true" size={15} />
+            <span>个人资料</span>
+          </button>
           <button className="primary-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
             <Plus aria-hidden="true" size={17} />
             <span>新建笔记</span>
@@ -1474,7 +2096,7 @@ function AuthenticatedWorkspace({
         onCreateFolder={createFolder}
       />
       <nav className="note-list-views" aria-label="笔记视图">
-        {([["all", "全部"], ["inbox", "收件箱"], ["today", "今日"], ["trash", "回收站"]] as const).map(([view, label]) => (
+        {([["all", "全部"], ["inbox", "收件箱"], ["today", "今日"], ["favorites", "收藏"], ["pinned", "置顶"], ["archived", "归档"], ["trash", "回收站"]] as const).map(([view, label]) => (
           <button key={view} type="button" aria-pressed={noteListView === view} className={noteListView === view ? "active" : ""} onClick={() => changeNoteListView(view)}>{label}</button>
         ))}
       </nav>
@@ -1484,16 +2106,34 @@ function AuthenticatedWorkspace({
         </button>
       ) : null}
       {noteListView === "today" && activePane === "context" && noteError ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
-      <label className="search-field"><Search size={15} /><input aria-label="搜索笔记" placeholder="搜索笔记" /></label>
+      <div className="search-field" role="search">
+        <Search aria-hidden="true" size={15} />
+        <input aria-label="搜索笔记" placeholder="搜索标题、正文、标签…" maxLength={500} value={noteSearchQuery} onChange={(event) => setNoteSearchQuery(event.target.value)} />
+        {noteSearchQuery ? (
+          <button className="search-clear-button" type="button" aria-label="清除笔记搜索" title="清除搜索" onClick={() => setNoteSearchQuery("")}>
+            <X aria-hidden="true" size={15} />
+          </button>
+        ) : null}
+      </div>
+      {noteSearchQuery.trim() !== debouncedNoteSearchQuery ? <p className="search-status" role="status" aria-live="polite">正在搜索…</p> : null}
       {notesLoading ? <p className="database-empty" role="status">正在加载笔记…</p> : null}
       {notesError ? <p className="database-operation-error" role="alert">{notesError}</p> : null}
       {!notesLoading && visibleNotes.length === 0 ? (
         <div className="note-empty-state">
-          <p className="database-empty">暂无笔记，开始记录你的想法。</p>
-          <button className="primary-create-note note-empty-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
-            <Plus aria-hidden="true" size={17} />
-            <span>新建笔记</span>
-          </button>
+          {debouncedNoteSearchQuery ? (
+            <>
+              <p className="database-empty">没有找到匹配笔记。</p>
+              <button className="secondary-create-note" type="button" onClick={() => setNoteSearchQuery("")}>清除搜索</button>
+            </>
+          ) : (
+            <>
+              <p className="database-empty">暂无笔记，开始记录你的想法。</p>
+              <button className="primary-create-note note-empty-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
+                <Plus aria-hidden="true" size={17} />
+                <span>新建笔记</span>
+              </button>
+            </>
+          )}
         </div>
       ) : null}
       {visibleNotes.map((note) => (
@@ -1580,6 +2220,11 @@ function AuthenticatedWorkspace({
         onDiagnosticNavigate?.(diagnostic as KnowledgeDiagnostic);
         setActivePane("context");
       }}
+      folders={folders}
+      onClassifyUnfiled={role === "viewer" || logoutPending ? undefined : classifyUnfiledNotes}
+      onMoveOrphansToInbox={role === "viewer" || logoutPending ? undefined : moveOrphansToInbox}
+      onIgnoreOrphans={ignoreOrphans}
+      onMergeDuplicate={role === "viewer" || logoutPending ? undefined : (diagnostic) => { void mergeDuplicateNotes(diagnostic); }}
       onFiltersChange={setFilters}
       onLoadMoreAttachments={loadMoreAttachments}
       onLoadMoreDiagnostics={loadMoreDiagnostics}
@@ -1596,11 +2241,12 @@ function AuthenticatedWorkspace({
         recordsNextCursor={databaseRecordsNextCursor}
         views={databaseBundle.views}
         templates={databaseBundle.templates}
-        client={new DatabaseClient(apiClient, workspaceId)}
+        client={databaseClient}
+        collaborationClient={collaborationClient}
         onMutation={() => setDatabaseRefreshVersion((version) => version + 1)}
         onRecordsPageRequest={requestDatabasePage}
-        onBoardMove={(input) => new DatabaseClient(apiClient, workspaceId).boardMove(databaseBundle.database.id, input)}
-        onCalendarAssign={(input) => new DatabaseClient(apiClient, workspaceId).calendarAssign(databaseBundle.database.id, input)}
+        onBoardMove={(input) => databaseClient.boardMove(databaseBundle.database.id, input)}
+        onCalendarAssign={(input) => databaseClient.calendarAssign(databaseBundle.database.id, input)}
       />
     </Suspense>
   ) : (
@@ -1619,27 +2265,31 @@ function AuthenticatedWorkspace({
       <Suspense fallback={<p className="knowledge-search-state" role="status">正在加载知识工具…</p>}>
         <LazyKnowledgeSearchPanel client={knowledgeClient} />
         <LazyKnowledgeGraphPanel client={knowledgeClient} />
+        <LazyKnowledgeCalendarPanel client={knowledgeClient} />
       </Suspense>
       {recoveryPanel}
     </section>
   );
-  const remindersCanvas = <Suspense fallback={<p className="reminder-state" role="status">正在加载提醒中心…</p>}><LazyReminderPanel client={knowledgeClient} /></Suspense>;
-  const aiCanvas = <AIChatPanel client={apiClient} workspaceId={workspaceId ?? ""} />;
+  const remindersCanvas = <Suspense fallback={<p className="reminder-state" role="status">正在加载提醒中心…</p>}><LazyReminderPanel client={knowledgeClient} notesClient={notesClient} /></Suspense>;
+  const aiCanvas = <Suspense fallback={<p className="database-empty" role="status">正在加载 AI 助手…</p>}><LazyAIChatPanel client={apiClient} workspaceId={workspaceId ?? ""} showStatus /></Suspense>;
   const accountCanvas = (
-    <AccountCenter
-      client={profileClient}
-      collaboration={collaborationClient}
-      operations={operationsClient}
-      workspaces={workspaces}
-      activeWorkspaceId={activeWorkspaceId}
-      currentUserId={userId}
-      initialTab={accountSubsection === "workspace" ? "workspace" : "profile"}
-      onWorkspaceChange={changeWorkspace}
-      onPrepareDelete={() => draftController.quiesce()}
-      onDeleteFailed={() => draftController.resume()}
-      onDeleted={onDeleted}
-      onProfileChange={handleProfileChange}
-    />
+    <Suspense fallback={<p className="database-empty" role="status">正在加载账户中心…</p>}>
+      <LazyAccountCenter
+        client={profileClient}
+        collaboration={collaborationClient}
+        operations={operationsClient}
+        workspaces={workspaces}
+        activeWorkspaceId={activeWorkspaceId}
+        currentUserId={userId}
+        initialTab={accountSubsection === "workspace" ? "workspace" : accountSubsection === "personal" ? "profile" : "overview"}
+        onWorkspaceChange={changeWorkspace}
+        onCreateWorkspace={onCreateWorkspace}
+        onPrepareDelete={() => draftController.quiesce()}
+        onDeleteFailed={() => draftController.resume()}
+        onDeleted={onDeleted}
+        onProfileChange={handleProfileChange}
+      />
+    </Suspense>
   );
   const collaborationUnavailableCanvas = (
     <section className="product-domain-page product-status-page">
@@ -1653,6 +2303,7 @@ function AuthenticatedWorkspace({
       <header className="editor-toolbar">
         <span className="saved-state" role="status" aria-live="polite"><span /> 已保存</span>
         <div>
+          <button type="button" aria-label="打开快速操作" aria-keyshortcuts="Control+K Meta+K" title="快速操作（Ctrl/Cmd+K）" onClick={openCommandPalette}><Command aria-hidden="true" size={17} /></button>
           <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}><Bell aria-hidden="true" size={17} /></button>
           <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>
         </div>
@@ -1670,18 +2321,16 @@ function AuthenticatedWorkspace({
             <p>常用入口集中在这里，不需要先找菜单。</p>
           </div>
           <div className="workspace-quick-start-actions">
-            {workbenchMode === "mobile" ? null : (
-              <button className="workspace-quick-start-action workspace-quick-start-primary" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={() => { void startNewNote(); }}>
-                <span className="workspace-quick-start-icon"><Plus aria-hidden="true" size={18} /></span>
-                <span><strong>新建笔记</strong><small>打开一篇空白笔记</small></span>
-              </button>
-            )}
+            <button className="workspace-quick-start-action workspace-quick-start-primary" type="button" aria-label={workbenchMode === "mobile" ? "新建笔记（快速开始）" : "新建笔记"} disabled={logoutPending} onClick={() => { void startNewNote(); }}>
+              <span className="workspace-quick-start-icon"><Plus aria-hidden="true" size={18} /></span>
+              <span><strong>新建笔记</strong><small>打开一篇空白笔记</small></span>
+            </button>
             <div className="workspace-quick-start-create-center">
-              {createCenterAction}
+              {createCenterQuickStartTrigger}
               <small>笔记、快速捕获或数据库</small>
             </div>
             <button className="workspace-quick-start-action" type="button" aria-label="个人资料与设置" disabled={logoutPending} onClick={() => openAccountSubsection("personal")}>
-              <span className="workspace-quick-start-icon"><Boxes aria-hidden="true" size={18} /></span>
+              <span className="workspace-quick-start-icon"><UserRound aria-hidden="true" size={18} /></span>
               <span><strong>个人资料与设置</strong><small>资料、密码、安全和工作区</small></span>
             </button>
           </div>
@@ -1745,8 +2394,7 @@ function AuthenticatedWorkspace({
       setResolvedNotificationRecord(null);
       setSelectedCommentId(target.commentId);
       setCollaborationInitialSection("comments");
-      setActiveDomain("collaboration");
-      setActivePane("canvas");
+      transitionToDomain("collaboration");
       return;
     }
 
@@ -1758,8 +2406,7 @@ function AuthenticatedWorkspace({
       setSelectedCommentId(target.commentId);
       setDatabaseError(null);
       setCollaborationInitialSection("comments");
-      setActiveDomain("collaboration");
-      setActivePane("canvas");
+      transitionToDomain("collaboration");
     };
     const loadedRecord = collaborationRecords.find((record) => record.id === target.targetId && (!target.databaseId || record.database_id === target.databaseId));
     const loadedDatabase = loadedRecord ? databases.find((database) => database.id === loadedRecord.database_id) : undefined;
@@ -1771,7 +2418,7 @@ function AuthenticatedWorkspace({
     if (!workspaceId) return;
     const controller = new AbortController();
     notificationTargetController.current = controller;
-    void resolveDatabaseNotificationTarget(new DatabaseClient(apiClient, workspaceId), target, controller.signal).then(({ database, databases: availableDatabases, record }) => {
+    void resolveDatabaseNotificationTarget(databaseClient, target, controller.signal).then(({ database, databases: availableDatabases, record }) => {
       if (!controller.signal.aborted) selectTarget(availableDatabases, database, record);
     }).catch((error: unknown) => {
       if (isAborted(error, controller.signal)) return;
@@ -1780,8 +2427,7 @@ function AuthenticatedWorkspace({
       setSelectedCommentId(target.commentId);
       setDatabaseError("无法定位通知中的数据库记录。");
       setCollaborationInitialSection("comments");
-      setActiveDomain("collaboration");
-      setActivePane("canvas");
+      transitionToDomain("collaboration");
     }).finally(() => {
       if (notificationTargetController.current === controller) notificationTargetController.current = null;
     });
@@ -1801,6 +2447,8 @@ function AuthenticatedWorkspace({
   return (
     <>
       <div className="workspace-modal-background" data-testid="workspace-modal-background" aria-hidden={workspaceModal !== null || undefined} inert={workspaceModal !== null || undefined}>
+      {workspaceSync.status === "syncing" ? <div className="sync-status-banner" role="status">正在同步离线操作…</div> : null}
+      {workspaceSync.status === "error" ? <div className="sync-status-banner sync-status-error" role="status" aria-live="assertive"><span>离线操作同步失败，本地数据仍保留，可安全重试。</span><button type="button" onClick={workspaceSync.retry}>重试同步</button></div> : null}
       {serviceWorkerUpdate ? (
         <div className="update-banner" role="status">
           <span>新版本已准备好。</span>
@@ -1816,7 +2464,10 @@ function AuthenticatedWorkspace({
           <button type="button" disabled={logoutPending} onClick={onRetryLogout}>重试退出登录</button>
         </div>
       ) : null}
-      <AdaptiveWorkbench
+      <WorkspaceShell
+        activeDomain={activeDomain}
+        requestedDomain={requestedDomain}
+        domainPending={domainPending}
         navigation={navigation}
         mobileNavigation={mobileNavigation}
         mobileCreateAction={mobileCreateAction}
@@ -1824,17 +2475,24 @@ function AuthenticatedWorkspace({
         contextualList={activeDomain === "databases" ? databaseContextualList : activeDomain === "notes" ? contextualList : undefined}
         inspector={<div className="inspector-content"><small>页面信息</small><h3>{inspectorTitle}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
         inspectorOpen={inspectorOpen}
-        externalModalOpen={workspaceModal !== null}
+        externalModalOpen={workspaceModal !== null || commandPaletteOpen}
         activePane={activePane}
         onActivePaneChange={setActivePane}
         onInspectorOpen={openInspector}
         onInspectorClose={closeInspector}
       >
         <>
-        {activeDomain === "collaboration" ? collaborationEnabled && workspaceId ? <CollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /> : collaborationUnavailableCanvas : activeDomain === "databases" ? databaseCanvas : activeDomain === "knowledge" ? knowledgeCanvas : activeDomain === "reminders" ? remindersCanvas : activeDomain === "ai" ? aiCanvas : activeDomain === "account" ? accountCanvas : featureMapOpen ? workspaceOverviewCanvas : selectedNote || creatingNote ? <article className="editor-document">
+        {activeDomain === "collaboration" ? collaborationEnabled && workspaceId ? <Suspense fallback={<p className="database-empty" role="status">正在加载协作中心…</p>}><LazyCollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /></Suspense> : collaborationUnavailableCanvas : activeDomain === "databases" ? databaseCanvas : activeDomain === "knowledge" ? knowledgeCanvas : activeDomain === "reminders" ? remindersCanvas : activeDomain === "ai" ? aiCanvas : activeDomain === "account" ? accountCanvas : featureMapOpen ? workspaceOverviewCanvas : selectedNote || creatingNote ? <article className="editor-document">
           <header className="editor-toolbar">
             <span className="saved-state" role="status" aria-live="polite"><span /> {noteSaving ? "保存中…" : noteMessage ?? "未保存更改"}</span>
             <div>
+              {!creatingNote && selectedNote ? <>
+                <button type="button" aria-label={selectedNote.is_favorite ? "取消收藏" : "收藏笔记"} title={selectedNote.is_favorite ? "取消收藏" : "收藏笔记"} disabled={logoutPending || role === "viewer" || noteSaving || selectedNote.status === "trashed"} onClick={() => toggleSelectedNoteFlag("is_favorite")}><Star aria-hidden="true" size={17} fill={selectedNote.is_favorite ? "currentColor" : "none"} /></button>
+                <button type="button" aria-label={selectedNote.is_pinned ? "取消置顶" : "置顶笔记"} title={selectedNote.is_pinned ? "取消置顶" : "置顶笔记"} disabled={logoutPending || role === "viewer" || noteSaving || selectedNote.status === "trashed"} onClick={() => toggleSelectedNoteFlag("is_pinned")}><Pin aria-hidden="true" size={17} fill={selectedNote.is_pinned ? "currentColor" : "none"} /></button>
+                {selectedNote.status !== "trashed" ? <button type="button" aria-label={selectedNote.status === "archived" ? "取消归档" : "归档笔记"} title={selectedNote.status === "archived" ? "取消归档" : "归档笔记"} disabled={logoutPending || role === "viewer" || noteSaving} onClick={() => changeSelectedNoteStatus(selectedNote.status === "archived" ? "active" : "archived")}><Archive aria-hidden="true" size={17} /></button> : null}
+                <button type="button" aria-label="打开笔记分享" title="打开笔记分享" disabled={logoutPending || noteSaving} onClick={() => changeDomain("collaboration", { collaborationSection: "shares" })}><Share2 aria-hidden="true" size={17} /></button>
+              </> : null}
+              <button type="button" aria-label="打开快速操作" aria-keyshortcuts="Control+K Meta+K" title="快速操作（Ctrl/Cmd+K）" onClick={openCommandPalette}><Command aria-hidden="true" size={17} /></button>
               <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}><Bell aria-hidden="true" size={17} /></button>
               <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>
             </div>
@@ -1842,26 +2500,83 @@ function AuthenticatedWorkspace({
           <div className="editor-copy">
             <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
             <h1>{draftTitle.trim() || "未命名笔记"}</h1>
-            <label className="note-editor-field">标题<input ref={titleInputRef} aria-label="笔记标题" disabled={logoutPending || selectedNote?.status === "trashed"} value={draftTitle} onChange={(event) => updateActiveDraftInput(event.target.value, draftContentRef.current)} /></label>
-            <label className="note-editor-field">文件夹<select aria-label="笔记文件夹" disabled={logoutPending || creatingNote || selectedNote?.status === "trashed"} value={draftFolderId ?? ""} onChange={(event) => { setDraftFolderId(event.target.value || null); setNoteMessage(null); }}><option value="">未分类</option>{folders.map((folder, index) => <option key={`${folder.id || "folder"}-${index}`} value={folder.id}>{folder.name}</option>)}</select></label>
-            {!creatingNote && selectedNote ? <NoteTagPanel
-              tags={tags}
-              selectedTagIds={noteTagIds[selectedNote.id] ?? []}
-              saving={noteTagsLoading || noteTagsSaving}
-              readOnly={role === "viewer" || selectedNote.status === "trashed"}
-              error={noteTagsError}
-              onChange={updateSelectedNoteTags}
-              onCreateTag={role === "viewer" || selectedNote.status === "trashed" ? undefined : createNoteTag}
-            /> : null}
-            <label className="note-editor-field">内容<textarea aria-label="笔记内容" disabled={logoutPending || selectedNote?.status === "trashed"} value={draftContent} onChange={(event) => updateActiveDraftInput(draftTitleRef.current, event.target.value)} /></label>
+            {editorMode === "edit" ? <>
+              <label className="note-editor-field">标题<input ref={titleInputRef} aria-label="笔记标题" disabled={logoutPending || selectedNote?.status === "trashed"} value={draftTitle} onChange={(event) => updateActiveDraftInput(event.target.value, draftContentRef.current)} /></label>
+              <label className="note-editor-field">文件夹<select aria-label="笔记文件夹" disabled={logoutPending || creatingNote || selectedNote?.status === "trashed"} value={draftFolderId ?? ""} onChange={(event) => { setDraftFolderId(event.target.value || null); setNoteMessage(null); }}><option value="">未分类</option>{folders.map((folder, index) => <option key={`${folder.id || "folder"}-${index}`} value={folder.id}>{folder.name}</option>)}</select></label>
+              {!creatingNote && selectedNote ? <>
+                <label className="note-editor-field">笔记数据库<select
+                  aria-label="笔记数据库"
+                  aria-busy={noteDatabasesLoading}
+                  disabled={logoutPending || role === "viewer" || noteSaving || selectedNote.status === "trashed" || noteDatabasesLoading}
+                  value={draftDatabaseId ?? ""}
+                  onChange={(event) => { setDraftDatabaseId(event.target.value || null); setNoteMessage(null); }}
+                >
+                  <option value="">未关联数据库</option>
+                  {noteDatabasesLoading ? <option value="__loading" disabled>加载数据库…</option> : null}
+                  {noteDatabases.map((database) => <option key={database.id} value={database.id}>{database.name}</option>)}
+                </select></label>
+                {noteDatabasesError ? <p className="database-operation-error" role="alert">{noteDatabasesError}</p> : null}
+              </> : null}
+              {!creatingNote && selectedNote ? <NoteTagPanel
+                tags={tags}
+                selectedTagIds={noteTagIds[selectedNote.id] ?? []}
+                saving={noteTagsLoading || noteTagsSaving}
+                readOnly={role === "viewer" || selectedNote.status === "trashed"}
+                error={noteTagsError}
+                onChange={updateSelectedNoteTags}
+                onCreateTag={role === "viewer" || selectedNote.status === "trashed" ? undefined : createNoteTag}
+              /> : null}
+              {!creatingNote && selectedNote ? <NoteLinksPanel
+                currentNoteId={selectedNote.id}
+                notes={notes}
+                linkedNoteIds={linkedNoteIds}
+                backlinks={backlinks}
+                loading={noteLinksLoading}
+                readOnly={role === "viewer" || selectedNote.status === "trashed"}
+                saving={noteLinksSaving}
+                error={noteLinksError}
+                onSave={saveSelectedNoteLinks}
+              /> : null}
+              {!creatingNote && selectedNote ? <NoteAiActions
+                key={selectedNote.id}
+                client={apiClient}
+                workspaceId={workspaceId ?? ""}
+                note={{ title: draftTitle, content: draftContent }}
+                disabled={logoutPending || role === "viewer" || noteSaving || selectedNote.status === "trashed"}
+                onApplyContent={applyAiContent}
+                onApplyTags={applyAiTags}
+              /> : null}
+              <label className="note-editor-field">内容<NoteEditorSurface
+                value={draftContent}
+                ariaLabel="笔记内容"
+                readOnly={logoutPending || selectedNote?.status === "trashed"}
+                onUploadAttachment={!creatingNote && selectedNote && role !== "viewer" && selectedNote.status !== "trashed" ? (file) => uploadAttachment(file, true) : undefined}
+                uploadingAttachment={uploadingAttachment}
+                onChange={(content) => updateActiveDraftInput(draftTitleRef.current, content)}
+              /></label>
+              {noteConflict && noteConflict.workspaceId === workspaceId && noteConflict.entityId === activeDraftId ? (
+                <NoteConflictPanel
+                  local={noteConflict.local}
+                  server={noteConflict.server}
+                  onKeepLocal={() => { void resolveNoteConflict("local"); }}
+                  onUseServer={() => { void resolveNoteConflict("server"); }}
+                />
+              ) : null}
+            </> : <MarkdownPreview content={draftContent} />}
             <div className="note-editor-actions">
+              <button type="button" className="note-mode-action" onClick={() => setEditorMode((mode) => mode === "edit" ? "preview" : "edit")}>
+                {editorMode === "edit" ? "预览笔记" : "返回编辑器"}
+              </button>
               {selectedNote?.status !== "trashed" ? (
-                <button type="button" disabled={logoutPending || noteSaving || (!creatingNote && !draftTitle.trim() && !draftContent.trim())} onClick={saveNote}>{creatingNote && noteError ? "重试同步" : "保存笔记"}</button>
+                editorMode === "edit" ? <button type="button" disabled={logoutPending || noteSaving || (!creatingNote && !draftTitle.trim() && !draftContent.trim())} onClick={saveNote}>{creatingNote && noteError ? "重试同步" : "保存笔记"}</button> : null
               ) : null}
               {!creatingNote && selectedNote ? (
-                <button type="button" className="note-lifecycle-action" disabled={logoutPending || noteSaving} onClick={() => changeSelectedNoteStatus(selectedNote.status === "trashed" ? "active" : "trashed")}>
-                  {selectedNote.status === "trashed" ? "恢复笔记" : "移入回收站"}
-                </button>
+                <>
+                  <button type="button" className="note-lifecycle-action" disabled={logoutPending || role === "viewer" || noteSaving} onClick={() => changeSelectedNoteStatus(selectedNote.status === "trashed" ? "active" : "trashed")}>
+                    {selectedNote.status === "trashed" ? "恢复笔记" : "移入回收站"}
+                  </button>
+                  {selectedNote.status === "archived" ? <button type="button" className="note-lifecycle-action" disabled={logoutPending || role === "viewer" || noteSaving} onClick={() => changeSelectedNoteStatus("active")}>取消归档</button> : null}
+                </>
               ) : null}
               {selectedNote?.status === "trashed" ? (
                 <button type="button" className="note-lifecycle-action note-lifecycle-danger" disabled={logoutPending || noteSaving || permanentDeletePending} onClick={(event) => openPermanentDelete(event.currentTarget)}>永久删除</button>
@@ -1869,7 +2584,19 @@ function AuthenticatedWorkspace({
               {noteMessage ? <p role="status">{noteMessage}</p> : null}
               {noteError && activePane !== "context" ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
             </div>
-            <p className="note-content-preview" aria-label="笔记内容预览">{draftContent || "开始记录你的想法。"}</p>
+            {!creatingNote && selectedNote ? (
+              <NoteHistoryPanel
+                open={historyOpen}
+                revisions={noteRevisions}
+                loading={historyLoading}
+                error={historyError}
+                restoringRevision={restoringRevision}
+                readOnly={role === "viewer" || selectedNote.status === "trashed"}
+                onToggle={() => setHistoryOpen((open) => !open)}
+                onRetry={() => setHistoryRefreshVersion((version) => version + 1)}
+                onRestore={restoreSelectedRevision}
+              />
+            ) : null}
             {recoveryPanel}
           </div>
         </article> : workspaceOverviewCanvas}
@@ -1883,14 +2610,38 @@ function AuthenticatedWorkspace({
           onDeepLink={navigateNotificationTarget}
         />
         </>
-      </AdaptiveWorkbench>
+      </WorkspaceShell>
       </div>
+      {createCenterDialog}
+      <CommandPalette
+        open={commandPaletteOpen}
+        query={commandPaletteQuery}
+        actions={commandActions}
+        onQueryChange={setCommandPaletteQuery}
+        onClose={closeCommandPalette}
+      />
       {quickCaptureOpen && workspaceId ? (
         <div className="quick-capture-backdrop" role="presentation" aria-hidden={workspaceModal !== "quick-capture" || undefined} inert={workspaceModal !== "quick-capture" || undefined} onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickCaptureOpen(false); }}>
           <div className="quick-capture-dialog" role="dialog" aria-modal="true" aria-labelledby="quick-capture-title" onMouseDown={(event) => event.stopPropagation()}>
-            <QuickCapturePanel client={new NotesClient(apiClient, workspaceId)} onClose={() => setQuickCaptureOpen(false)} onCaptured={handleQuickCapture} />
+            <QuickCapturePanel client={notesClient} onClose={() => setQuickCaptureOpen(false)} onCaptured={handleQuickCapture} />
           </div>
         </div>
+      ) : null}
+      {webClipperOpen && workspaceId ? (
+        <WebClipperPanel
+          client={notesClient}
+          databases={databases}
+          onClose={() => setWorkspaceModal(null)}
+          onCaptured={handleWebClipperCapture}
+        />
+      ) : null}
+      {importCenterOpen && workspaceId ? (
+        <ImportExportCenter
+          open
+          onOpenChange={setImportCenterOpen}
+          operations={operationsClient}
+          onImported={() => setNotesRefreshVersion((version) => version + 1)}
+        />
       ) : null}
       {permanentDeleteOpen && selectedNote ? (
         <div className="account-dialog-backdrop" role="presentation" aria-hidden={workspaceModal !== "permanent-delete" || undefined} inert={workspaceModal !== "permanent-delete" || undefined} onMouseDown={(event) => { if (event.target === event.currentTarget && !permanentDeletePending) closePermanentDeleteDialog(); }}>
@@ -2015,7 +2766,7 @@ export function App({
   }
   return (
     <AuthGate key={authGateVersion} client={authClient} turnstileSiteKey={turnstileSiteKey} resetToken={resetToken}>
-      {(session) => {
+      {(session, refreshSession) => {
         const routeWorkspaceId = route.kind === "workspace" ? route.workspaceId : undefined;
         const routeAuthority = workspaceRouteSelectedRef.current;
         return <WorkspaceSessionBoundary
@@ -2050,6 +2801,17 @@ export function App({
               onWorkspaceChange={(nextWorkspaceId) => {
                 workspaceRouteSelectedRef.current = { userId: session.user.id, workspaceId: nextWorkspaceId };
                 setRoute({ kind: "workspace", workspaceId: nextWorkspaceId });
+              }}
+              onCreateWorkspace={async (name) => {
+                const workspace = await authClient.createWorkspace({ name });
+                if (!await refreshSession()) {
+                  throw Object.assign(new Error("Workspace was created but the session could not be refreshed"), {
+                    code: "WORKSPACE_CREATED_SESSION_REFRESH_FAILED",
+                  });
+                }
+                workspaceRouteSelectedRef.current = { userId: session.user.id, workspaceId: workspace.id };
+                setRoute({ kind: "workspace", workspaceId: workspace.id });
+                return workspace;
               }}
               onDeleted={accountDeleted}
               onDiagnosticNavigate={onDiagnosticNavigate}

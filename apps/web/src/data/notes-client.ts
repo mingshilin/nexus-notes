@@ -1,5 +1,6 @@
 import type {
   CreateNoteInput,
+  ClipperInput,
   DailyNoteInput,
   DeleteNoteInput,
   Note,
@@ -23,9 +24,12 @@ export interface NoteListOptions {
   cursor?: string;
   limit?: number;
   signal?: AbortSignal;
+  query?: string;
   status?: Note["status"];
   folderId?: string | null;
   dailyDate?: string;
+  favorite?: boolean;
+  pinned?: boolean;
 }
 
 export class NotesClient {
@@ -42,13 +46,25 @@ export class NotesClient {
   list(options: NoteListOptions = {}) {
     const limit = options.limit ?? 50;
     const params = new URLSearchParams();
+    const query = options.query?.trim();
+    if (query) params.set("q", query);
     if (options.status) params.set("status", options.status);
     if (options.folderId !== undefined) params.set("folder_id", options.folderId ?? "none");
     if (options.dailyDate) params.set("daily_date", options.dailyDate);
+    if (options.favorite !== undefined) params.set("favorite", String(options.favorite));
+    if (options.pinned !== undefined) params.set("pinned", String(options.pinned));
     if (options.cursor) params.set("cursor", options.cursor);
     params.set("limit", String(limit));
     const cursorKey = options.cursor ?? "first";
-    const filterKey = [options.status ?? "", options.folderId === undefined ? "" : options.folderId ?? "none", options.dailyDate ?? ""].join(":");
+    const filterParts = [
+      options.status ?? "",
+      options.folderId === undefined ? "" : options.folderId ?? "none",
+      options.dailyDate ?? "",
+    ];
+    if (query) filterParts.push(query);
+    if (options.favorite !== undefined) filterParts.push(String(options.favorite));
+    if (options.pinned !== undefined) filterParts.push(String(options.pinned));
+    const filterKey = filterParts.join(":");
     return this.client.request<{ items: Note[]; next_cursor: string | null }>({
       path: `/api/v2/notes?${params.toString()}`,
       headers: this.headers(),
@@ -94,6 +110,10 @@ export class NotesClient {
 
   quickCapture(input: QuickCaptureInput) {
     return this.noteCommand<Note>("/api/v2/capture", "POST", input);
+  }
+
+  clipperCapture(input: ClipperInput, options: NoteCommandOptions = {}) {
+    return this.noteCommand<Note>("/api/v2/clipper/capture", "POST", input, options.idempotencyKey);
   }
 
   listRevisions(noteId: string, signal?: AbortSignal) {

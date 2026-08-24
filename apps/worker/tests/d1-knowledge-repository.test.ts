@@ -161,4 +161,26 @@ describe("D1KnowledgeRepository", () => {
     expect(statements[1]?.sql).toMatch(/DELETE FROM saved_searches[\s\S]*workspace_id = \?[\s\S]*user_id = \?[\s\S]*id = \?/i);
     expect(statements[1]?.bindings).toEqual(["ws-1", "user-1", "saved-1"]);
   });
+
+  it("merges daily notes, reminders, and date-property records without leaving the workspace", async () => {
+    const worker = await loadWorker();
+    const rows = [
+      { id: "daily-1", kind: "daily_note", date: "2026-08-21", title: "Daily", entity_id: "note-1", note_id: "note-1", database_id: null, status: "active" },
+      { id: "reminder-1", kind: "reminder", date: "2026-08-22", title: "Reminder", entity_id: "reminder-1", note_id: "note-1", database_id: null, status: "pending" },
+      { id: "record-1", kind: "database_record", date: "2026-08-23", title: "Record", entity_id: "record-1", note_id: null, database_id: "db-1", status: null },
+    ];
+    const { db, statements } = createDb({ all: { results: rows } });
+    const Repository = worker.D1KnowledgeRepository as new (db: unknown) => any;
+    const repository = new Repository(db);
+
+    await expect(repository.getCalendarFeed({ workspaceId: "ws-1", userId: "user-1", role: "viewer", capabilities: new Set<string>() }, { from: "2026-08-01", to: "2026-08-31" })).resolves.toEqual({ items: rows });
+    expect(statements[0]?.sql).toMatch(/daily_date/i);
+    expect(statements[0]?.sql).toMatch(/reminders/i);
+    expect(statements[0]?.sql).toMatch(/record_values/i);
+    expect(statements[0]?.sql).toMatch(/database_properties/i);
+    expect(statements[0]?.sql).toMatch(/is_hidden = 0/i);
+    expect(statements[0]?.sql).toMatch(/field_permissions/i);
+    expect(statements[0]?.sql).toMatch(/workspace_id = \?/i);
+    expect(statements[0]?.bindings).toEqual(["ws-1", "2026-08-01", "2026-08-31", "ws-1", "user-1", "2026-08-01", "2026-08-31", "ws-1", "viewer", "user-1", "viewer", "user-1", "2026-08-01", "2026-08-31"]);
+  });
 });

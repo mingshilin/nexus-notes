@@ -50,6 +50,7 @@ export function useMobileChrome() {
       const inset = viewport ? calculateKeyboardInset(window.innerHeight, viewport) : 0;
       document.documentElement.style.setProperty("--keyboard-inset", `${inset}px`);
       dispatch({ type: "keyboard", inset });
+      if (viewport) dispatch({ type: "viewport-scale", scale: viewport.scale });
     };
 
     document.addEventListener("scroll", onScroll, true);
@@ -57,6 +58,7 @@ export function useMobileChrome() {
     document.addEventListener("focusout", onFocusOut);
     window.visualViewport?.addEventListener("resize", updateViewport);
     window.visualViewport?.addEventListener("scroll", updateViewport);
+    window.addEventListener("resize", updateViewport);
     updateViewport();
 
     return () => {
@@ -65,6 +67,7 @@ export function useMobileChrome() {
       document.removeEventListener("focusout", onFocusOut);
       window.visualViewport?.removeEventListener("resize", updateViewport);
       window.visualViewport?.removeEventListener("scroll", updateViewport);
+      window.removeEventListener("resize", updateViewport);
     };
   }, []);
 

@@ -26,6 +26,11 @@ export const CreateJobInputSchema = z.object({
 }).strict();
 export type CreateJobInput = z.infer<typeof CreateJobInputSchema>;
 
+export const CancelJobInputSchema = z.object({
+  base_revision: z.number().int().positive(),
+}).strict();
+export type CancelJobInput = z.infer<typeof CancelJobInputSchema>;
+
 export const JobSchema = z.object({
   id: EntityIdSchema,
   workspace_id: EntityIdSchema,

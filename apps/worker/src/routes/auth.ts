@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AuthSession } from "@nexus/contracts";
+import { CreateWorkspaceInputSchema, type AuthSession } from "@nexus/contracts";
 import type { RouteDefinition } from "../http/route-registry";
 
 const registerSchema = z.object({
@@ -59,6 +59,7 @@ interface AuthRouteService {
   }): Promise<{ accepted: boolean }>;
   resetPassword(input: { token: string; password: string }): Promise<void>;
   getSession(userId: string): Promise<AuthSession>;
+  createWorkspace?(input: { userId: string; name: string }): Promise<unknown>;
   logout(sessionId: string): Promise<void>;
 }
 
@@ -172,6 +173,22 @@ export function registerAuthRoutes<TEnv>(
     handler: async ({ env, body }) => {
       await createService(env).resetPassword({ token: body.token, password: body.password });
       return { data: { reset: true } };
+    },
+  });
+
+  registry.register({
+    method: "POST",
+    path: "/api/v2/workspaces",
+    auth: "session",
+    body: CreateWorkspaceInputSchema,
+    rateLimit: { bucket: "ip", limit: 10, windowSeconds: 60 * 60 },
+    handler: async ({ env, principal, body }) => {
+      const service = createService(env);
+      if (!service.createWorkspace) throw new Error("Workspace creation is unavailable");
+      return {
+        status: 201,
+        data: await service.createWorkspace({ userId: principal!.userId, name: body.name }),
+      };
     },
   });
 

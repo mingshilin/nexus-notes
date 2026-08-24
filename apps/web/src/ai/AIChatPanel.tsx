@@ -1,11 +1,15 @@
 import type { AiChatMessage, AiChatResponse } from "@nexus/contracts";
 import { Bot, Send, Sparkles } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { ApiClient } from "../data/api-client";
+import { AIConfigPanel } from "./AIConfigPanel";
+
+const QUICK_PROMPTS = ["制定今日计划", "整理我的任务", "如何改进这篇笔记"] as const;
 
 interface AIChatPanelProps {
   client: Pick<ApiClient, "request">;
   workspaceId: string;
+  showStatus?: boolean;
 }
 
 function errorMessage(error: unknown) {
@@ -15,11 +19,57 @@ function errorMessage(error: unknown) {
   return "AI 服务暂时不可用，请稍后重试。你的问题仍保留在输入框中。";
 }
 
-export function AIChatPanel({ client, workspaceId }: AIChatPanelProps) {
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatPanelProps) {
   const [messages, setMessages] = useState<AiChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [configuration, setConfiguration] = useState<"configured" | "unconfigured" | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const chatControllerRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      chatControllerRef.current?.abort();
+      chatControllerRef.current = null;
+    };
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!showStatus || !workspaceId) {
+      setConfiguration(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    void client.request<{ configured: boolean }>({
+      path: "/api/v2/ai/status",
+      headers: { "x-workspace-id": workspaceId },
+      requestClass: "query",
+      policy: { timeoutMs: 8_000, retry: 1, dedupeKey: `ai-status:${workspaceId}`, signal: controller.signal },
+    }).then((status) => {
+      if (!controller.signal.aborted) setConfiguration(status.configured ? "configured" : "unconfigured");
+    }).catch(() => {
+      if (!controller.signal.aborted) setConfiguration(null);
+    });
+    return () => controller.abort();
+  }, [client, showStatus, workspaceId]);
+
+  const fillQuickPrompt = (prompt: string) => {
+    setDraft(prompt);
+    inputRef.current?.focus();
+  };
+
+  const clearConversation = () => {
+    setMessages([]);
+    setError(null);
+  };
 
   const send = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -35,6 +85,13 @@ export function AIChatPanel({ client, workspaceId }: AIChatPanelProps) {
     setDraft("");
     setError(null);
     setPending(true);
+    chatControllerRef.current?.abort();
+    const controller = new AbortController();
+    chatControllerRef.current = controller;
+    const requestWorkspaceId = workspaceId;
+    const isCurrentRequest = () => mountedRef.current
+      && chatControllerRef.current === controller
+      && requestWorkspaceId === workspaceId;
     try {
       const response = await client.request<AiChatResponse>({
         path: "/api/v2/ai/chat",
@@ -42,15 +99,27 @@ export function AIChatPanel({ client, workspaceId }: AIChatPanelProps) {
         headers: { "x-workspace-id": workspaceId },
         body: { messages: nextMessages },
         requestClass: "command",
-        policy: { timeoutMs: 35_000, retry: 0, idempotencyKey: crypto.randomUUID() },
+        policy: { timeoutMs: 35_000, retry: 0, idempotencyKey: crypto.randomUUID(), signal: controller.signal },
       });
+      if (!isCurrentRequest()) return;
       setMessages([...nextMessages, { role: "assistant", content: response.message }]);
     } catch (caught) {
+      if (controller.signal.aborted || isAbortError(caught)) {
+        if (isCurrentRequest()) {
+          setMessages(messages);
+          setDraft(content);
+        }
+        return;
+      }
+      if (!isCurrentRequest()) return;
       setMessages(messages);
       setError(errorMessage(caught));
       setDraft(content);
     } finally {
-      setPending(false);
+      if (isCurrentRequest()) {
+        chatControllerRef.current = null;
+        setPending(false);
+      }
     }
   };
 
@@ -62,12 +131,26 @@ export function AIChatPanel({ client, workspaceId }: AIChatPanelProps) {
           <h1 id="ai-chat-title">AI 助手</h1>
           <p className="product-domain-lead">围绕你的问题展开对话。服务端密钥不会进入浏览器或笔记内容。</p>
         </div>
+        {messages.length > 0 ? <button type="button" onClick={clearConversation}>清空对话</button> : null}
         <span className="ai-chat-mark" aria-hidden="true"><Bot size={22} /></span>
       </div>
+      {configuration === "unconfigured" ? <p className="ai-chat-config-status" role="status">AI 尚未配置。你可以在下方添加自己的 OpenAI-compatible provider，API Key 不会以明文返回。</p> : null}
+      {configuration === "configured" ? <p className="ai-chat-config-status ready" role="status">AI 服务已连接，可以开始对话。</p> : null}
+      {showStatus ? <AIConfigPanel client={client} /> : null}
       {!workspaceId ? <p role="status">未选择工作区，无法使用 AI 助手。</p> : null}
       <div className="ai-chat-messages" aria-live="polite">
         {messages.length === 0 ? (
-          <div className="ai-chat-empty"><Sparkles size={18} aria-hidden="true" /><p>可以问我如何整理任务、拆解目标或改进笔记结构。</p></div>
+          <div className="ai-chat-empty">
+            <Sparkles size={18} aria-hidden="true" />
+            <div>
+              <p>可以问我如何整理任务、拆解目标或改进笔记结构。</p>
+              <div className="ai-chat-quick-prompts" aria-label="快捷提问">
+                {QUICK_PROMPTS.map((prompt) => (
+                  <button type="button" key={prompt} onClick={() => fillQuickPrompt(prompt)}>{prompt}</button>
+                ))}
+              </div>
+            </div>
+          </div>
         ) : messages.map((message, index) => (
           <article className={`ai-chat-message ai-chat-message-${message.role}`} key={`${message.role}-${index}`}>
             <small>{message.role === "user" ? "你" : "AI 助手"}</small>
@@ -80,6 +163,7 @@ export function AIChatPanel({ client, workspaceId }: AIChatPanelProps) {
       <form className="ai-chat-form" onSubmit={send}>
         <textarea
           aria-label="输入问题"
+          ref={inputRef}
           value={draft}
           maxLength={4_000}
           disabled={!workspaceId || pending}

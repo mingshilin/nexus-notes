@@ -41,4 +41,22 @@ describe("D1OperationsRepository", () => {
     await expect(repository.getUsage("ws-1")).resolves.toEqual({ notes: 0, databases: 0, attachment_bytes: 0, queued_jobs: 0 });
     await expect(repository.getFeedback("ws-2", feedback.id)).resolves.toBeNull();
   });
+
+  it("cancels only a queued job when the revision still matches", async () => {
+    const resource = await createTestD1();
+    resources.push(resource);
+    await seedTenants(resource.db);
+    const repository = new D1OperationsRepository(resource.db, () => "job-cancel-1");
+    const job = await repository.createJob(context, {
+      kind: "import",
+      idempotency_key: "import-cancel-1",
+      payload: { format: "markdown", filename: "cancel.md", content: "# Cancel" },
+    }, "2026-08-22T00:00:00.000Z");
+    const cancelJob = (repository as any).cancelJob.bind(repository) as (context: { workspaceId: string }, jobId: string, input: { base_revision: number }, now: string) => Promise<unknown>;
+
+    await expect(cancelJob({ workspaceId: "ws-1" }, job.id, { base_revision: job.revision }, "2026-08-22T00:00:01.000Z"))
+      .resolves.toMatchObject({ id: job.id, status: "cancelled", revision: 2 });
+    await expect(cancelJob({ workspaceId: "ws-1" }, job.id, { base_revision: 2 }, "2026-08-22T00:00:02.000Z"))
+      .resolves.toBeNull();
+  });
 });

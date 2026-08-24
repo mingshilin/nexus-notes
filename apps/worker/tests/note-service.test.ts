@@ -28,6 +28,7 @@ function createRepository(overrides: Record<string, unknown> = {}) {
   return {
     createNote: vi.fn(async (input) => ({ ...serverNote, ...input, revision: 1 })),
     openOrCreateDaily: vi.fn(async (input) => ({ ...serverNote, ...input, daily_date: input.dailyDate, revision: 1 })),
+    hasDatabase: vi.fn(async () => true),
     getNote: vi.fn(async () => serverNote),
     listNotes: vi.fn(async () => ({ items: [serverNote], nextCursor: null })),
     updateNote: vi.fn(async () => ({ note: { ...serverNote, revision: 4 }, current: null })),
@@ -131,6 +132,70 @@ describe("NoteService", () => {
       content: "  First useful line  \nMore context",
       source: "manual",
     }));
+  });
+
+  it("appends a clip to today's Daily Note with a revision-aware update", async () => {
+    const worker = await loadWorker();
+    const existing = { ...serverNote, id: "daily-1", daily_date: "2026-08-24", content: "Earlier entry", revision: 4 };
+    const repository = createRepository({
+      openOrCreateDaily: vi.fn(async () => existing),
+      updateNote: vi.fn(async (input) => ({ note: { ...existing, content: input.patch.content, revision: 5 }, current: null })),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository, {
+      createId: () => "clip-id",
+      clock: () => new Date("2026-08-24T12:00:00.000Z"),
+    });
+
+    await expect(service.clipperCapture(
+      { workspaceId: "ws-1", userId: "user-1", requestId: "req-clip" },
+      { title: "Article", url: "https://example.com/article", content: "Captured body", target: "daily" },
+    )).resolves.toMatchObject({ id: "daily-1", revision: 5, content: "Earlier entry\n\nSource: https://example.com/article\n\nCaptured body" });
+
+    expect(repository.openOrCreateDaily).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "ws-1",
+      dailyDate: "2026-08-24",
+      source: "import",
+    }));
+    expect(repository.updateNote).toHaveBeenCalledWith(expect.objectContaining({
+      noteId: "daily-1",
+      baseRevision: 4,
+      patch: { content: "Earlier entry\n\nSource: https://example.com/article\n\nCaptured body", source: "import" },
+    }));
+  });
+
+  it("does not drop a clip when an existing Daily Note has an empty body", async () => {
+    const worker = await loadWorker();
+    const existing = { ...serverNote, id: "daily-empty", daily_date: "2026-08-24", content: "", revision: 2 };
+    const repository = createRepository({
+      openOrCreateDaily: vi.fn(async () => existing),
+      updateNote: vi.fn(async (input) => ({ note: { ...existing, content: input.patch.content, revision: 3 }, current: null })),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository, { clock: () => new Date("2026-08-24T12:00:00.000Z") });
+
+    await expect(service.clipperCapture(
+      { workspaceId: "ws-1", userId: "user-1" },
+      { content: "Captured body", target: "daily" },
+    )).resolves.toMatchObject({ id: "daily-empty", content: "Captured body", revision: 3 });
+    expect(repository.updateNote).toHaveBeenCalledWith(expect.objectContaining({
+      noteId: "daily-empty",
+      baseRevision: 2,
+      patch: { content: "Captured body", source: "import" },
+    }));
+  });
+
+  it("rejects a database clip that is outside the current workspace", async () => {
+    const worker = await loadWorker();
+    const repository = createRepository({ hasDatabase: vi.fn(async () => false) });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository);
+
+    await expect(service.clipperCapture(
+      { workspaceId: "ws-1", userId: "user-1" },
+      { content: "Captured body", target: "database", database_id: "db-other" },
+    )).rejects.toMatchObject({ code: "DATABASE_NOT_FOUND", status: 404 });
+    expect(repository.createNote).not.toHaveBeenCalled();
   });
 
   it("returns both server and submitted revisions when an update conflicts", async () => {

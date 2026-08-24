@@ -11,6 +11,7 @@ import type {
   CreateDatabaseViewInput,
   CsvExportInput,
   CsvImportInput,
+  CsvPreview,
   Database,
   DatabaseComment,
   DatabasePermission,
@@ -18,6 +19,7 @@ import type {
   DatabaseProperty,
   DatabaseRecord,
   DatabaseTemplate,
+  DatabaseStats,
   DatabaseView,
   DeleteDatabaseInput,
   DeleteDatabasePermissionInput,
@@ -39,6 +41,7 @@ import type { ApiClient } from "./api-client";
 
 export interface DatabaseClientOptions {
   createId(): string;
+  now(): number;
 }
 
 export interface DatabaseBundle {
@@ -49,8 +52,24 @@ export interface DatabaseBundle {
   templates: DatabaseTemplate[];
 }
 
+export interface DatabaseBootstrap {
+  items: Database[];
+  selected_database_id: string | null;
+  bundle: DatabaseBundle | null;
+  records: { items: DatabaseRecord[]; next_cursor: string | null };
+}
+
+interface DatabaseCacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
+
+const DATABASE_CACHE_TTL_MS = 2 * 60_000;
+
 export class DatabaseClient {
   private readonly createId: () => string;
+  private readonly now: () => number;
+  private readonly cache = new Map<string, DatabaseCacheEntry<unknown>>();
 
   constructor(
     private readonly client: Pick<ApiClient, "request">,
@@ -58,18 +77,47 @@ export class DatabaseClient {
     options: Partial<DatabaseClientOptions> = {},
   ) {
     this.createId = options.createId ?? (() => crypto.randomUUID());
+    this.now = options.now ?? (() => Date.now());
   }
 
   listDatabases(signal?: AbortSignal) {
-    return this.query<{ items: Database[] }>("/api/v2/databases", `databases:${this.workspaceId}`, signal).then(({ items }) => items);
+    return this.cached("databases", async () => {
+      const { items } = await this.query<{ items: Database[] }>("/api/v2/databases", `databases:${this.workspaceId}`, signal);
+      return items;
+    });
   }
 
   getDatabase(databaseId: string, signal?: AbortSignal) {
-    return this.query<DatabaseBundle>(
-      `/api/v2/databases/${encodeURIComponent(databaseId)}`,
-      `database:${this.workspaceId}:${databaseId}`,
+    return this.cached(`database:${databaseId}`, () => this.query<DatabaseBundle>(
+        `/api/v2/databases/${encodeURIComponent(databaseId)}`,
+        `database:${this.workspaceId}:${databaseId}`,
+        signal,
+      ));
+  }
+
+  getStats(databaseId: string, signal?: AbortSignal) {
+    return this.cached(`database-stats:${databaseId}`, () => this.query<DatabaseStats>(
+      `${this.databasePath(databaseId)}/stats`,
+      `database-stats:${this.workspaceId}:${databaseId}`,
       signal,
-    );
+    ));
+  }
+
+  bootstrap(options: { databaseId?: string; limit?: number; signal?: AbortSignal } = {}) {
+    const params = new URLSearchParams();
+    if (options.databaseId) params.set("database_id", options.databaseId);
+    params.set("limit", String(options.limit ?? 50));
+    const key = `bootstrap:${options.databaseId ?? "first"}:${options.limit ?? 50}`;
+    return this.cached(key, async () => {
+      const value = await this.query<DatabaseBootstrap>(
+        `/api/v2/databases/bootstrap?${params}`,
+        `database-bootstrap:${this.workspaceId}:${key}`,
+        options.signal,
+      );
+      this.writeCache("databases", value.items);
+      if (value.bundle) this.writeCache(`database:${value.bundle.database.id}`, value.bundle);
+      return value;
+    });
   }
 
   createDatabase(input: CreateDatabaseInput) {
@@ -239,6 +287,17 @@ export class DatabaseClient {
     return this.command<{ items: DatabaseRecord[]; imported_count: number }>(`${this.databasePath(databaseId)}/import/csv`, "POST", input);
   }
 
+  previewCsv(databaseId: string, input: CsvImportInput, signal?: AbortSignal) {
+    return this.client.request<CsvPreview>({
+      path: `${this.databasePath(databaseId)}/import/csv/preview`,
+      method: "POST",
+      body: input,
+      headers: this.headers(),
+      requestClass: "query",
+      policy: { timeoutMs: 15_000, retry: 0, signal },
+    });
+  }
+
   exportCsv(databaseId: string, input: CsvExportInput) {
     return this.command<{ csv: string; next_cursor: string | null }>(`${this.databasePath(databaseId)}/export/csv`, "POST", input);
   }
@@ -284,7 +343,23 @@ export class DatabaseClient {
     return this.client.request<T>({
       path, method, body, headers: this.headers(), requestClass: "command",
       policy: { timeoutMs: 30_000, retry: 0, idempotencyKey: this.createId() },
+    }).then((value) => {
+      this.cache.clear();
+      return value;
     });
+  }
+
+  private cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const current = this.cache.get(key) as DatabaseCacheEntry<T> | undefined;
+    if (current && current.expiresAt > this.now()) return Promise.resolve(current.value);
+    return load().then((value) => {
+      this.writeCache(key, value);
+      return value;
+    });
+  }
+
+  private writeCache<T>(key: string, value: T) {
+    this.cache.set(key, { value, expiresAt: this.now() + DATABASE_CACHE_TTL_MS });
   }
 
   private databasePath(databaseId: string) {

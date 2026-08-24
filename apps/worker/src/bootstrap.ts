@@ -14,6 +14,7 @@ import { NoteService } from "./notes/note-service";
 import { D1KnowledgeRepository } from "./knowledge/d1-knowledge-repository";
 import { D1GraphRepository } from "./knowledge/d1-graph-repository";
 import { D1ReminderRepository } from "./knowledge/d1-reminder-repository";
+import { D1ReminderDeliveryRepository } from "./knowledge/d1-reminder-delivery-repository";
 import { D1TaxonomyRepository } from "./knowledge/d1-taxonomy-repository";
 import { KnowledgeService } from "./knowledge/knowledge-service";
 import { registerAuthRoutes } from "./routes/auth";
@@ -41,12 +42,28 @@ import { registerOperationsRoutes } from "./routes/operations";
 import { createPresenceNotifier } from "./presence/presence-dispatcher";
 import { D1OperationsRepository } from "./operations/d1-operations-repository";
 import { OperationsOutboxDispatcher } from "./operations/operations-outbox-dispatcher";
+import { OperationsConsumer, QueueConsumerRouter } from "./operations/operations-consumer";
 import { createObservability, type ObservabilityLogger, type ObservabilityAnalytics } from "./observability";
 import { D1ProfileRepository } from "./profile/d1-profile-repository";
 import { ProfileAvatarStore } from "./profile/profile-avatar-store";
 import { ProfileService } from "./profile/profile-service";
 import { AiChatService } from "./ai/ai-chat-service";
 import { registerAiRoutes } from "./routes/ai";
+import { registerAccountRoutes } from "./routes/account";
+import { D1AccountRepository } from "./account/d1-account-repository";
+import { UserSecretBox } from "./security/user-secret-box";
+import { D1AiConfigRepository } from "./ai/d1-ai-config-repository";
+import { UserAiConfigService } from "./ai/user-ai-config-service";
+import { registerSyncRoutes } from "./routes/sync";
+import { D1SyncRepository } from "./sync/d1-sync-repository";
+import { SyncService } from "./sync/sync-service";
+import { registerPushRoutes } from "./routes/push";
+import { D1PushSubscriptionRepository } from "./push/d1-push-subscription-repository";
+import { PushService } from "./push/push-service";
+import { ReminderDeliveryConsumer } from "./push/reminder-delivery-consumer";
+import { ReminderOutboxDispatcher } from "./push/reminder-outbox-dispatcher";
+import { ResendReminderEmailSender } from "./push/resend-reminder-email";
+import { WebPushSender } from "./push/web-push-sender";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -63,6 +80,23 @@ function clientIp(request: Request) {
   return request.headers.get("cf-connecting-ip")
     ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
     ?? "0.0.0.0";
+}
+
+function withStaticAssetCachePolicy(request: Request, response: Response) {
+  if (!response.ok || (request.method !== "GET" && request.method !== "HEAD")) return response;
+  const headers = new Headers(response.headers);
+  const pathname = new URL(request.url).pathname;
+  headers.set(
+    "cache-control",
+    pathname.startsWith("/assets/")
+      ? "public, max-age=31536000, immutable"
+      : "public, max-age=0, must-revalidate",
+  );
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 function allowedTurnstileHostnames(env: BetaWorkerEnv) {
@@ -168,6 +202,7 @@ function createKnowledgeService(env: BetaWorkerEnv) {
     listSavedSearches: (...args) => search.listSavedSearches(...args),
     createSavedSearch: (...args) => search.createSavedSearch(...args),
     deleteSavedSearch: (...args) => search.deleteSavedSearch(...args),
+    getCalendarFeed: (...args) => search.getCalendarFeed(...args),
     listFolders: (...args) => taxonomy.listFolders(...args),
     createFolder: (...args) => taxonomy.createFolder(...args),
     listTags: (...args) => taxonomy.listTags(...args),
@@ -179,8 +214,12 @@ function createKnowledgeService(env: BetaWorkerEnv) {
     listBacklinks: (...args) => taxonomy.listBacklinks(...args),
     getGraph: (...args) => graph.getGraph(...args),
     listReminders: (...args) => reminders.listReminders(...args),
+    listReminderPage: (...args) => reminders.listReminderPage(...args),
     createReminder: (...args) => reminders.createReminder(...args),
     updateReminder: (...args) => reminders.updateReminder(...args),
+    snoozeReminder: (...args) => reminders.snoozeReminder(...args),
+    deleteReminder: (...args) => reminders.deleteReminder(...args),
+    getReminder: (...args) => reminders.getReminder(...args),
   });
 }
 
@@ -210,12 +249,26 @@ function createOperationsService(env: BetaWorkerEnv) {
     createJob: (context: { workspaceId: string; userId: string }, input: unknown, now: string) =>
       repository.createJob(context, CreateJobInputSchema.parse(input), now),
     getJob: (workspaceId: string, jobId: string) => repository.getJob(workspaceId, jobId),
+    cancelJob: (context: { workspaceId: string }, jobId: string, input: unknown, now: string) =>
+      repository.cancelJob(context, jobId, input as { base_revision: number }, now),
     listJobs: (workspaceId: string, limit?: number) => repository.listJobs(workspaceId, limit),
     createFeedback: (context: { workspaceId: string; userId: string }, input: unknown, requestId: string, now: string) =>
       repository.createFeedback(context, FeedbackInputSchema.parse(input), requestId, now),
     listFeedback: (workspaceId: string, limit?: number) => repository.listFeedback(workspaceId, limit),
     getUsage: (workspaceId: string) => repository.getUsage(workspaceId),
     getStatus: () => operationsStatus(env),
+    downloadJob: async (workspaceId: string, jobId: string) => {
+      const key = await repository.getJobFile(workspaceId, jobId);
+      if (!key || !env.FILES) return null;
+      const object = await env.FILES.get(key);
+      if (!object) return null;
+      const zip = key.endsWith(".zip");
+      return {
+        body: object.body,
+        filename: `nexus-notes-export-${jobId}.${zip ? "zip" : "md"}`,
+        mime_type: zip ? "application/zip" : "text/markdown; charset=utf-8",
+      };
+    },
   };
 }
 
@@ -237,11 +290,105 @@ function createOcrExtractor(env: BetaWorkerEnv) {
 }
 
 function createAiChatService(env: BetaWorkerEnv) {
-  return new AiChatService({
+  const fallback = {
     apiUrl: env.AI_CHAT_API_URL,
     apiKey: env.AI_CHAT_API_KEY,
     model: env.AI_CHAT_MODEL,
+  };
+  const personal = env.USER_SECRETS_ENCRYPTION_KEY
+    ? new UserAiConfigService(
+      new D1AiConfigRepository(env.DB),
+      new UserSecretBox(env.USER_SECRETS_ENCRYPTION_KEY),
+    )
+    : null;
+  const requirePersonal = () => {
+    if (!personal) throw new ConfigurationError("User secret encryption is not configured");
+    return personal;
+  };
+  const fallbackStatus = () => new AiChatService(fallback).status();
+  return {
+    async status(userId?: string) {
+      if (personal && userId) {
+        const status = await personal.status(userId);
+        if (status.configured) return status;
+      }
+      const status = fallbackStatus();
+      return { ...status, source: status.configured ? "server_default" as const : "unconfigured" as const };
+    },
+    async getConfig(userId: string) {
+      const status = personal ? await personal.status(userId) : { configured: false, source: "unconfigured" as const };
+      if (status.configured) return status;
+      const fallbackConfigured = fallbackStatus().configured;
+      return fallbackConfigured ? { configured: true, source: "server_default" as const } : status;
+    },
+    saveConfig: (userId: string, input: Parameters<UserAiConfigService["saveConfig"]>[1], requestId: string) =>
+      requirePersonal().saveConfig(userId, input, requestId),
+    testConfig: (userId: string, input: Parameters<UserAiConfigService["testConfig"]>[1], signal: AbortSignal, requestId: string) =>
+      requirePersonal().testConfig(userId, input, signal, requestId),
+    deleteConfig: (userId: string, input: Parameters<UserAiConfigService["deleteConfig"]>[1], requestId: string) =>
+      requirePersonal().deleteConfig(userId, input, requestId),
+    async chat(input: Parameters<AiChatService["chat"]>[0], signal: AbortSignal, userId?: string) {
+      const resolved = personal && userId ? await personal.resolve(userId) : null;
+      return new AiChatService(resolved ?? fallback).chat(input, signal);
+    },
+  };
+}
+
+function createOperationsConsumer(env: BetaWorkerEnv) {
+  const repository = new D1OperationsRepository(env.DB);
+  const notes = new D1NoteRepository(env.DB);
+  const files = {
+    async put(key: string, value: string | Uint8Array, options?: { httpMetadata?: { contentType: string } }) {
+      if (!env.FILES) throw Object.assign(new Error("OPERATION_STORAGE_UNAVAILABLE"), { code: "OPERATION_STORAGE_UNAVAILABLE" });
+      return env.FILES.put(key, value, options);
+    },
+  };
+  return new OperationsConsumer(repository, files, {
+    createNote: (input) => notes.createNote(input),
   });
+}
+
+function createSyncService(env: BetaWorkerEnv) {
+  return new SyncService(new D1SyncRepository(env.DB));
+}
+
+function createPushService(env: BetaWorkerEnv) {
+  if (!env.USER_SECRETS_ENCRYPTION_KEY) {
+    throw new ConfigurationError("User secret encryption is not configured");
+  }
+  return new PushService(
+    new D1PushSubscriptionRepository(env.DB, new UserSecretBox(env.USER_SECRETS_ENCRYPTION_KEY)),
+    env.JOBS,
+    env.WEB_PUSH_VAPID_PUBLIC_KEY ?? "",
+  );
+}
+
+function createReminderDeliveryConsumer(env: BetaWorkerEnv) {
+  const subscriptions = env.USER_SECRETS_ENCRYPTION_KEY
+    ? new D1PushSubscriptionRepository(env.DB, new UserSecretBox(env.USER_SECRETS_ENCRYPTION_KEY))
+    : {
+        listActive: async () => [],
+        markSuccess: async () => undefined,
+        markFailure: async () => undefined,
+      };
+  const push = env.WEB_PUSH_VAPID_PUBLIC_KEY && env.WEB_PUSH_VAPID_PRIVATE_KEY && env.WEB_PUSH_SUBJECT
+    ? new WebPushSender({
+        publicKey: env.WEB_PUSH_VAPID_PUBLIC_KEY,
+        privateKey: env.WEB_PUSH_VAPID_PRIVATE_KEY,
+        subject: env.WEB_PUSH_SUBJECT,
+      })
+    : {
+        send: async () => ({ ok: false, permanent: false, retryable: false }),
+      };
+  const email = env.RESEND_API_KEY && env.EMAIL_FROM
+    ? new ResendReminderEmailSender(env.RESEND_API_KEY, env.EMAIL_FROM)
+    : undefined;
+  return new ReminderDeliveryConsumer(
+    new D1ReminderDeliveryRepository(env.DB),
+    subscriptions,
+    push,
+    email,
+  );
 }
 
 function retryNativeMessage(message: Message<unknown>, delaySeconds: number) {
@@ -282,6 +429,7 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
   registerAiRoutes(registry, createAiChatService);
   registerAuthRoutes(registry, (env) => createAuthService(env, options.logger));
   registerProfileRoutes(registry, (env) => createProfileService(env, options.logger));
+  registerAccountRoutes(registry, (env) => new D1AccountRepository(env.DB));
   registerNoteRoutes(registry, createNoteService);
   registerKnowledgeRoutes(registry, createKnowledgeService);
   registerTaxonomyRoutes(registry, createKnowledgeService);
@@ -296,6 +444,8 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
   });
   registerPresenceRoute(registry);
   registerOperationsRoutes(registry, createOperationsService);
+  registerSyncRoutes(registry, createSyncService);
+  registerPushRoutes(registry, createPushService);
 
   return {
     async fetch(request: Request, env: BetaWorkerEnv) {
@@ -312,7 +462,7 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
           allowedOrigins: allowedOrigins(env),
           handler: async (assetRequest: Request, assetEnv: BetaWorkerEnv) => {
             if (!new URL(assetRequest.url).pathname.startsWith("/api/") && assetEnv.ASSETS) {
-              return assetEnv.ASSETS.fetch(assetRequest);
+              return withStaticAssetCachePolicy(assetRequest, await assetEnv.ASSETS.fetch(assetRequest));
             }
             return registry.fetch(assetRequest, assetEnv);
           },
@@ -345,10 +495,18 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
         deploymentVersion: env.DEPLOYMENT_VERSION,
         workspaceHashSecret: env.RATE_LIMIT_SECRET,
       });
-      const consumer = new OcrConsumer(new D1AttachmentRepository(env.DB), createOcrExtractor(env));
+      const consumer = new QueueConsumerRouter(
+        new OcrConsumer(new D1AttachmentRepository(env.DB), createOcrExtractor(env)),
+        createOperationsConsumer(env),
+        createReminderDeliveryConsumer(env),
+      );
       await Promise.all(batch.messages.map(async (message) => {
         const startedAt = Date.now();
         let outcome: "success" | "retry" | "failure" = "success";
+        const body = message.body;
+        const kind = body && typeof body === "object" && !Array.isArray(body) && "kind" in body && typeof body.kind === "string"
+          ? body.kind
+          : "unknown";
         try {
           const result = await consumer.consume(message);
           if (result.outcome === "retry") {
@@ -360,8 +518,8 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
           throw error;
         } finally {
           await observability.recordQueue({
-            queue: "ocr",
-            kind: "ocr",
+            queue: kind === "ocr" ? "ocr" : kind === "notification" || kind === "email" ? "reminders" : "operations",
+            kind,
             outcome,
             attempt: message.attempts,
             ageMs: Date.now() - startedAt,
@@ -375,6 +533,10 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
       if (env.JOBS) {
         await new OcrOutboxDispatcher(repository, env.JOBS).dispatch();
         await new OperationsOutboxDispatcher(new D1OperationsRepository(env.DB), env.JOBS).dispatch();
+        const reminders = new D1ReminderDeliveryRepository(env.DB);
+        const now = new Date().toISOString();
+        await reminders.prepareDue(now, 100);
+        await new ReminderOutboxDispatcher(reminders, env.JOBS).dispatch();
       }
     },
   };

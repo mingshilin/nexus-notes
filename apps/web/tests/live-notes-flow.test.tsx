@@ -16,10 +16,15 @@ const findNoteTitle = () => screen.findByRole("textbox", { name: "笔记标题" 
 
 type NoteApiOptions = {
   createNote?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
+  listDatabases?: () => Promise<unknown>;
   openOrCreateDaily?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
   listNotes?: (workspaceId: string) => Promise<unknown>;
   listToday?: (workspaceId: string) => Promise<unknown>;
   listTrash?: (workspaceId: string) => Promise<unknown>;
+  listRevisions?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
+  restoreRevision?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
+  updateNote?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
+  aiChat?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
   deletePermanently?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
 };
 
@@ -66,9 +71,14 @@ function serverNoteForFlow() {
 function createApiClient(options: NoteApiOptions = {}) {
   let nextNoteId = 1;
   const request = vi.fn(async (input: { path: string; method?: string; body?: Record<string, unknown>; headers?: Record<string, string> }) => {
+    if (input.path === "/api/v2/databases" && input.method !== "POST") return options.listDatabases?.() ?? { items: [] };
+    if (input.path === "/api/v2/attachments/uploads" && input.method === "POST") return { attachment: { id: "attachment-editor-1", filename: input.body?.filename ?? "diagram.png", note_id: input.body?.note_id ?? null } };
+    if (input.path === "/api/v2/attachments/attachment-editor-1/content" && input.method === "PUT") return { attachment: { id: "attachment-editor-1", filename: "diagram.png", note_id: "attachment-note" } };
+    if (input.path === "/api/v2/attachments/attachment-editor-1/complete" && input.method === "POST") return { attachment: { id: "attachment-editor-1", filename: "diagram.png", note_id: "attachment-note" } };
     if (input.path.startsWith("/api/v2/attachments")) return { items: [], next_cursor: null };
     if (input.path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
     if (input.path.startsWith("/api/v2/notifications/unread")) return { unread_count: 0 };
+    if (input.path === "/api/v2/ai/chat" && input.method === "POST") return options.aiChat?.(input) ?? { message: "AI 摘要", model: "beta-model" };
     if (input.path === "/api/v2/notes?status=active&limit=50") return options.listNotes?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
     if (input.path === "/api/v2/notes?status=trashed&limit=50") return options.listTrash?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
     if (input.path.startsWith("/api/v2/notes?status=active&daily_date=")) return options.listToday?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
@@ -79,6 +89,12 @@ function createApiClient(options: NoteApiOptions = {}) {
     if (input.path.startsWith("/api/v2/notes/") && input.method === "DELETE") {
       if (options.deletePermanently) return options.deletePermanently(input);
       return { deleted: true };
+    }
+    if (/\/api\/v2\/notes\/[^/]+\/revisions$/.test(input.path)) {
+      return options.listRevisions?.(input) ?? { items: [] };
+    }
+    if (/\/api\/v2\/notes\/[^/]+\/revisions\/\d+\/restore$/.test(input.path) && input.method === "POST") {
+      return options.restoreRevision?.(input) ?? { note: serverNoteForFlow() };
     }
     if (input.path === "/api/v2/notes" && input.method === "POST") {
       if (options.createNote) return options.createNote(input);
@@ -103,6 +119,7 @@ function createApiClient(options: NoteApiOptions = {}) {
       };
     }
     if (input.path.startsWith("/api/v2/notes/") && input.method === "PATCH") {
+      if (options.updateNote) return options.updateNote(input);
       return {
         note: {
           id: input.path.split("/").at(-1), workspace_id: "ws-1", folder_id: null, database_id: null, created_by: "user-1", updated_by: "user-1",
@@ -155,6 +172,153 @@ function renderWorkspaceWithStore(
 }
 
 describe("live note workspace flow", () => {
+  it("opens note history and restores a selected version without losing the current revision", async () => {
+    const current = { ...serverNoteForFlow(), id: "history-note", title: "当前标题", content: "当前内容", revision: 2 };
+    const revision = {
+      id: "history-revision-1",
+      workspace_id: "ws-1",
+      note_id: current.id,
+      revision: 1,
+      title: "旧标题",
+      content: "旧内容",
+      source: "manual" as const,
+      created_by: "user-1",
+      created_at: "2026-08-22T00:00:00.000Z",
+    };
+    const apiClient = createApiClient({
+      listNotes: async () => ({ items: [current], next_cursor: null }),
+      listRevisions: async () => ({ items: [revision] }),
+      restoreRevision: async (input) => ({ note: { ...current, title: revision.title, content: revision.content, revision: 3, restored_from: input.path } }),
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /当前标题/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开版本历史" }));
+
+    expect(await screen.findByText("旧标题")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "恢复版本 1" }));
+
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("旧标题"));
+    expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/history-note/revisions/1/restore",
+      method: "POST",
+      body: { base_revision: 2 },
+    }));
+  });
+
+  it("switches the selected note between Markdown preview and editing without changing its content", async () => {
+    const current = { ...serverNoteForFlow(), id: "markdown-note", title: "Markdown", content: "# 计划\n\n- [x] 已完成" };
+    const apiClient = createApiClient({ listNotes: async () => ({ items: [current], next_cursor: null }) });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Markdown/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "预览笔记" }));
+
+    expect(await screen.findByRole("heading", { name: "计划" })).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "笔记内容" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回编辑器" }));
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("# 计划\n\n- [x] 已完成");
+  });
+
+  it("associates a selected note with a database when the user saves the choice", async () => {
+    const current = { ...serverNoteForFlow(), id: "database-note", title: "待归档到数据库" };
+    const apiClient = createApiClient({
+      listNotes: async () => ({ items: [current], next_cursor: null }),
+      listDatabases: async () => ({
+        items: [{
+          id: "db-projects",
+          workspace_id: "ws-1",
+          name: "项目数据库",
+          description: "",
+          created_by: "user-1",
+          revision: 1,
+          created_at: "2026-08-22T00:00:00.000Z",
+          updated_at: "2026-08-22T00:00:00.000Z",
+        }],
+      }),
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /待归档到数据库/ }));
+
+    const databaseSelect = await screen.findByRole("combobox", { name: "笔记数据库" });
+    expect(databaseSelect).toHaveValue("");
+    expect(within(databaseSelect).getByRole("option", { name: "项目数据库" })).toBeInTheDocument();
+    fireEvent.change(databaseSelect, { target: { value: "db-projects" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存笔记" }));
+
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/database-note",
+      method: "PATCH",
+      body: expect.objectContaining({ database_id: "db-projects" }),
+    })));
+  });
+
+  it("uploads an attachment from the editor and inserts a private link into the note", async () => {
+    const current = { ...serverNoteForFlow(), id: "attachment-note", title: "带附件的笔记", content: "正文" };
+    const apiClient = createApiClient({ listNotes: async () => ({ items: [current], next_cursor: null }) });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /带附件的笔记/ }));
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "diagram.png", { type: "image/png" });
+    Object.defineProperty(file, "arrayBuffer", {
+      value: vi.fn(async () => new Uint8Array([137, 80, 78, 71]).buffer),
+    });
+    fireEvent.change(screen.getByLabelText("插入附件"), { target: { files: [file] } });
+
+    await waitFor(() => expect(apiClient.request.mock.calls.map(([request]) => request.path)).toContain("/api/v2/attachments/uploads"));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("正文\n\n[diagram.png](/api/v2/attachments/attachment-editor-1/file)"));
+    expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/attachments/uploads",
+      method: "POST",
+      body: expect.objectContaining({ note_id: "attachment-note", filename: "diagram.png" }),
+    }));
+  });
+
+  it("previews note AI output before adding it to the saved note", async () => {
+    const current = { ...serverNoteForFlow(), id: "ai-note", title: "发布计划", content: "先完成测试。" };
+    const apiClient = createApiClient({
+      listNotes: async () => ({ items: [current], next_cursor: null }),
+      aiChat: async (input) => ({ message: "建议先完成回归测试。", model: "beta-model", prompt: input.body?.messages }),
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /发布计划/ }));
+    fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+
+    expect(await screen.findByText("建议先完成回归测试。" )).toBeVisible();
+    expect(apiClient.request.mock.calls.some(([request]) => request.path === "/api/v2/notes/ai-note" && request.method === "PATCH")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "应用到正文" }));
+    await screen.findByText("已应用到当前草稿。");
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("先完成测试。\n\n## AI 摘要\n\n建议先完成回归测试。");
+
+    fireEvent.click(screen.getByRole("button", { name: "保存笔记" }));
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/ai-note",
+      method: "PATCH",
+      body: expect.objectContaining({ content: expect.stringContaining("建议先完成回归测试") }),
+    })));
+  });
+
+  it("opens the current note directly in the public-share section", async () => {
+    const current = { ...serverNoteForFlow(), id: "share-note", title: "可分享笔记", content: "内容" };
+    const apiClient = createApiClient({ listNotes: async () => ({ items: [current], next_cursor: null }) });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /可分享笔记/ }));
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记分享" }));
+
+    expect(await screen.findByRole("heading", { name: "协作中心" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "公开分享" })).toHaveClass("active");
+    expect(screen.getByRole("combobox", { name: "分享对象" })).toHaveValue("note:share-note");
+  });
+
   it("keeps the Today action visible and usable at the mobile breakpoint", async () => {
     const apiClient = createApiClient();
     renderWorkspace(apiClient, 390);
@@ -743,6 +907,73 @@ describe("live note workspace flow", () => {
     renderWorkspaceWithStore(apiClient, localStore);
     expect(await findNoteTitle()).toHaveValue("离线标题");
     expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("离线内容");
+  });
+
+  it("shows both offline conflict versions and retries a kept local draft from the latest server revision", async () => {
+    const base = { ...serverNoteForFlow(), id: "server-conflict", title: "旧服务器标题", content: "旧服务器正文", revision: 1 };
+    const latest = { ...base, title: "远程标题", content: "远程正文", revision: 2, updated_at: "2026-08-24T00:00:02.000Z" };
+    const localStore = createDraftStore([{
+      workspace_id: "ws-1",
+      entity_id: "local-conflict",
+      title: "本地标题",
+      content: "本地正文",
+      updated_at: "2026-08-24T00:00:03.000Z",
+      draft_generation: 1,
+      next_patch_generation: 2,
+      server_note: base,
+      server_note_id: base.id,
+      server_revision: base.revision,
+      server_updated_at: base.updated_at,
+      pending_patch: { key: "local-conflict:patch:1", generation: 1, base_revision: 1, title: "本地标题", content: "本地正文", source: "manual" },
+    }]);
+    const updateNote = vi.fn(async (input: { body?: Record<string, unknown> }) => {
+      if (input.body?.base_revision === 1) {
+        throw new ApiClientError({ code: "NOTE_CONFLICT", message: "conflict", retryable: false, details: { server_note: latest } }, 409);
+      }
+      return { note: { ...latest, title: input.body?.title, content: input.body?.content, revision: 3 } };
+    });
+    const apiClient = createApiClient({ updateNote });
+    renderWorkspaceWithStore(apiClient, localStore);
+
+    expect(await screen.findByRole("region", { name: "笔记冲突恢复" })).toHaveTextContent("远程正文");
+    fireEvent.click(screen.getByRole("button", { name: "保留本地版本" }));
+
+    await waitFor(() => expect(updateNote).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({ base_revision: 2, title: "本地标题", content: "本地正文" }) })));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "笔记冲突恢复" })).not.toBeInTheDocument());
+    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveValue("本地标题");
+  });
+
+  it("adopts the server version without resubmitting stale local content", async () => {
+    const base = { ...serverNoteForFlow(), id: "server-adopt", title: "旧服务器标题", content: "旧服务器正文", revision: 1 };
+    const latest = { ...base, title: "远程标题", content: "远程正文", revision: 2, updated_at: "2026-08-24T00:00:02.000Z" };
+    const localStore = createDraftStore([{
+      workspace_id: "ws-1",
+      entity_id: "local-adopt",
+      title: "本地标题",
+      content: "本地正文",
+      updated_at: "2026-08-24T00:00:03.000Z",
+      draft_generation: 1,
+      next_patch_generation: 2,
+      server_note: base,
+      server_note_id: base.id,
+      server_revision: base.revision,
+      server_updated_at: base.updated_at,
+      pending_patch: { key: "local-adopt:patch:1", generation: 1, base_revision: 1, title: "本地标题", content: "本地正文", source: "manual" },
+    }]);
+    const updateNote = vi.fn(async () => {
+      throw new ApiClientError({ code: "NOTE_CONFLICT", message: "conflict", retryable: false, details: { server_note: latest } }, 409);
+    });
+    const apiClient = createApiClient({ updateNote });
+    renderWorkspaceWithStore(apiClient, localStore);
+
+    expect(await screen.findByRole("region", { name: "笔记冲突恢复" })).toHaveTextContent("本地正文");
+    fireEvent.click(screen.getByRole("button", { name: "采用服务器版本" }));
+
+    await waitFor(() => expect(screen.queryByRole("region", { name: "笔记冲突恢复" })).not.toBeInTheDocument());
+    expect(await screen.findByRole("textbox", { name: "笔记标题" })).toHaveValue("远程标题");
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("远程正文");
+    expect(updateNote).toHaveBeenCalledTimes(1);
+    expect((await localStore.getDraft("ws-1", "local-adopt"))?.pending_patch).toBeUndefined();
   });
 
   it("recovers only after note loading settles and never overwrites a selected server note", async () => {

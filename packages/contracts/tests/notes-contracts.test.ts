@@ -101,4 +101,23 @@ describe("note contracts", () => {
     expect(capture.safeParse({ content: "A quick thought" }).success).toBe(true);
     expect(capture.safeParse({ content: "" }).success).toBe(false);
   });
+
+  it("validates Web Clipper targets and rejects unsafe source URLs", async () => {
+    const contracts = await loadContracts();
+    expect(contracts.ClipperInputSchema).toBeDefined();
+    const schema = contracts.ClipperInputSchema as { safeParse(value: unknown): { success: boolean } };
+
+    expect(schema.safeParse({
+      title: "Article",
+      url: "https://example.com/article",
+      content: "Captured body",
+      target: "inbox",
+    }).success).toBe(true);
+    expect(schema.safeParse({ content: "Captured body", target: "daily" }).success).toBe(true);
+    expect(schema.safeParse({ content: "Captured body", target: "database", database_id: "db-1" }).success).toBe(true);
+    expect(schema.safeParse({ content: "Captured body", target: "database" }).success).toBe(false);
+    expect(schema.safeParse({ content: "Captured body", target: "archive" }).success).toBe(false);
+    expect(schema.safeParse({ content: "Captured body", url: "javascript:alert(1)" }).success).toBe(false);
+    expect(schema.safeParse({ content: "Captured body", url: "data:text/html,unsafe" }).success).toBe(false);
+  });
 });

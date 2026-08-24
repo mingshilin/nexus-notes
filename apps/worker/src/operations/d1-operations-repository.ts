@@ -3,17 +3,20 @@ import {
   JobSchema,
   QueueJobSchema,
   type CreateJobInput,
+  type CancelJobInput,
   type Feedback,
   type FeedbackInput,
   type Job,
   type Usage,
   type WorkspaceContext,
 } from "@nexus/contracts";
+import { D1NoteRepository } from "../notes/d1-note-repository";
 
 interface JobRow extends Job {
   user_id: string;
   idempotency_key: string;
   payload_json: string;
+  result_key: string | null;
 }
 
 interface FeedbackRow extends Feedback {
@@ -50,11 +53,19 @@ function toFeedback(row: FeedbackRow): Feedback {
 
 function jobRowQuery() {
   return `SELECT id, workspace_id, user_id, kind, idempotency_key, status, payload_json,
-    error_code, revision, created_at, updated_at FROM beta_jobs`;
+    error_code, result_key, revision, created_at, updated_at FROM beta_jobs`;
 }
 
 export class D1OperationsRepository {
-  constructor(private readonly db: D1Database, private readonly createId: () => string = () => crypto.randomUUID()) {}
+  private readonly notes: Pick<D1NoteRepository, "listNotes">;
+
+  constructor(
+    private readonly db: D1Database,
+    private readonly createId: () => string = () => crypto.randomUUID(),
+    notes: Pick<D1NoteRepository, "listNotes"> = new D1NoteRepository(db),
+  ) {
+    this.notes = notes;
+  }
 
   async createJob(context: Pick<WorkspaceContext, "workspaceId" | "userId">, input: CreateJobInput, now: string) {
     const existing = await this.db.prepare(
@@ -97,6 +108,64 @@ export class D1OperationsRepository {
   async getJob(workspaceId: string, jobId: string) {
     const row = await this.db.prepare(`${jobRowQuery()} WHERE workspace_id = ? AND id = ?`).bind(workspaceId, jobId).first<JobRow>();
     return row ? toJob(row) : null;
+  }
+
+  async cancelJob(context: Pick<WorkspaceContext, "workspaceId">, jobId: string, input: CancelJobInput, now: string) {
+    const result = await this.db.prepare(
+      `UPDATE beta_jobs
+       SET status = 'cancelled', revision = revision + 1, updated_at = ?
+       WHERE workspace_id = ? AND id = ? AND status = 'queued' AND revision = ?`,
+    ).bind(now, context.workspaceId, jobId, input.base_revision).run();
+    if (Number(result.meta?.changes ?? 0) === 0) return null;
+    return this.getJob(context.workspaceId, jobId);
+  }
+
+  async claimJob(job: import("@nexus/contracts").QueueJob, now: string, _nativeAttempts: number) {
+    const workspaceId = typeof job.payload.workspace_id === "string" ? job.payload.workspace_id : null;
+    if (!workspaceId || job.kind === "ocr") return null;
+    const row = await this.db.prepare(
+      `UPDATE beta_jobs
+       SET status = 'running', revision = revision + 1, updated_at = ?
+       WHERE id = ? AND workspace_id = ? AND kind = ? AND status = 'queued'
+       RETURNING id, workspace_id, user_id, kind`,
+    ).bind(now, job.job_id, workspaceId, job.kind).first<{
+      id: string;
+      workspace_id: string;
+      user_id: string;
+      kind: "index" | "import" | "export" | "email";
+    }>();
+    return row ?? null;
+  }
+
+  async completeJob(workspaceId: string, jobId: string, resultKey: string | null, now: string) {
+    const result = await this.db.prepare(
+      `UPDATE beta_jobs
+       SET status = 'complete', result_key = ?, error_code = NULL, revision = revision + 1, updated_at = ?
+       WHERE workspace_id = ? AND id = ? AND status = 'running'`,
+    ).bind(resultKey, now, workspaceId, jobId).run();
+    return Number(result.meta?.changes ?? 0) > 0;
+  }
+
+  async failJob(workspaceId: string, jobId: string, code: string, now: string) {
+    const result = await this.db.prepare(
+      `UPDATE beta_jobs
+       SET status = 'failed', result_key = NULL, error_code = ?, revision = revision + 1, updated_at = ?
+       WHERE workspace_id = ? AND id = ? AND status = 'running'`,
+    ).bind(code.slice(0, 128), now, workspaceId, jobId).run();
+    return Number(result.meta?.changes ?? 0) > 0;
+  }
+
+  async getJobFile(workspaceId: string, jobId: string) {
+    const row = await this.db.prepare(
+      `SELECT result_key FROM beta_jobs
+       WHERE workspace_id = ? AND id = ? AND kind = 'export' AND status = 'complete' AND result_key IS NOT NULL
+       LIMIT 1`,
+    ).bind(workspaceId, jobId).first<{ result_key: string }>();
+    return row?.result_key ?? null;
+  }
+
+  listNotes(input: { workspaceId: string; cursor?: string; limit: number }) {
+    return this.notes.listNotes(input);
   }
 
   async listJobs(workspaceId: string, limit = 50) {

@@ -79,6 +79,33 @@ describe("NotesClient", () => {
     }));
   });
 
+  it("encodes favorite and pinned filters without changing the default query contract", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ items: [], next_cursor: null })) };
+    const client = new data.NotesClient(api, "ws-1");
+
+    await client.list({ status: "active", favorite: true, pinned: false, limit: 20 });
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes?status=active&favorite=true&pinned=false&limit=20",
+      policy: expect.objectContaining({ dedupeKey: "notes:ws-1:first:20:active:::true:false" }),
+    }));
+  });
+
+  it("encodes a full-text query without changing workspace scoping", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ items: [], next_cursor: null })) };
+    const client = new data.NotesClient(api, "ws-1");
+
+    await client.list({ query: "计划 项目", limit: 20 });
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes?q=%E8%AE%A1%E5%88%92+%E9%A1%B9%E7%9B%AE&limit=20",
+      headers: { "x-workspace-id": "ws-1" },
+      policy: expect.objectContaining({ dedupeKey: "notes:ws-1:first:20::::计划 项目" }),
+    }));
+  });
+
   it("sends revision-aware autosaves as idempotent commands", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async () => ({ note: { ...note, revision: 2 } })) };
@@ -150,6 +177,35 @@ describe("NotesClient", () => {
       ["/api/v2/notes/note-1/revisions/1/restore", "POST"],
     ]);
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
+  });
+
+  it("sends Web Clipper captures to the dedicated endpoint with an idempotency key", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ note })) };
+    const client = new data.NotesClient(api, "ws-1", { createId: () => "clip-operation-1" });
+
+    await expect(client.clipperCapture({
+      title: "Article",
+      url: "https://example.com/article",
+      content: "Captured body",
+      target: "database",
+      database_id: "db-1",
+    })).resolves.toEqual(note);
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/clipper/capture",
+      method: "POST",
+      body: {
+        title: "Article",
+        url: "https://example.com/article",
+        content: "Captured body",
+        target: "database",
+        database_id: "db-1",
+      },
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "command",
+      policy: expect.objectContaining({ retry: 0, idempotencyKey: "clip-operation-1" }),
+    }));
   });
 });
 

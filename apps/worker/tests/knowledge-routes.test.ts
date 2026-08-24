@@ -83,6 +83,9 @@ describe("v2 knowledge routes", () => {
       getGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
       listReminders: vi.fn(async () => []), createReminder: vi.fn(async () => ({ id: "reminder-1" })),
       updateReminder: vi.fn(async () => ({ id: "reminder-1", revision: 2 })),
+      listReminderPage: vi.fn(async () => ({ items: [], next_cursor: "cursor-2" })),
+      snoozeReminder: vi.fn(async () => ({ id: "reminder-1", revision: 3 })),
+      deleteReminder: vi.fn(async () => undefined),
     };
     const registry = (worker.createRouteRegistry as any)({
       requestId: () => "req-knowledge-actions",
@@ -108,11 +111,41 @@ describe("v2 knowledge routes", () => {
       registry.fetch(request("/api/v2/reminders"), {}),
       registry.fetch(request("/api/v2/reminders", { method: "POST", body: JSON.stringify({ note_id: "note-1", remind_at: "2026-08-22T00:00:00.000Z" }) }), {}),
       registry.fetch(request("/api/v2/reminders/reminder-1", { method: "PATCH", body: JSON.stringify({ base_revision: 1, status: "dismissed" }) }), {}),
+      registry.fetch(request("/api/v2/reminders?status=overdue&query=review&limit=25"), {}),
+      registry.fetch(request("/api/v2/reminders/reminder-1/snooze", { method: "POST", body: JSON.stringify({ base_revision: 2, minutes: 60 }) }), {}),
+      registry.fetch(request("/api/v2/reminders/reminder-1", { method: "DELETE", body: JSON.stringify({ base_revision: 3 }) }), {}),
     ]);
 
     expect(responses.every((response: Response) => response.status >= 200 && response.status < 300)).toBe(true);
     expect(service.setNoteTags).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "note-1", { tag_ids: ["tag-1"] });
     expect(service.getGraph).toHaveBeenNthCalledWith(1, expect.objectContaining({ workspaceId: "ws-1" }));
     expect(service.getGraph).toHaveBeenNthCalledWith(2, expect.objectContaining({ workspaceId: "ws-1" }), "note-1");
+    expect(service.listReminderPage).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), {
+      status: "overdue", query: "review", limit: 25,
+    });
+    expect(service.snoozeReminder).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "reminder-1", {
+      base_revision: 2, minutes: 60,
+    });
+    expect(service.deleteReminder).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "reminder-1", {
+      base_revision: 3,
+    });
+  });
+
+  it("registers a workspace calendar feed route with bounded date filters", async () => {
+    const worker = await loadWorker();
+    const service = { getCalendarFeed: vi.fn(async () => ({ items: [] })) };
+    const registry = (worker.createRouteRegistry as any)({
+      requestId: () => "req-calendar",
+      authenticate: vi.fn(async () => ({ userId: "user-1" })),
+      authorizeWorkspace: vi.fn(async () => workspace),
+    });
+    (worker.registerKnowledgeRoutes as any)(registry, () => service);
+
+    const response = await registry.fetch(request("/api/v2/calendar/feed?from=2026-08-01&to=2026-08-31"), {});
+    expect(response.status).toBe(200);
+    expect(service.getCalendarFeed).toHaveBeenCalledWith(workspace, { from: "2026-08-01", to: "2026-08-31" });
+
+    const invalid = await registry.fetch(request("/api/v2/calendar/feed?from=2026-08-31&to=2026-08-01"), {});
+    expect(invalid.status).toBe(400);
   });
 });

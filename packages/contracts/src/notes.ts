@@ -119,3 +119,27 @@ export const QuickCaptureInputSchema = z.object({
 });
 
 export type QuickCaptureInput = z.infer<typeof QuickCaptureInputSchema>;
+
+const ClipperTargetSchema = z.enum(["inbox", "daily", "database"]);
+const ClipperUrlSchema = z.string().trim().max(2_048).refine((value) => {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}, "url must use http or https");
+
+export const ClipperInputSchema = z.object({
+  title: NoteTitleSchema.optional(),
+  url: ClipperUrlSchema.optional(),
+  content: NoteContentSchema.min(1),
+  target: ClipperTargetSchema.default("inbox"),
+  database_id: EntityIdSchema.nullable().optional(),
+}).superRefine((input, context) => {
+  if (input.target === "database" && !input.database_id) {
+    context.addIssue({ code: "custom", path: ["database_id"], message: "database_id is required for database targets" });
+  }
+});
+
+export type ClipperInput = z.infer<typeof ClipperInputSchema>;

@@ -234,4 +234,31 @@ describe("D1ProfileRepository", () => {
       await test.dispose();
     }
   });
+
+  it("archives a personal workspace when immutable audit rows prevent cascading deletion", async () => {
+    const test = await createTestD1();
+    try {
+      await seed(test.db);
+      await test.db.batch([
+        test.db.prepare("INSERT INTO workspaces (id,owner_user_id,slug,name,workspace_type,created_at,updated_at) VALUES ('personal','user-1','personal','Personal','personal',?,?)").bind(now, now),
+        test.db.prepare("INSERT INTO workspace_members (workspace_id,user_id,role,joined_at,updated_at) VALUES ('personal','user-1','owner',?,?)").bind(now, now),
+        test.db.prepare("INSERT INTO audit_logs (id,workspace_id,actor_user_id,request_id,action,target_type,target_id,outcome,metadata_json,created_at) VALUES ('audit-1','personal','user-1','request-before','note.updated','note','note-1','success','{}',?)").bind(now),
+      ]);
+
+      const repository = new D1ProfileRepository(test.db, () => "id-archive");
+      await expect(repository.deleteAccount("user-1", "deleted-user-1@example.invalid", "deleted-hash", audit("account.deleted")))
+        .resolves.toBeNull();
+
+      await expect(test.db.prepare("SELECT status, email FROM users WHERE id = 'user-1'").first())
+        .resolves.toEqual({ status: "deleted", email: "deleted-user-1@example.invalid" });
+      await expect(test.db.prepare("SELECT name, slug FROM workspaces WHERE id = 'personal'").first())
+        .resolves.toEqual({ name: "已删除账户空间", slug: "deleted-personal" });
+      await expect(test.db.prepare("SELECT COUNT(*) AS count FROM workspace_members WHERE user_id = 'user-1'").first())
+        .resolves.toEqual({ count: 0 });
+      await expect(test.db.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE workspace_id = 'personal'").first())
+        .resolves.toEqual({ count: 1 });
+    } finally {
+      await test.dispose();
+    }
+  });
 });

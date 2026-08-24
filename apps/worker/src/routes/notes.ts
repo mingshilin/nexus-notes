@@ -1,5 +1,6 @@
 import {
   CreateNoteInputSchema,
+  ClipperInputSchema,
   DailyNoteInputSchema,
   DeleteNoteInputSchema,
   QuickCaptureInputSchema,
@@ -17,7 +18,7 @@ interface NoteRegistry<TEnv> {
 
 type NoteRouteService = Pick<
   NoteService,
-  "list" | "create" | "openOrCreateDaily" | "get" | "update" | "listRevisions" | "restore" | "deletePermanently" | "quickCapture"
+  "list" | "create" | "openOrCreateDaily" | "get" | "update" | "listRevisions" | "restore" | "deletePermanently" | "quickCapture" | "clipperCapture"
 >;
 
 function listOptions(request: Request) {
@@ -26,15 +27,36 @@ function listOptions(request: Request) {
   const limit = Number.isInteger(requestedLimit) && requestedLimit > 0
     ? Math.min(requestedLimit, 100)
     : 50;
+  const query = params.get("q")?.trim() ?? "";
+  if (query.length > 500) throw new NoteServiceError("INVALID_QUERY", "Note search query is too long", 400);
   const rawStatus = params.get("status");
   const status = rawStatus ? NoteStatusSchema.parse(rawStatus) : undefined;
   const folderValue = params.get("folder_id");
   const folderId = folderValue === null ? undefined : folderValue === "none" ? null : folderValue;
   const dailyDate = params.get("daily_date") ?? undefined;
+  const favoriteRaw = params.get("favorite");
+  const pinnedRaw = params.get("pinned");
+  const parseBoolean = (value: string | null) => {
+    if (value === null) return undefined;
+    if (value === "true") return true;
+    if (value === "false") return false;
+    throw new NoteServiceError("INVALID_FILTER", "Boolean note filters must be true or false", 400);
+  };
+  const favorite = parseBoolean(favoriteRaw);
+  const pinned = parseBoolean(pinnedRaw);
   if (dailyDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(dailyDate)) {
     throw new NoteServiceError("INVALID_DATE", "daily_date must be YYYY-MM-DD", 400);
   }
-  return { cursor: params.get("cursor") ?? undefined, limit, status, folderId, dailyDate };
+  return {
+    cursor: params.get("cursor") ?? undefined,
+    limit,
+    ...(query ? { query } : {}),
+    status,
+    folderId,
+    dailyDate,
+    ...(favorite !== undefined ? { favorite } : {}),
+    ...(pinned !== undefined ? { pinned } : {}),
+  };
 }
 
 function revisionParam(value: string) {
@@ -155,6 +177,19 @@ export function registerNoteRoutes<TEnv>(
     handler: async ({ env, workspace, body, requestId }) => ({
       status: 201,
       data: { note: await createService(env).quickCapture(mutationContext(workspace!, requestId), body) },
+    }),
+  });
+
+  registry.register({
+    method: "POST",
+    path: "/api/v2/clipper/capture",
+    auth: "workspace",
+    minimumRole: "editor",
+    quota: "notes",
+    body: ClipperInputSchema,
+    handler: async ({ env, workspace, body, requestId }) => ({
+      status: 201,
+      data: { note: await createService(env).clipperCapture(mutationContext(workspace!, requestId), body) },
     }),
   });
 }

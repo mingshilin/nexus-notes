@@ -5,11 +5,15 @@ import { SecurityPanel } from "./SecurityPanel";
 import { WorkspacePanel } from "./WorkspacePanel";
 import { DataPrivacyPanel } from "./DataPrivacyPanel";
 import type { AccountCenterProps, AccountTab } from "./index";
+import { AccountOverviewPanel } from "./AccountOverviewPanel";
+import { PreferencesPanel } from "./PreferencesPanel";
 
 const tabs: Array<{ id: AccountTab; label: string }> = [
+  { id: "overview", label: "总览" },
   { id: "profile", label: "个人资料" },
   { id: "security", label: "安全" },
   { id: "workspace", label: "工作区" },
+  { id: "preferences", label: "偏好与通知" },
   { id: "privacy", label: "数据与隐私" },
 ];
 
@@ -17,7 +21,7 @@ function isAbort(error: unknown, signal: AbortSignal) {
   return signal.aborted || (error instanceof DOMException && error.name === "AbortError");
 }
 
-export function AccountCenter({ client, collaboration, operations, workspaces, activeWorkspaceId, currentUserId, onWorkspaceChange, onPrepareDelete, onDeleteFailed, onDeleted, onProfileChange, initialTab = "profile" }: AccountCenterProps) {
+export function AccountCenter({ client, collaboration, operations, workspaces, activeWorkspaceId, currentUserId, onWorkspaceChange, onCreateWorkspace, onPrepareDelete, onDeleteFailed, onDeleted, onProfileChange, initialTab = "profile" }: AccountCenterProps) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [profileLoading, setProfileLoading] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
@@ -120,9 +124,11 @@ export function AccountCenter({ client, collaboration, operations, workspaces, a
         {tabs.map((tab) => <button key={tab.id} id={`account-tab-${tab.id}`} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls={`account-panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => setActiveTab(tab.id)} onKeyDown={moveTab}>{tab.label}</button>)}
       </div>
       <div className="account-panels">
+        <div hidden={activeTab !== "overview"}><AccountOverviewPanel client={client} active={activeTab === "overview"} /></div>
         <div hidden={activeTab !== "profile"}><ProfilePanel client={client} profile={profile} loading={profileLoading} error={profileError} onRetry={() => setProfileRetry((retry) => retry + 1)} onProfileChange={handleProfileChange} /></div>
         <div hidden={activeTab !== "security"}><SecurityPanel active={activeTab === "security"} client={client} profile={profile} sessions={sessions} loading={sessionsLoading} error={sessionsError} onRetry={refreshSessions} onSessionsRefresh={refreshSessions} onSessionRevokeStart={invalidateSessions} onSessionRevokeFailed={handleSessionRevokeFailed} onSessionRevoked={handleSessionRevoked} onProfileChange={handleProfileChange} /></div>
-        <div hidden={activeTab !== "workspace"}><WorkspacePanel workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} client={collaboration} currentUserId={currentUserId} onWorkspaceChange={onWorkspaceChange} /></div>
+        <div hidden={activeTab !== "workspace"}><WorkspacePanel workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} client={collaboration} currentUserId={currentUserId} onWorkspaceChange={onWorkspaceChange} onCreateWorkspace={onCreateWorkspace} /></div>
+        <div hidden={activeTab !== "preferences"}><PreferencesPanel client={client} active={activeTab === "preferences"} /></div>
         <div hidden={activeTab !== "privacy"}><DataPrivacyPanel active={activeTab === "privacy"} client={client} operations={operations} activeWorkspaceId={activeWorkspaceId} onPrepareDelete={onPrepareDelete} onDeleteFailed={onDeleteFailed} onDeleted={onDeleted} /></div>
       </div>
     </section>

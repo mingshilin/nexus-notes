@@ -2,6 +2,7 @@ export * from "./api";
 export * from "./ai";
 export * from "./auth";
 export * from "./collaboration";
+export * from "./calendar";
 export * from "./attachments";
 export * from "./databases";
 export * from "./jobs";

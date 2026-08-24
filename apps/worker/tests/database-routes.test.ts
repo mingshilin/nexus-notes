@@ -20,7 +20,8 @@ function request(path: string, method = "GET", body?: unknown) {
 function repositoryDouble() {
   const entity = { id: "entity-1", revision: 1 };
   return {
-    listDatabases: vi.fn(async () => []),
+    listDatabases: vi.fn(async () => [entity]),
+    getStats: vi.fn(async () => ({ record_count: 0, property_count: 0, view_count: 0, template_count: 0, comment_count: 0, updated_at: "2026-08-25T00:00:00.000Z", role: "editor", database_permission_count: null, field_permission_count: null })),
     createDatabase: vi.fn(async () => entity),
     getDatabase: vi.fn(async () => ({ database: entity, properties: [], views: [], templates: [], role: "editor" })),
     updateDatabase: vi.fn(async () => ({ ...entity, revision: 2 })),
@@ -36,6 +37,7 @@ function repositoryDouble() {
     setDatabasePermission: vi.fn(async () => entity), setFieldPermission: vi.fn(async () => entity),
     listDatabasePermissions: vi.fn(async () => [entity]), listFieldPermissions: vi.fn(async () => [entity]),
     deleteDatabasePermission: vi.fn(async () => ({ id: entity.id })), deleteFieldPermission: vi.fn(async () => ({ id: entity.id })),
+    previewCsv: vi.fn(async () => ({ headers: ["Name"], rows: [{ row_number: 2, values: { "prop-1": "One" } }], errors: [], total_rows: 1 })),
     importCsv: vi.fn(async () => ({ items: [entity], imported_count: 1 })), exportCsv: vi.fn(async () => ({ csv: "Name\r\nOne", next_cursor: null })),
   };
 }
@@ -56,8 +58,10 @@ describe("v2 structured database routes", () => {
 
     const cases: Array<[string, string, unknown?]> = [
       ["GET", "/api/v2/databases"],
+      ["GET", "/api/v2/databases/bootstrap?database_id=entity-1&limit=25"],
       ["POST", "/api/v2/databases", { name: "Projects", description: "" }],
       ["GET", "/api/v2/databases/db-1"],
+      ["GET", "/api/v2/databases/db-1/stats"],
       ["PATCH", "/api/v2/databases/db-1", { base_revision: 1, name: "Roadmap" }],
       ["DELETE", "/api/v2/databases/db-1", { base_revision: 1 }],
       ["POST", "/api/v2/databases/db-1/properties", { name: "Name", type: "text", config: {}, position: 0 }],
@@ -90,6 +94,7 @@ describe("v2 structured database routes", () => {
       ["GET", "/api/v2/databases/db-1/properties/prop-1/permissions"],
       ["DELETE", "/api/v2/databases/db-1/properties/prop-1/permissions/permission-1", { base_revision: 1 }],
       ["POST", "/api/v2/databases/db-1/import/csv", { csv: "Name\r\nOne", header_property_ids: { Name: "prop-1" } }],
+      ["POST", "/api/v2/databases/db-1/import/csv/preview", { csv: "Name\r\nOne", header_property_ids: { Name: "prop-1" } }],
       ["POST", "/api/v2/databases/db-1/export/csv", { property_ids: ["prop-1"], cursor: null, page_size: 100 }],
     ];
     const responses = await Promise.all(cases.map(([method, path, body]) => registry.fetch(request(path, method, body), {})));
@@ -108,7 +113,10 @@ describe("v2 structured database routes", () => {
       expect(mutation.mock.calls[0]?.[0]).toEqual({ ...workspace, requestId: "req-db" });
     }
     expect(repository.listRecords).toHaveBeenCalledWith(workspace, "db-1", { cursor: "next", view_id: "view-1", limit: 25 });
+    expect(repository.listRecords).toHaveBeenCalledWith(workspace, "entity-1", { cursor: null, view_id: null, limit: 25 });
     expect(repository.searchRecords).toHaveBeenCalledWith(workspace, "db-1", { query: "alpha", cursor: null, limit: 20 });
+    expect(repository.getStats).toHaveBeenCalledWith(workspace, "db-1");
+    expect(repository.previewCsv).toHaveBeenCalledWith(workspace, "db-1", { csv: "Name\r\nOne", header_property_ids: { Name: "prop-1" } });
     expect(repository.createComment).toHaveBeenCalledWith(
       { ...workspace, requestId: "req-db" }, "db-1", { record_id: "record-1", body: "Review" },
     );
@@ -118,9 +126,20 @@ describe("v2 structured database routes", () => {
     );
     const databasePermissionsResponse = await responses[cases.findIndex(([method, path]) => method === "GET" && path === "/api/v2/databases/db-1/permissions")]!.json();
     const fieldPermissionsResponse = await responses[cases.findIndex(([method, path]) => method === "GET" && path === "/api/v2/databases/db-1/properties/prop-1/permissions")]!.json();
+    const bootstrapResponse = await responses[cases.findIndex(([, path]) => path.startsWith("/api/v2/databases/bootstrap"))]!.json();
     const permission = { id: "entity-1", revision: 1 };
     expect(databasePermissionsResponse).toEqual({ success: true, data: { items: [permission] }, request_id: "req-db" });
     expect(fieldPermissionsResponse).toEqual({ success: true, data: { items: [permission] }, request_id: "req-db" });
+    expect(bootstrapResponse).toEqual({
+      success: true,
+      data: {
+        items: [{ id: "entity-1", revision: 1 }],
+        selected_database_id: "entity-1",
+        bundle: { database: { id: "entity-1", revision: 1 }, properties: [], views: [], templates: [], role: "editor" },
+        records: { items: [], next_cursor: null },
+      },
+      request_id: "req-db",
+    });
   });
 
   it("rejects unknown body keys before repository calls and requires workspace auth", async () => {

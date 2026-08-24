@@ -26,6 +26,46 @@ export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
     return (result.results ?? []).map(toDatabase);
   }
 
+  async getStats(context: WorkspaceContext, databaseId: string) {
+    const fields = await this.access.fields(context, databaseId, "read");
+    const count = async (table: string) => {
+      const row = await this.db.prepare(
+        `SELECT COUNT(*) AS count FROM ${table} WHERE workspace_id = ? AND database_id = ?`,
+      ).bind(context.workspaceId, databaseId).first<{ count: number }>();
+      return Number(row?.count ?? 0);
+    };
+    const commentCountPromise = this.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM comments c
+       INNER JOIN database_records r
+         ON r.workspace_id = c.workspace_id AND r.id = c.entity_id
+       WHERE c.workspace_id = ? AND r.database_id = ?
+         AND c.entity_type = 'database_record' AND c.deleted_at IS NULL`,
+    ).bind(context.workspaceId, databaseId).first<{ count: number }>()
+      .then((row) => Number(row?.count ?? 0));
+    const [recordCount, viewCount, templateCount, commentCount] = await Promise.all([
+      count("database_records"),
+      count("database_views"),
+      count("database_templates"),
+      commentCountPromise,
+    ]);
+    const permissionCounts = fields.role === "owner" ? await Promise.all([
+      count("database_permissions"),
+      count("field_permissions"),
+    ]) : [null, null] as const;
+    return {
+      record_count: recordCount,
+      property_count: fields.readable.size,
+      view_count: viewCount,
+      template_count: templateCount,
+      comment_count: commentCount,
+      updated_at: fields.database.updated_at,
+      role: fields.role,
+      database_permission_count: permissionCounts[0],
+      field_permission_count: permissionCounts[1],
+    };
+  }
+
   async createDatabase(context: WorkspaceContext, input: CreateDatabaseInput) {
     if (context.role === "viewer") throw new DatabaseRepositoryError("DATABASE_WRITE_DENIED", "Database permission denied", 403);
     const now = this.now();

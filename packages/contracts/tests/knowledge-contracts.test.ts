@@ -145,6 +145,10 @@ describe("knowledge contracts", () => {
     }).success).toBe(true);
     expect(contracts.UpdateReminderInputSchema.safeParse({ base_revision: 1 }).success).toBe(false);
     expect(contracts.UpdateReminderInputSchema.safeParse({ base_revision: 1, status: "dismissed" }).success).toBe(true);
+    expect(contracts.DeleteReminderInputSchema.parse({ base_revision: 3 })).toEqual({ base_revision: 3 });
+    expect(contracts.SnoozeReminderInputSchema.parse({ base_revision: 3, minutes: 60 })).toEqual({
+      base_revision: 3, minutes: 60,
+    });
     expect(contracts.SetNoteTagsInputSchema.parse({ tag_ids: ["tag-1", "tag-1", "tag-2"] })).toEqual({
       tag_ids: ["tag-1", "tag-2"],
     });
@@ -155,5 +159,23 @@ describe("knowledge contracts", () => {
       nodes: [{ id: "note-1", title: "Draft", is_current: true }],
       edges: [],
     }).success).toBe(true);
+  });
+
+  it("validates calendar feed ranges and tenant-safe event metadata", async () => {
+    const contracts = await loadContracts();
+    expect(contracts.CalendarFeedQuerySchema.parse({ from: "2026-08-01", to: "2026-08-31" })).toEqual({
+      from: "2026-08-01", to: "2026-08-31",
+    });
+    expect(contracts.CalendarFeedQuerySchema.safeParse({ from: "2026-08-31", to: "2026-08-01" }).success).toBe(false);
+    expect(contracts.CalendarFeedQuerySchema.safeParse({ from: "2026-08-01", to: "2026-10-15" }).success).toBe(false);
+    expect(contracts.CalendarFeedItemSchema.safeParse({
+      id: "daily-1", kind: "daily_note", date: "2026-08-21", title: "Daily Note",
+      entity_id: "note-1", note_id: "note-1", status: "active",
+    }).success).toBe(true);
+    expect(contracts.CalendarFeedItemSchema.safeParse({
+      id: "record-1", kind: "database_record", date: "2026-08-21", title: "Record",
+      entity_id: "record-1", database_id: "db-1", note_id: null,
+    }).success).toBe(true);
+    expect(contracts.CalendarFeedSchema.safeParse({ items: [] }).success).toBe(true);
   });
 });

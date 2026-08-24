@@ -124,6 +124,52 @@ export class NoteDraftController {
     return promise;
   }
 
+  async resolveConflict(
+    workspaceId: string,
+    entityId: string,
+    resolution: "local" | "server",
+    serverNote: Note,
+  ): Promise<LocalDraft | null> {
+    this.assertActive();
+    return this.enqueue(this.key(workspaceId, entityId), async () => this.store.mutateDraft(workspaceId, entityId, (current) => {
+      if (!current) return undefined;
+      if (current.server_note_id && current.server_note_id !== serverNote.id) return current;
+
+      const serverBinding = {
+        server_note: serverNote,
+        server_note_id: serverNote.id,
+        server_revision: serverNote.revision,
+        server_updated_at: serverNote.updated_at,
+      };
+      if (resolution === "server") {
+        return {
+          ...current,
+          ...serverBinding,
+          title: serverNote.title,
+          content: serverNote.content,
+          updated_at: this.clock().toISOString(),
+          draft_generation: (current.draft_generation ?? 0) + 1,
+          pending_patch: undefined,
+        };
+      }
+
+      const generation = current.next_patch_generation ?? ((current.pending_patch?.generation ?? 0) + 1);
+      return {
+        ...current,
+        ...serverBinding,
+        pending_patch: {
+          key: `${entityId}:patch:${generation}`,
+          generation,
+          base_revision: serverNote.revision,
+          title: current.title,
+          content: current.content,
+          source: "manual",
+        },
+        next_patch_generation: generation + 1,
+      };
+    }));
+  }
+
   async reconcile(
     workspaceId: string,
     entityId: string,

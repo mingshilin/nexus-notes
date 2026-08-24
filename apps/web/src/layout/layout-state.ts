@@ -11,12 +11,14 @@ export interface MobileChromeState {
   lastScrollTop: number;
   textFocused: boolean;
   keyboardInset: number;
+  zoomed: boolean;
 }
 
 export type MobileChromeEvent =
   | { type: "scroll"; scrollTop: number }
   | { type: "text-focus"; focused: boolean }
-  | { type: "keyboard"; inset: number };
+  | { type: "keyboard"; inset: number }
+  | { type: "viewport-scale"; scale: number };
 
 export function createMobileChromeState(): MobileChromeState {
   return {
@@ -24,6 +26,7 @@ export function createMobileChromeState(): MobileChromeState {
     lastScrollTop: 0,
     textFocused: false,
     keyboardInset: 0,
+    zoomed: false,
   };
 }
 
@@ -45,6 +48,11 @@ export function reduceMobileChrome(
       visible: event.inset > 0 ? false : !state.textFocused,
     };
   }
+  if (event.type === "viewport-scale") {
+    return event.scale > 1.01
+      ? { ...state, visible: true, zoomed: true }
+      : { ...state, visible: state.keyboardInset === 0 && !state.textFocused, zoomed: false };
+  }
   const scrollTop = Math.max(0, event.scrollTop);
   const delta = scrollTop - state.lastScrollTop;
   let visible = state.visible;
@@ -55,7 +63,8 @@ export function reduceMobileChrome(
 
 export function calculateKeyboardInset(
   layoutHeight: number,
-  viewport: Pick<VisualViewport, "height" | "offsetTop">,
+  viewport: Pick<VisualViewport, "height" | "offsetTop"> & { scale?: number },
 ) {
+  if ((viewport.scale ?? 1) > 1.01) return 0;
   return Math.max(0, Math.round(layoutHeight - viewport.height - viewport.offsetTop));
 }

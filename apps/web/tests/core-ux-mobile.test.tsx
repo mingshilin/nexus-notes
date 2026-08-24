@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 import { AdaptiveWorkbench } from "../src/layout/AdaptiveWorkbench";
@@ -71,6 +71,18 @@ afterEach(() => {
 });
 
 describe("core UX mobile", () => {
+  it("opens the create center from mobile navigation and restores focus to its opener", async () => {
+    renderMobile();
+    const navigation = await screen.findByRole("navigation", { name: "移动端主导航" });
+    const opener = within(navigation).getByRole("button", { name: "创建中心" });
+
+    fireEvent.click(opener);
+    expect(await screen.findByRole("dialog", { name: "创建内容" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭创建内容" }));
+
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
   it("keeps one computed page scroll owner across notes, database, knowledge, and account at 390px", async () => {
     renderMobile();
     expect(await screen.findByRole("button", { name: "新建笔记" })).toBeVisible();
@@ -79,7 +91,7 @@ describe("core UX mobile", () => {
     expect(scrollOwners()).toHaveLength(1);
 
     for (const domain of ["数据库", "知识整理", "设置"] as const) {
-      fireEvent.click(screen.getByRole("button", { name: domain }));
+      fireEvent.click(screen.getByRole("button", { name: domain === "设置" ? "个人资料与设置" : domain }));
       if (domain === "设置") await screen.findByRole("heading", { name: "账户中心" });
       expect(scrollOwners()).toHaveLength(1);
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(390);
@@ -87,13 +99,24 @@ describe("core UX mobile", () => {
   });
 
   it("renders one mobile create action and suppresses it with navigation during modal and text focus", async () => {
-    const { api } = renderMobile();
-    const fab = await screen.findByRole("button", { name: "新建笔记" });
+    const { api, container } = renderMobile();
+    let fab = await screen.findByRole("button", { name: "新建笔记" });
     expect(screen.getAllByRole("button", { name: "新建笔记" })).toHaveLength(1);
+    let fabChrome = fab.closest(".mobile-create-note") as HTMLElement;
+    expect(within(fabChrome).queryByRole("button", { name: "创建内容" })).not.toBeInTheDocument();
+    expect(within(fabChrome).queryByRole("button", { name: "打开功能地图" })).not.toBeInTheDocument();
+
+    const navigation = screen.getByRole("navigation", { name: "移动端主导航" });
+    fireEvent.click(within(navigation).getByRole("button", { name: "个人资料与设置" }));
+    await screen.findByRole("heading", { name: "账户中心" });
+    expect(container.querySelector(".mobile-create-note")).not.toBeInTheDocument();
+    fireEvent.click(within(navigation).getByRole("button", { name: "笔记" }));
+    fab = await screen.findByRole("button", { name: "新建笔记" });
+    fabChrome = fab.closest(".mobile-create-note") as HTMLElement;
+    expect(fab).toBeVisible();
 
     fireEvent.click(fab);
     const title = await screen.findByRole("textbox", { name: "笔记标题" });
-    const navigation = screen.getByRole("navigation", { name: "移动端主导航", hidden: true });
     expect(title).toHaveFocus();
     fireEvent.focus(title);
     expect(navigation).toHaveAttribute("data-visible", "false");
@@ -102,7 +125,6 @@ describe("core UX mobile", () => {
     const content = await screen.findByRole("textbox", { name: "笔记内容" });
     fireEvent.focus(content);
     expect(navigation).toHaveAttribute("data-visible", "false");
-    const fabChrome = fab.closest(".mobile-create-note") as HTMLElement;
     expect(fabChrome).toHaveAttribute("aria-hidden", "true");
     expect(fabChrome).toHaveAttribute("inert");
     expect(fabChrome).toHaveStyle({ visibility: "hidden", pointerEvents: "none" });
@@ -123,10 +145,10 @@ describe("core UX mobile", () => {
 
   it("hides and restores chrome for password and file inputs", async () => {
     renderMobile();
-    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
+    const navigation = await screen.findByRole("navigation", { name: "移动端主导航" });
+    fireEvent.click(within(navigation).getByRole("button", { name: "个人资料与设置" }));
     await screen.findByRole("heading", { name: "账户中心" });
     fireEvent.click(screen.getByRole("tab", { name: "安全" }));
-    const navigation = screen.getByRole("navigation", { name: "移动端主导航" });
     const password = await screen.findByLabelText("当前密码");
     fireEvent.focus(password);
     expect(navigation).toHaveAttribute("data-visible", "false");

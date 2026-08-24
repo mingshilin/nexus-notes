@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { AuthSession } from "@nexus/contracts";
 import { AuthPanel } from "./AuthPanel";
 import type { AuthClient } from "./auth-client";
@@ -24,10 +24,25 @@ export function AuthGate({
   client: AuthClient;
   turnstileSiteKey: string;
   resetToken?: string;
-  children: ReactNode | ((session: AuthSession) => ReactNode);
+  children: ReactNode | ((session: AuthSession, refreshSession: () => Promise<AuthSession | null>) => ReactNode);
 }) {
   const [state, setState] = useState<AuthState>({ status: "loading" });
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+  const refreshSession = useCallback(async () => {
+    try {
+      const session = await client.session();
+      setState({ status: "authenticated", session });
+      return session;
+    } catch (error) {
+      setState((current) => {
+        if (isUnauthenticated(error)) return { status: "anonymous" };
+        // Keep the mounted workbench during an in-place refresh failure so an
+        // active mutation can report its own recoverable outcome.
+        return current.status === "authenticated" ? current : { status: "error" };
+      });
+      return null;
+    }
+  }, [client]);
 
   useEffect(() => {
     let active = true;
@@ -72,5 +87,5 @@ export function AuthGate({
     );
   }
 
-  return <>{typeof children === "function" ? children(state.session) : children}</>;
+  return <>{typeof children === "function" ? children(state.session, refreshSession) : children}</>;
 }

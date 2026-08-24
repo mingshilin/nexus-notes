@@ -1,6 +1,6 @@
-import { Bell, CalendarDays, Database, FileUp, Lightbulb, Plus, Zap, X } from "lucide-react";
+import { Bell, CalendarDays, Database, FileUp, Globe2, Lightbulb, Plus, Zap, X } from "lucide-react";
 import { createPortal } from "react-dom";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type MutableRefObject } from "react";
 import { useWorkbenchModalState } from "../layout/AdaptiveWorkbench";
 
 export type CreateActionResult =
@@ -13,9 +13,13 @@ export type CreateActionHandler = () => CreateActionResult | Promise<CreateActio
 export interface CreateCenterProps {
   open: boolean;
   onOpenChange(open: boolean): void;
+  triggerAriaLabel?: string;
+  renderTrigger?: boolean;
+  focusReturnRef?: MutableRefObject<HTMLButtonElement | null>;
   disabled?: boolean;
   onCreateNote?: CreateActionHandler;
   onQuickCapture?: CreateActionHandler;
+  onWebClipper?: CreateActionHandler;
   onTodayNote?: CreateActionHandler;
   onCreateDatabase?: CreateActionHandler;
   onCreateReminder?: CreateActionHandler;
@@ -23,7 +27,7 @@ export interface CreateCenterProps {
 }
 
 type CreateAction = {
-  id: "note" | "capture" | "today" | "database" | "reminder" | "import";
+  id: "note" | "capture" | "clipper" | "today" | "database" | "reminder" | "import";
   label: string;
   description: string;
   icon: typeof Lightbulb;
@@ -32,7 +36,7 @@ type CreateAction = {
 
 const focusableSelector = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
-export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNote, onQuickCapture, onTodayNote, onCreateDatabase, onCreateReminder, onImport }: CreateCenterProps) {
+export function CreateCenter({ open, onOpenChange, triggerAriaLabel = "创建内容", renderTrigger = true, focusReturnRef, disabled = false, onCreateNote, onQuickCapture, onWebClipper, onTodayNote, onCreateDatabase, onCreateReminder, onImport }: CreateCenterProps) {
   const setWorkbenchModalOpen = useWorkbenchModalState();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -47,10 +51,11 @@ export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNot
   const actions: CreateAction[] = [
     { id: "note", label: "新建笔记", description: "打开一篇空白笔记，马上开始记录。", icon: Lightbulb, run: onCreateNote },
     { id: "capture", label: "快速捕获", description: "先记下一个想法，稍后再整理。", icon: Zap, run: onQuickCapture },
+    { id: "clipper", label: "Web Clipper", description: "保存网页来源和正文，选择收件箱、今日笔记或数据库。", icon: Globe2, run: onWebClipper },
     { id: "today", label: "今日笔记", description: "打开或创建今天的笔记。", icon: CalendarDays, run: onTodayNote },
     { id: "database", label: "新建数据库", description: "创建一个结构化数据库。", icon: Database, run: onCreateDatabase },
-    { id: "reminder", label: "新建提醒", description: "提醒中心正在接入统一创建流程。", icon: Bell, run: onCreateReminder },
-    { id: "import", label: "导入内容", description: "文件和外部内容导入即将开放。", icon: FileUp, run: onImport },
+    { id: "reminder", label: "新建提醒", description: "打开提醒中心，填写时间并创建提醒。", icon: Bell, run: onCreateReminder },
+    { id: "import", label: "导入内容", description: "把 Markdown 或纯文本文件导入为新笔记。", icon: FileUp, run: onImport },
   ];
 
   useEffect(() => {
@@ -91,12 +96,26 @@ export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNot
     if (open || !wasOpenRef.current) return undefined;
     wasOpenRef.current = false;
     setPendingAction(null);
-    const timer = window.setTimeout(() => {
-      const trigger = triggerRef.current;
-      if (trigger && !trigger.closest("[inert]")) trigger.focus();
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [open]);
+    let timer: number | undefined;
+    let cancelled = false;
+    const restoreFocus = (attempt: number) => {
+      if (cancelled) return;
+      const trigger = focusReturnRef?.current ?? triggerRef.current;
+      if (trigger?.isConnected && trigger.closest("[inert]") && attempt < 6) {
+        timer = window.setTimeout(() => restoreFocus(attempt + 1), 16);
+        return;
+      }
+      if (trigger?.isConnected && !trigger.closest("[inert]")) {
+        trigger.focus({ preventScroll: true });
+      }
+      if (focusReturnRef) focusReturnRef.current = null;
+    };
+    timer = window.setTimeout(() => restoreFocus(0), 0);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [focusReturnRef, open]);
 
   const finishAction = (label: string, result: CreateActionResult) => {
     setPendingAction(null);
@@ -186,10 +205,10 @@ export function CreateCenter({ open, onOpenChange, disabled = false, onCreateNot
 
   return (
     <>
-      <button ref={triggerRef} className="create-center-trigger" type="button" aria-label="创建内容" aria-haspopup="dialog" aria-controls={dialogId} aria-expanded={open} disabled={disabled} onClick={() => { setActionError(null); onOpenChange(true); }}>
+      {renderTrigger ? <button ref={triggerRef} className="create-center-trigger" type="button" aria-label={triggerAriaLabel} title="打开创建中心" aria-haspopup="dialog" aria-controls={dialogId} aria-expanded={open} disabled={disabled} onClick={() => { if (focusReturnRef) focusReturnRef.current = triggerRef.current; setActionError(null); onOpenChange(true); }}>
         <Plus aria-hidden="true" size={17} />
         <span>创建内容</span>
-      </button>
+      </button> : null}
       {dialog && typeof document !== "undefined" ? createPortal(dialog, document.body) : null}
     </>
   );

@@ -23,7 +23,11 @@ describe("mobile authentication overflow", () => {
     expect(css).toMatch(/\.account-panel[^}]*overflow-wrap:\s*anywhere/);
     expect(css).toMatch(/\.context-heading \.primary-create-note, \.primary-create-note\s*\{[^}]*min-height:\s*40px/);
     expect(css).toMatch(/\.mobile-bottom-nav[^}]*env\(safe-area-inset-bottom\)/);
+    expect(css).toMatch(/\.product-navigation-mobile \.product-navigation-destinations\s*\{[^}]*flex-direction:\s*row/);
+    expect(css).toMatch(/\.product-navigation-mobile-scroll\s*\{[^}]*overflow-y:\s*hidden/);
     expect(css).toMatch(/\.mobile-create-note[^}]*var\(--keyboard-inset/);
+    expect(css).toMatch(/\.note-editor-markdown-toolbar\s*\{[^}]*flex-wrap:\s*nowrap/);
+    expect(css).toMatch(/\.note-editor-markdown-toolbar\s*\{[^}]*overflow-x:\s*auto/);
     expect(css).toMatch(/visibility:\s*hidden/);
     expect(css).toMatch(/button, input, select\s*\{\s*min-height:\s*40px/);
   });

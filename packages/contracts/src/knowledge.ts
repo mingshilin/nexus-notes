@@ -63,12 +63,41 @@ export const NoteLinkSchema = z.object({
 export type NoteLink = z.infer<typeof NoteLinkSchema>;
 
 export const ReminderStatusSchema = z.enum(["pending", "sent", "dismissed"]);
+export const ReminderChannelSchema = z.enum(["in_app", "email", "push"]);
+export const ReminderWeekdaySchema = z.enum(["MO", "TU", "WE", "TH", "FR", "SA", "SU"]);
+export const RecurrenceEndSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("never") }).strict(),
+  z.object({ type: z.literal("until"), date: z.string().date() }).strict(),
+  z.object({ type: z.literal("count"), count: z.number().int().min(2).max(999) }).strict(),
+]);
+export const ReminderRecurrenceSchema = z.discriminatedUnion("frequency", [
+  z.object({ frequency: z.literal("daily"), interval: z.number().int().min(1).max(30), ends: RecurrenceEndSchema }).strict(),
+  z.object({
+    frequency: z.literal("weekly"), interval: z.number().int().min(1).max(12),
+    weekdays: z.array(ReminderWeekdaySchema).min(1).max(7).transform((days) => [...new Set(days)]),
+    ends: RecurrenceEndSchema,
+  }).strict(),
+  z.object({
+    frequency: z.literal("monthly"), interval: z.number().int().min(1).max(12),
+    month_day: z.union([z.number().int().min(1).max(31), z.literal("last")]), ends: RecurrenceEndSchema,
+  }).strict(),
+]);
+const ReminderChannelsSchema = z.array(ReminderChannelSchema).min(1).max(3).transform((channels) => [...new Set(channels)]);
 export const ReminderSchema = z.object({
   id: EntityIdSchema,
   workspace_id: EntityIdSchema,
   note_id: EntityIdSchema.nullable(),
   user_id: EntityIdSchema,
   remind_at: TimestampSchema,
+  title: z.string().max(160).default(""),
+  timezone: z.string().min(1).max(64).default("UTC"),
+  channels: ReminderChannelsSchema.default(["in_app"]),
+  recurrence: ReminderRecurrenceSchema.nullable().default(null),
+  recurrence_anchor_local: z.string().datetime({ local: true }).nullable().default(null),
+  occurrence_count: z.number().int().nonnegative().default(0),
+  delivery_enabled_at: TimestampSchema.nullable().default(null),
+  snoozed_until: TimestampSchema.nullable().default(null),
+  last_delivered_at: TimestampSchema.nullable().default(null),
   status: ReminderStatusSchema,
   revision: RevisionSchema,
   created_at: TimestampSchema,
@@ -79,18 +108,52 @@ export type Reminder = z.infer<typeof ReminderSchema>;
 export const CreateReminderInputSchema = z.object({
   note_id: EntityIdSchema.nullable().optional(),
   remind_at: TimestampSchema,
-});
+  title: z.string().trim().max(160).default(""),
+  timezone: z.string().trim().min(1).max(64).default("UTC"),
+  channels: ReminderChannelsSchema.default(["in_app"]),
+  recurrence: ReminderRecurrenceSchema.nullable().default(null),
+  delivery_enabled: z.boolean().default(true),
+}).strict();
 export type CreateReminderInput = z.infer<typeof CreateReminderInputSchema>;
 
 export const UpdateReminderInputSchema = z.object({
   base_revision: RevisionSchema,
   remind_at: TimestampSchema.optional(),
+  title: z.string().trim().max(160).optional(),
+  note_id: EntityIdSchema.nullable().optional(),
+  timezone: z.string().trim().min(1).max(64).optional(),
+  channels: ReminderChannelsSchema.optional(),
+  recurrence: ReminderRecurrenceSchema.nullable().optional(),
+  delivery_enabled: z.boolean().optional(),
   status: ReminderStatusSchema.optional(),
 }).refine(
-  (input) => input.remind_at !== undefined || input.status !== undefined,
+  (input) => Object.keys(input).some((key) => key !== "base_revision"),
   { message: "At least one reminder field must change" },
 );
 export type UpdateReminderInput = z.infer<typeof UpdateReminderInputSchema>;
+
+export const SnoozeReminderInputSchema = z.object({
+  base_revision: RevisionSchema,
+  minutes: z.union([z.literal(10), z.literal(60), z.literal(1440)]),
+}).strict();
+
+export const DeleteReminderInputSchema = z.object({
+  base_revision: RevisionSchema,
+}).strict();
+
+export const ReminderListQuerySchema = z.object({
+  status: z.enum(["all", "pending", "overdue", "today", "upcoming", "completed"]).default("pending"),
+  query: z.string().trim().max(160).optional(),
+  cursor: z.string().min(1).max(512).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+}).strict();
+
+export type ReminderChannel = z.infer<typeof ReminderChannelSchema>;
+export type ReminderRecurrence = z.infer<typeof ReminderRecurrenceSchema>;
+export type RecurrenceEnd = z.infer<typeof RecurrenceEndSchema>;
+export type SnoozeReminderInput = z.infer<typeof SnoozeReminderInputSchema>;
+export type DeleteReminderInput = z.infer<typeof DeleteReminderInputSchema>;
+export type ReminderListQuery = z.infer<typeof ReminderListQuerySchema>;
 
 export const SearchEntityTypeSchema = z.enum(["note", "database_record", "comment", "attachment"]);
 export const SearchHitSourceSchema = z.enum(["title", "content", "tags", "properties", "attachment_name", "ocr"]);

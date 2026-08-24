@@ -88,4 +88,36 @@ describe("ProfileClient", () => {
 
     expect(request.mock.calls.map(([options]) => options.policy.idempotencyKey)).toEqual(["one", "two"]);
   });
+
+  it("keeps account overview and preferences for five minutes and invalidates preferences after mutation", async () => {
+    let now = 0;
+    const preferences = {
+      user_id: "u1", default_domain: "notes", density: "comfortable", reduced_motion: false,
+      week_starts_on: 1, date_format: "yyyy-MM-dd", default_snooze_minutes: 10,
+      email_reminders: false, push_reminders: false, in_app_reminders: true,
+      quiet_hours: null, show_push_title: false, revision: 1,
+      updated_at: "2026-01-01T00:00:00.000Z",
+    };
+    const overview = {
+      counts: { workspaces: 1, sessions: 1, notes: 10, databases: 2, upcoming_reminders: 3 },
+      profile_complete: true, ai_configured: false, recent_activity: [],
+    };
+    const request = vi.fn(async (options: { path: string; method?: string }) => {
+      if (options.path.endsWith("overview")) return overview;
+      if (options.method === "PATCH") return { ...preferences, density: "compact", revision: 2 };
+      return preferences;
+    });
+    const client = new ProfileClient({ request } as never, { now: () => now, createId: () => "pref-command" });
+    await client.getOverview();
+    await client.getOverview();
+    await client.getPreferences();
+    await client.getPreferences();
+    expect(request).toHaveBeenCalledTimes(2);
+    now = 5 * 60_000 + 1;
+    await client.getOverview();
+    expect(request).toHaveBeenCalledTimes(3);
+    await client.updatePreferences({ base_revision: 1, density: "compact" });
+    await client.getPreferences();
+    expect(request.mock.calls.filter(([input]) => input.path === "/api/v2/profile/preferences")).toHaveLength(3);
+  });
 });
