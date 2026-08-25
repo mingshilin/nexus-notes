@@ -408,7 +408,7 @@ describe("ProductNavigation", () => {
 
 describe("App product navigation", () => {
   it("opens the command palette with Ctrl+K and navigates through a searched action", async () => {
-    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} localStore={draftStore() as any} turnstileSiteKey="test" />);
 
     await screen.findByRole("region", { name: "快速开始" });
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });

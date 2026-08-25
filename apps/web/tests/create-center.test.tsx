@@ -325,7 +325,7 @@ describe("CreateCenter", () => {
   });
 
   it("inerts the complete workspace background while the portal dialog is open", async () => {
-    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} localStore={memoryDraftStore() as any} turnstileSiteKey="test" />);
     const trigger = await screen.findByRole("button", { name: "创建内容" });
     fireEvent(window, new CustomEvent("nexus:service-worker-update", { detail: { activate: vi.fn() } }));
     const updateBanner = await screen.findByText("新版本已准备好。");
