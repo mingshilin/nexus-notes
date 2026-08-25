@@ -15,6 +15,7 @@ playwright-report/
 .playwright-cli/
 output/
 apps/worker/wrangler.preview.local.toml
+apps/worker/wrangler.production.local.toml
 test-results/
 .DS_Store
 Thumbs.db

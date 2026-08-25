@@ -333,7 +333,10 @@ function AuthenticatedWorkspace({
   const transitionToDomain = useCallback((domain: ProductDomain) => {
     setRequestedDomain(domain);
     setActivePane("canvas");
-    startDomainTransition(() => setActiveDomain(domain));
+    // Commit navigation synchronously so the shell responds immediately. Keep the
+    // heavier lazy-domain work outside the urgent interaction update.
+    setActiveDomain(domain);
+    startDomainTransition(() => { void preloadWorkspaceDomain(domain).catch(() => undefined); });
   }, []);
   const [navigationUser, setNavigationUser] = useState(user);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -1289,7 +1292,7 @@ function AuthenticatedWorkspace({
     return controller;
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const handleUpdate = (event: Event) => {
       setServiceWorkerUpdate((event as CustomEvent<ServiceWorkerUpdate>).detail);
     };

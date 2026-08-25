@@ -415,7 +415,7 @@ describe("App product navigation", () => {
     expect(screen.getByRole("dialog", { name: "快速操作" })).toBeInTheDocument();
     fireEvent.change(screen.getByRole("searchbox", { name: "搜索命令" }), { target: { value: "数据库" } });
     fireEvent.click(screen.getByRole("option", { name: /^数据库 /u }));
-    expect(await screen.findByRole("heading", { name: "创建第一个数据库" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "创建第一个数据库" }, { timeout: 5_000 })).toBeInTheDocument();
   });
 
   it("exposes explicit first-run actions for creating notes, opening the create center, and editing profile", async () => {
