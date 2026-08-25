@@ -76,7 +76,7 @@ For a Preview or local browser gate, use a Chrome profile outside this repositor
 
 ## Preview
 
-The current acceptance deployment is [Nexus Notes Public Beta Preview](https://nexus-notes-public-beta-preview.shilinming9.workers.dev/). It uses independent Preview bindings and does not replace the production domain. Preview deployment and production cutover are separate operator-authorized actions; see [docs/public-beta-cutover-runbook.md](docs/public-beta-cutover-runbook.md).
+The production deployment is [Nexus Notes](https://notes.msl88ljctengxun.xyz/). The independent [Public Beta Preview](https://nexus-notes-public-beta-preview.shilinming9.workers.dev/) remains available for acceptance testing. See [docs/production-cutover-2026-08-26.md](docs/production-cutover-2026-08-26.md) and [docs/public-beta-cutover-runbook.md](docs/public-beta-cutover-runbook.md).
 
 ## Security and Contributions
 
