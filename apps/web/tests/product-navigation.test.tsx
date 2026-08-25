@@ -98,6 +98,9 @@ function appApiClient() {
   return {
     request: vi.fn(async (request: { path: string }) => {
       if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+      if (request.path.startsWith("/api/v2/databases/bootstrap")) {
+        return { items: [], selected_database_id: null, bundle: null, records: { items: [], next_cursor: null } };
+      }
       return { items: [], next_cursor: null };
     }),
   };
