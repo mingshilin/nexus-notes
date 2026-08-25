@@ -44,6 +44,14 @@ function encodeCursor(note: Pick<Note, "updated_at" | "id">) {
   return encodeURIComponent(`${note.updated_at}\n${note.id}`);
 }
 
+function searchTokens(query: string) {
+  return query.trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
+}
+
+function ftsToken(token: string) {
+  return `"${token.replaceAll('"', '""')}"*`;
+}
+
 function decodeCursor(cursor: string) {
   const decoded = decodeURIComponent(cursor);
   const separator = decoded.indexOf("\n");
@@ -138,6 +146,27 @@ export class D1NoteRepository implements NoteRepository {
     return note;
   }
 
+  async openOrCreateDaily(input: CreateNoteRecordInput) {
+    const existing = await this.activeDailyNote(input.workspaceId, input.dailyDate);
+    if (existing) return existing;
+
+    try {
+      return await this.createNote(input);
+    } catch (error) {
+      // The migration trigger serializes concurrent creators. Re-read its winner.
+      const winner = await this.activeDailyNote(input.workspaceId, input.dailyDate);
+      if (winner) return winner;
+      throw error;
+    }
+  }
+
+  async hasDatabase(workspaceId: string, databaseId: string) {
+    const row = await this.db.prepare(
+      "SELECT 1 AS present FROM databases WHERE workspace_id = ? AND id = ? LIMIT 1",
+    ).bind(workspaceId, databaseId).first<{ present: number }>();
+    return Boolean(row);
+  }
+
   getNote(workspaceId: string, noteId: string) {
     return this.db.prepare(
       `SELECT ${NOTE_COLUMNS}
@@ -147,20 +176,80 @@ export class D1NoteRepository implements NoteRepository {
     ).bind(workspaceId, noteId).first<NoteRow>().then((row) => row ? toNote(row) : null);
   }
 
-  async listNotes(input: { workspaceId: string; cursor?: string; limit: number }) {
-    const limit = Math.max(1, Math.min(input.limit, 100));
-    const conditions = ["workspace_id = ?", "deleted_at IS NULL"];
-    const bindings: unknown[] = [input.workspaceId];
-    if (input.cursor) {
-      const cursor = decodeCursor(input.cursor);
-      conditions.push("(updated_at < ? OR (updated_at = ? AND id < ?))");
-      bindings.push(cursor.updatedAt, cursor.updatedAt, cursor.id);
-    }
-    const result = await this.db.prepare(
+  private activeDailyNote(workspaceId: string, dailyDate: string | null) {
+    if (!dailyDate) return Promise.resolve(null);
+    return this.db.prepare(
       `SELECT ${NOTE_COLUMNS}
        FROM notes
-       WHERE ${conditions.join(" AND ")}
+       WHERE workspace_id = ? AND daily_date = ? AND status = 'active' AND deleted_at IS NULL
        ORDER BY updated_at DESC, id DESC
+       LIMIT 1`,
+    ).bind(workspaceId, dailyDate).first<NoteRow>().then((row) => row ? toNote(row) : null);
+  }
+
+  async listNotes(input: { workspaceId: string; cursor?: string; limit: number; query?: string; status?: Note["status"]; folderId?: string | null; dailyDate?: string; favorite?: boolean; pinned?: boolean }) {
+    const limit = Math.max(1, Math.min(input.limit, 100));
+    const queryTokens = searchTokens(input.query ?? "");
+    const hasQuery = queryTokens.length > 0;
+    const noteColumn = hasQuery ? "notes." : "";
+    const conditions = [`${noteColumn}workspace_id = ?`, `${noteColumn}deleted_at IS NULL`];
+    const bindings: unknown[] = [input.workspaceId];
+    if (hasQuery) {
+      const hasNonAsciiToken = queryTokens.some((token) => /[^\x00-\x7F]/u.test(token));
+      if (hasNonAsciiToken) {
+        conditions.push(queryTokens.map(() => `lower(
+          COALESCE(sd.title, '') || ' ' || COALESCE(sd.content, '') || ' ' ||
+          COALESCE(sd.tags, '') || ' ' || COALESCE(sd.properties, '') || ' ' ||
+          COALESCE(sd.attachment_names, '') || ' ' || COALESCE(sd.ocr_text, '')
+        ) LIKE ?`).join(" AND "));
+        for (const token of queryTokens) bindings.push(`%${token}%`);
+      } else {
+        conditions.push("search_documents_fts MATCH ?");
+        bindings.push(queryTokens.map(ftsToken).join(" AND "));
+      }
+    }
+    if (input.status) {
+      conditions.push(`${noteColumn}status = ?`);
+      bindings.push(input.status);
+    }
+    if (input.folderId !== undefined) {
+      if (input.folderId === null) conditions.push(`${noteColumn}folder_id IS NULL`);
+      else {
+        conditions.push(`${noteColumn}folder_id = ?`);
+        bindings.push(input.folderId);
+      }
+    }
+    if (input.dailyDate) {
+      conditions.push(`${noteColumn}daily_date = ?`);
+      bindings.push(input.dailyDate);
+    }
+    if (input.favorite !== undefined) {
+      conditions.push(`${noteColumn}is_favorite = ?`);
+      bindings.push(Number(input.favorite));
+    }
+    if (input.pinned !== undefined) {
+      conditions.push(`${noteColumn}is_pinned = ?`);
+      bindings.push(Number(input.pinned));
+    }
+    if (input.cursor) {
+      const cursor = decodeCursor(input.cursor);
+      conditions.push(`(${noteColumn}updated_at < ? OR (${noteColumn}updated_at = ? AND ${noteColumn}id < ?))`);
+      bindings.push(cursor.updatedAt, cursor.updatedAt, cursor.id);
+    }
+    const selectedColumns = hasQuery ? "notes.*" : NOTE_COLUMNS;
+    const fromClause = hasQuery
+      ? `FROM notes
+       JOIN search_documents sd
+         ON sd.workspace_id = notes.workspace_id
+        AND sd.entity_type = 'note'
+        AND sd.entity_id = notes.id
+       JOIN search_documents_fts ON search_documents_fts.rowid = sd.rowid`
+      : "FROM notes";
+    const result = await this.db.prepare(
+      `SELECT ${selectedColumns}
+       ${fromClause}
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY ${noteColumn}updated_at DESC, ${noteColumn}id DESC
        LIMIT ?`,
     ).bind(...bindings, limit + 1).all<NoteRow>();
     const rows = result.results ?? [];
@@ -349,6 +438,62 @@ export class D1NoteRepository implements NoteRepository {
       ).bind(input.workspaceId, input.noteId, input.revision).first<{ found: number }>(),
     ]);
     return { note: null, current, revisionFound: Boolean(revision) };
+  }
+
+  async deletePermanently(input: {
+    workspaceId: string;
+    userId: string;
+    noteId: string;
+    baseRevision: number;
+    now: string;
+    requestId?: string;
+  }) {
+    const condition = `workspace_id = ? AND id = ? AND status = 'trashed' AND revision = ? AND deleted_at IS NULL`;
+    const bindings = [input.workspaceId, input.noteId, input.baseRevision];
+    const exists = `EXISTS (SELECT 1 FROM notes WHERE ${condition})`;
+    const cleanup = (table: "comments" | "public_shares" | "search_documents") => this.db.prepare(
+      `DELETE FROM ${table}
+       WHERE workspace_id = ? AND entity_type = 'note' AND entity_id = ?
+         AND ${exists}`,
+    ).bind(input.workspaceId, input.noteId, ...bindings);
+    const insertTombstone = this.db.prepare(
+      `INSERT INTO sync_changes (
+         workspace_id, entity_type, entity_id, revision, kind, payload_json, created_at
+       )
+       SELECT workspace_id, 'note', id, revision, 'delete', '{}', ?
+       FROM notes WHERE ${condition}`,
+    ).bind(input.now, ...bindings);
+    const deleteNote = this.db.prepare(
+      `DELETE FROM notes WHERE ${condition} RETURNING revision`,
+    ).bind(...bindings);
+    const results = await this.db.batch<{ revision: number }>([
+      cleanup("comments"),
+      cleanup("public_shares"),
+      cleanup("search_documents"),
+      insertTombstone,
+      ...this.auditStatements(
+        input,
+        "note.permanently_deleted",
+        input.noteId,
+        input.baseRevision,
+        input.now,
+        exists,
+        bindings,
+      ),
+      deleteNote,
+    ]);
+    const deleted = results.at(-1)?.results?.[0] ?? null;
+    if (deleted) {
+      await this.notifyPresence(input.workspaceId, input.noteId, deleted.revision);
+      return { deleted: true as const, state: "deleted" as const };
+    }
+
+    const current = await this.db.prepare(
+      "SELECT status, revision FROM notes WHERE workspace_id = ? AND id = ? AND deleted_at IS NULL LIMIT 1",
+    ).bind(input.workspaceId, input.noteId).first<{ status: Note["status"]; revision: number }>();
+    if (!current) return { deleted: false as const, state: "not_found" as const };
+    if (current.status !== "trashed") return { deleted: false as const, state: "not_trashed" as const };
+    return { deleted: false as const, state: "conflict" as const };
   }
 
   private revisionFromCurrentNote(

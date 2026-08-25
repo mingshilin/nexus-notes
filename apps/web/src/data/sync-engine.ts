@@ -32,8 +32,10 @@ export interface SyncTransport {
   pull(workspaceId: string, cursor: string | null): Promise<SyncPullResult>;
 }
 
+export type SyncStore = Pick<BetaLocalStore, "listOperations" | "removeOperation" | "getSyncCursor" | "setSyncCursor">;
+
 export interface SyncEngineOptions {
-  store: Pick<BetaLocalStore, "listOperations" | "removeOperation" | "getSyncCursor" | "setSyncCursor">;
+  store: SyncStore;
   transport: SyncTransport;
   applyChange(change: SyncChange): Promise<void>;
   onConflict(operation: SyncOperation, result: SyncOperationResult): void;

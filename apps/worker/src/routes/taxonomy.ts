@@ -14,7 +14,7 @@ interface Registry<TEnv> {
 
 type Service = Pick<
   KnowledgeService,
-  "listFolders" | "createFolder" | "listTags" | "createTag" | "setNoteTags" | "setNoteLinks" | "listNoteLinks" | "listBacklinks"
+  "listFolders" | "createFolder" | "listTags" | "listNoteTags" | "createTag" | "setNoteTags" | "setNoteLinks" | "listNoteLinks" | "listBacklinks"
 >;
 
 export function registerTaxonomyRoutes<TEnv>(registry: Registry<TEnv>, createService: (env: TEnv) => Service) {
@@ -38,6 +38,12 @@ export function registerTaxonomyRoutes<TEnv>(registry: Registry<TEnv>, createSer
     body: CreateTagInputSchema,
     handler: async ({ env, workspace, body }) => ({
       status: 201, data: { tag: await createService(env).createTag(workspace!, body) },
+    }),
+  });
+  registry.register({
+    method: "GET", path: "/api/v2/notes/:noteId/tags", auth: "workspace",
+    handler: async ({ env, workspace, params }) => ({
+      data: { items: await createService(env).listNoteTags(workspace!, params.noteId!) },
     }),
   });
   registry.register({

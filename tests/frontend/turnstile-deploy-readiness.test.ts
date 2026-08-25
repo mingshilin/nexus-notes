@@ -44,20 +44,20 @@ describe("Turnstile deployment readiness", () => {
     const baseUrl = "https://beta.example";
     const siteKey = "0x4BBBBBBBBBBBBBBBBBBBBBBB";
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === `${baseUrl}/`) {
+      const url = new URL(String(input));
+      if (url.origin === baseUrl && url.pathname === "/") {
         return new Response('<script type="module" src="/assets/main.js"></script>', {
           status: 200,
           headers: securityHeaders,
         });
       }
-      if (url === `${baseUrl}/assets/main.js`) {
+      if (url.href === `${baseUrl}/assets/main.js`) {
         return new Response('import("assets/AuthPanel.js");', { status: 200 });
       }
-      if (url === `${baseUrl}/assets/AuthPanel.js`) {
+      if (url.href === `${baseUrl}/assets/AuthPanel.js`) {
         return new Response(`const siteKey = "${siteKey}";`, { status: 200 });
       }
-      if (url === `${baseUrl}/api/v2/health`) {
+      if (url.href === `${baseUrl}/api/v2/health`) {
         return new Response(JSON.stringify({ success: true, data: { status: "ok" } }), {
           status: 200,
           headers: { "content-type": "application/json", ...securityHeaders },

@@ -7,3 +7,7 @@ export * from "./layout/AdaptiveWorkbench";
 export * from "./layout/layout-state";
 export * from "./layout/PageScrollArea";
 export * from "./knowledge/KnowledgeRecoveryPanel";
+export * from "./account/AccountMenu";
+export * from "./navigation/ProductNavigation";
+export * from "./create";
+export * from "./features";

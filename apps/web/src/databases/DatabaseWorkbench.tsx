@@ -2,6 +2,7 @@ import type { BoardMoveInput, CalendarAssignmentInput, Database, DatabasePropert
 import { useEffect, useRef, useState } from "react";
 
 import type { DatabaseClient } from "../data/database-client";
+import type { CollaborationClient } from "../data/collaboration-client";
 import { DatabasePaginationStore } from "../data/database-state";
 import { useWorkbenchModalState } from "../layout/AdaptiveWorkbench";
 import { DatabaseBoardView } from "./DatabaseBoardView";
@@ -26,6 +27,7 @@ export interface DatabaseWorkbenchProps {
   activeViewId?: string;
   paginationStore?: DatabasePaginationStore;
   client?: DatabaseClient;
+  collaborationClient?: CollaborationClient;
   onMutation?(): void;
   onBoardMove?(input: BoardMoveInput): Promise<DatabaseRecord>;
   onCalendarAssign?(input: CalendarAssignmentInput): Promise<DatabaseRecord>;
@@ -44,7 +46,7 @@ function recordSetFingerprint(records: readonly DatabaseRecord[]) {
 
 export function DatabaseWorkbench({
   database, databases = [database], properties, records: sourceRecords, recordsNextCursor = null, views, templates, activeViewId, paginationStore, client, onMutation,
-  onBoardMove, onCalendarAssign, onRecordsPageRequest, onTablePageRequest,
+  collaborationClient, onBoardMove, onCalendarAssign, onRecordsPageRequest, onTablePageRequest,
 }: DatabaseWorkbenchProps) {
   const [records, setRecords] = useState(sourceRecords);
   const [nextCursor, setNextCursor] = useState<string | null>(recordsNextCursor);
@@ -199,7 +201,7 @@ export function DatabaseWorkbench({
   if (!selectedView) {
     return <section className="database-workbench" aria-hidden={toolsOpen || undefined} inert={toolsOpen || undefined}>
       <header className="database-workbench-header"><div><p className="eyebrow">STRUCTURED DATABASE</p><h1>{database.name}</h1><p>{database.description}</p></div>
-        <DatabaseToolsDrawer open={toolsOpen} views={views} activeViewId="" database={database} databases={databases} databaseId={database.id} properties={properties} records={records} templates={templates} client={client} onOpenChange={changeToolsOpen} onViewChange={setSelectedViewId} onMutation={onMutation} />
+        <DatabaseToolsDrawer open={toolsOpen} views={views} activeViewId="" database={database} databases={databases} databaseId={database.id} properties={properties} records={records} templates={templates} client={client} collaborationClient={collaborationClient} onOpenChange={changeToolsOpen} onViewChange={setSelectedViewId} onMutation={onMutation} />
       </header>
       <p className="database-empty">尚未创建数据库视图。请先添加属性或创建视图。</p>
     </section>;
@@ -322,7 +324,7 @@ export function DatabaseWorkbench({
 
   return <section className="database-workbench" aria-hidden={toolsOpen || undefined} inert={toolsOpen || undefined}>
     <header className="database-workbench-header"><div><p className="eyebrow">STRUCTURED DATABASE</p><h1>{database.name}</h1><p>{database.description}</p></div>
-      <DatabaseToolsDrawer open={toolsOpen} views={views} activeViewId={selectedView.id} database={database} databases={databases} databaseId={database.id} properties={properties} records={records} templates={templates} client={client} onOpenChange={changeToolsOpen} onViewChange={changeView} onMutation={onMutation} onBulkPreview={previewBulkEdit} />
+      <DatabaseToolsDrawer open={toolsOpen} views={views} activeViewId={selectedView.id} database={database} databases={databases} databaseId={database.id} properties={properties} records={records} templates={templates} client={client} collaborationClient={collaborationClient} onOpenChange={changeToolsOpen} onViewChange={changeView} onMutation={onMutation} onBulkPreview={previewBulkEdit} />
     </header>
     <nav className="database-view-tabs" aria-label="数据库视图">{views.map((view) => <button className={view.id === selectedView.id ? "active" : ""} type="button" key={view.id} onClick={() => changeView(view.id)}>{view.name}</button>)}</nav>
     {selectedView.type === "table" ? <DatabaseTableView properties={configuredProperties} records={configuredRecords} page={page} pageSize={pageSize} exactPage={exactPage} onPageChange={changePage} hasNextPage={Boolean(nextCursor && requestPage) && !pageRequestPending} /> : null}

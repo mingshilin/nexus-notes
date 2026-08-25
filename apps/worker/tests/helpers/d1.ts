@@ -13,6 +13,13 @@ export const migrationPaths = [
   "../../migrations/0007_collaboration.sql",
   "../../migrations/0008_task8_backend_closure.sql",
   "../../migrations/0009_task9_operations.sql",
+  "../../migrations/0010_profile_account_center.sql",
+  "../../migrations/0011_profile_audit_enforcement.sql",
+  "../../migrations/0012_daily_notes.sql",
+  "../../migrations/0013_operations_results.sql",
+  "../../migrations/0014_user_preferences_and_push.sql",
+  "../../migrations/0015_reminder_delivery.sql",
+  "../../migrations/0016_user_ai_configs.sql",
 ];
 
 export function splitMigration(sql: string) {

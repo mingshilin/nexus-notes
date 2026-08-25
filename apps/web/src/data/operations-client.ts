@@ -1,11 +1,13 @@
-import type { CreateJobInput, FeedbackInput, Job, OperationsStatus, Usage } from "@nexus/contracts";
+import type { CancelJobInput, CreateJobInput, FeedbackInput, Job, OperationsStatus, Usage } from "@nexus/contracts";
 import type { ApiClient } from "./api-client";
+
+type OperationsApiClient = Pick<ApiClient, "request"> & Partial<Pick<ApiClient, "download">>;
 
 export class OperationsClient {
   private readonly createId: () => string;
 
   constructor(
-    private readonly client: Pick<ApiClient, "request">,
+    private readonly client: OperationsApiClient,
     private readonly workspaceId: string,
     options: { createId?: () => string } = {},
   ) {
@@ -24,8 +26,26 @@ export class OperationsClient {
     ).then(({ job }) => job);
   }
 
+  cancelJob(jobId: string, input: CancelJobInput) {
+    return this.command<{ job: Job }>(
+      `/api/v2/operations/jobs/${encodeURIComponent(jobId)}`,
+      input,
+      "DELETE",
+    ).then(({ job }) => job);
+  }
+
   listJobs(signal?: AbortSignal) {
     return this.query<{ items: Job[] }>("/api/v2/operations/jobs", "jobs", signal).then(({ items }) => items);
+  }
+
+  downloadJob(jobId: string, signal?: AbortSignal) {
+    if (!this.client.download) return Promise.reject(new Error("BINARY_DOWNLOAD_UNAVAILABLE"));
+    return this.client.download({
+      path: `/api/v2/operations/jobs/${encodeURIComponent(jobId)}/file`,
+      headers: this.headers(),
+      requestClass: "query",
+      policy: { timeoutMs: 30_000, retry: 2, signal },
+    });
   }
 
   getUsage(signal?: AbortSignal) {
@@ -53,10 +73,10 @@ export class OperationsClient {
     });
   }
 
-  private command<T>(path: string, body: unknown) {
+  private command<T>(path: string, body: unknown, method: "POST" | "DELETE" = "POST") {
     return this.client.request<T>({
       path,
-      method: "POST",
+      method,
       headers: this.headers(),
       body,
       requestClass: "command",

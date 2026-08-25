@@ -3,7 +3,19 @@ import { z } from "zod";
 const EntityIdSchema = z.string().trim().min(1).max(128);
 const NoteTitleSchema = z.string().max(160);
 const NoteContentSchema = z.string().max(200_000);
-const DailyDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+function isValidDailyDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0;
+  return day <= daysInMonth;
+}
+
+const DailyDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isValidDailyDate, "daily_date must be a valid calendar date");
 
 export const NoteStatusSchema = z.enum(["active", "archived", "trashed"]);
 export const NoteRevisionSourceSchema = z.enum(["autosave", "manual", "restore", "conflict", "import"]);
@@ -54,6 +66,12 @@ export const CreateNoteInputSchema = z.object({
 
 export type CreateNoteInput = z.infer<typeof CreateNoteInputSchema>;
 
+export const DailyNoteInputSchema = z.object({
+  daily_date: DailyDateSchema,
+}).strict();
+
+export type DailyNoteInput = z.infer<typeof DailyNoteInputSchema>;
+
 export const UpdateNoteInputSchema = z.object({
   base_revision: z.number().int().positive(),
   title: NoteTitleSchema.optional(),
@@ -87,6 +105,12 @@ export const RestoreNoteInputSchema = z.object({
 
 export type RestoreNoteInput = z.infer<typeof RestoreNoteInputSchema>;
 
+export const DeleteNoteInputSchema = z.object({
+  base_revision: z.number().int().positive(),
+});
+
+export type DeleteNoteInput = z.infer<typeof DeleteNoteInputSchema>;
+
 export const QuickCaptureInputSchema = z.object({
   title: NoteTitleSchema.optional(),
   content: NoteContentSchema.min(1),
@@ -95,3 +119,27 @@ export const QuickCaptureInputSchema = z.object({
 });
 
 export type QuickCaptureInput = z.infer<typeof QuickCaptureInputSchema>;
+
+const ClipperTargetSchema = z.enum(["inbox", "daily", "database"]);
+const ClipperUrlSchema = z.string().trim().max(2_048).refine((value) => {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}, "url must use http or https");
+
+export const ClipperInputSchema = z.object({
+  title: NoteTitleSchema.optional(),
+  url: ClipperUrlSchema.optional(),
+  content: NoteContentSchema.min(1),
+  target: ClipperTargetSchema.default("inbox"),
+  database_id: EntityIdSchema.nullable().optional(),
+}).superRefine((input, context) => {
+  if (input.target === "database" && !input.database_id) {
+    context.addIssue({ code: "custom", path: ["database_id"], message: "database_id is required for database targets" });
+  }
+});
+
+export type ClipperInput = z.infer<typeof ClipperInputSchema>;

@@ -1,19 +1,25 @@
 import type {
   CreateFolderInput,
+  DeleteReminderInput,
   CreateReminderInput,
   CreateTagInput,
+  CalendarFeed,
+  CalendarFeedQuery,
   Folder,
   GraphResponse,
   NoteLink,
   Reminder,
+  ReminderListQuery,
   SavedSearch,
   SavedSearchInput,
   SearchHit,
   SearchRequest,
   SetNoteLinksInput,
   SetNoteTagsInput,
+  SnoozeReminderInput,
   Tag,
   UpdateReminderInput,
+  WorkspaceContext,
 } from "@nexus/contracts";
 
 export interface KnowledgeActorContext {
@@ -37,6 +43,7 @@ export interface KnowledgeRepository {
   listFolders(workspaceId: string): Promise<Folder[]>;
   createFolder(workspaceId: string, input: CreateFolderInput, now: string): Promise<Folder | null>;
   listTags(workspaceId: string): Promise<Tag[]>;
+  listNoteTags(workspaceId: string, noteId: string): Promise<Tag[]>;
   createTag(workspaceId: string, input: CreateTagInput, now: string): Promise<Tag>;
   setNoteTags(workspaceId: string, noteId: string, tagIds: string[], now: string): Promise<void>;
   setNoteLinks(workspaceId: string, noteId: string, targetNoteIds: string[], now: string): Promise<void>;
@@ -44,6 +51,12 @@ export interface KnowledgeRepository {
   listBacklinks(workspaceId: string, noteId: string): Promise<NoteLink[]>;
   getGraph(workspaceId: string, currentNoteId?: string): Promise<GraphResponse>;
   listReminders(workspaceId: string, userId: string, includeCompleted: boolean): Promise<Reminder[]>;
+  listReminderPage(
+    workspaceId: string,
+    userId: string,
+    query: ReminderListQuery,
+    now: string,
+  ): Promise<{ items: Reminder[]; nextCursor: string | null }>;
   createReminder(input: {
     workspaceId: string;
     userId: string;
@@ -58,6 +71,23 @@ export interface KnowledgeRepository {
     patch: Omit<UpdateReminderInput, "base_revision">;
     now: string;
   }): Promise<{ reminder: Reminder | null; current: Reminder | null }>;
+  snoozeReminder(input: {
+    workspaceId: string;
+    userId: string;
+    reminderId: string;
+    baseRevision: number;
+    minutes: number;
+    now: string;
+  }): Promise<{ reminder: Reminder | null; current: Reminder | null }>;
+  deleteReminder(input: {
+    workspaceId: string;
+    userId: string;
+    reminderId: string;
+    baseRevision: number;
+    now: string;
+  }): Promise<boolean>;
+  getReminder(workspaceId: string, userId: string, reminderId: string): Promise<Reminder | null>;
+  getCalendarFeed(context: WorkspaceContext, query: CalendarFeedQuery): Promise<CalendarFeed>;
 }
 
 export class KnowledgeServiceError extends Error {
@@ -122,6 +152,10 @@ export class KnowledgeService {
     return this.repository.listTags(context.workspaceId);
   }
 
+  listNoteTags(context: KnowledgeActorContext, noteId: string) {
+    return this.repository.listNoteTags(context.workspaceId, noteId);
+  }
+
   createTag(context: KnowledgeActorContext, input: CreateTagInput) {
     return this.repository.createTag(context.workspaceId, input, this.clock().toISOString());
   }
@@ -153,6 +187,20 @@ export class KnowledgeService {
 
   listReminders(context: KnowledgeActorContext, includeCompleted: boolean) {
     return this.repository.listReminders(context.workspaceId, context.userId, includeCompleted);
+  }
+
+  async listReminderPage(context: KnowledgeActorContext, query: ReminderListQuery) {
+    const result = await this.repository.listReminderPage(
+      context.workspaceId,
+      context.userId,
+      query,
+      this.clock().toISOString(),
+    );
+    return { items: result.items, next_cursor: result.nextCursor };
+  }
+
+  getCalendarFeed(context: WorkspaceContext, query: CalendarFeedQuery) {
+    return this.repository.getCalendarFeed(context, query);
   }
 
   async createReminder(context: KnowledgeActorContext, input: CreateReminderInput) {
@@ -190,5 +238,50 @@ export class KnowledgeService {
       );
     }
     return result.reminder;
+  }
+
+  async snoozeReminder(context: KnowledgeActorContext, reminderId: string, input: SnoozeReminderInput) {
+    const result = await this.repository.snoozeReminder({
+      workspaceId: context.workspaceId,
+      userId: context.userId,
+      reminderId,
+      baseRevision: input.base_revision,
+      minutes: input.minutes,
+      now: this.clock().toISOString(),
+    });
+    return this.requireReminderMutation(result, input);
+  }
+
+  async deleteReminder(context: KnowledgeActorContext, reminderId: string, input: DeleteReminderInput) {
+    const deleted = await this.repository.deleteReminder({
+      workspaceId: context.workspaceId,
+      userId: context.userId,
+      reminderId,
+      baseRevision: input.base_revision,
+      now: this.clock().toISOString(),
+    });
+    if (deleted) return;
+    const current = await this.repository.getReminder(context.workspaceId, context.userId, reminderId);
+    if (!current) throw new KnowledgeServiceError("REMINDER_NOT_FOUND", "Reminder not found", 404);
+    throw new KnowledgeServiceError(
+      "REMINDER_CONFLICT",
+      "The reminder changed before it could be deleted",
+      409,
+      { server_reminder: current, submitted: input },
+    );
+  }
+
+  private requireReminderMutation(
+    result: { reminder: Reminder | null; current: Reminder | null },
+    submitted: unknown,
+  ) {
+    if (result.reminder) return result.reminder;
+    if (!result.current) throw new KnowledgeServiceError("REMINDER_NOT_FOUND", "Reminder not found", 404);
+    throw new KnowledgeServiceError(
+      "REMINDER_CONFLICT",
+      "The reminder changed before this update could be saved",
+      409,
+      { server_reminder: result.current, submitted },
+    );
   }
 }

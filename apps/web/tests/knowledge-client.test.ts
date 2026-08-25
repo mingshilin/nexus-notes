@@ -65,6 +65,7 @@ describe("KnowledgeClient", () => {
     await client.listTags();
     await client.createTag({ name: "research", color: "" });
     await client.setNoteTags("note-1", { tag_ids: ["tag-1"] });
+    await client.listNoteTags("note-1");
     await client.setNoteLinks("note-1", { target_note_ids: ["note-2"] });
     await client.listNoteLinks("note-1");
     await client.listBacklinks("note-1");
@@ -77,13 +78,58 @@ describe("KnowledgeClient", () => {
     expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET"])).toEqual([
       ["/api/v2/folders", "GET"], ["/api/v2/folders", "POST"],
       ["/api/v2/tags", "GET"], ["/api/v2/tags", "POST"],
-      ["/api/v2/notes/note-1/tags", "PUT"], ["/api/v2/notes/note-1/links", "PUT"],
+      ["/api/v2/notes/note-1/tags", "PUT"], ["/api/v2/notes/note-1/tags", "GET"],
+      ["/api/v2/notes/note-1/links", "PUT"],
       ["/api/v2/notes/note-1/links", "GET"], ["/api/v2/notes/note-1/backlinks", "GET"],
       ["/api/v2/graph", "GET"], ["/api/v2/graph/local/note-1", "GET"],
       ["/api/v2/reminders?include_completed=true", "GET"], ["/api/v2/reminders", "POST"],
       ["/api/v2/reminders/reminder-1", "PATCH"],
     ]);
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
+  });
+
+  it("caches reminder pages for one minute and invalidates them after snooze or delete", async () => {
+    const data = await loadData();
+    let now = 1_000;
+    const api = { request: vi.fn(async ({ method }: { method?: string }) => method === "DELETE"
+      ? { deleted: true }
+      : method === "POST" ? { reminder: { id: "reminder-1" } }
+        : { items: [], next_cursor: null }) };
+    const client = new data.KnowledgeClient(api, "ws-1", { createId: () => "operation-1", now: () => now });
+
+    await client.listReminderPage({ status: "all", query: "review", limit: 25 });
+    await client.listReminderPage({ status: "all", query: "review", limit: 25 });
+    expect(api.request).toHaveBeenCalledTimes(1);
+
+    now += 60_001;
+    await client.listReminderPage({ status: "all", query: "review", limit: 25 });
+    await client.snoozeReminder("reminder-1", { base_revision: 1, minutes: 10 });
+    await client.listReminderPage({ status: "all", query: "review", limit: 25 });
+    await client.deleteReminder("reminder-1", { base_revision: 2 });
+
+    expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET"])).toEqual([
+      ["/api/v2/reminders?status=all&query=review&limit=25", "GET"],
+      ["/api/v2/reminders?status=all&query=review&limit=25", "GET"],
+      ["/api/v2/reminders/reminder-1/snooze", "POST"],
+      ["/api/v2/reminders?status=all&query=review&limit=25", "GET"],
+      ["/api/v2/reminders/reminder-1", "DELETE"],
+    ]);
+  });
+
+  it("loads a bounded workspace calendar feed with a cancellable query", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ items: [] })) };
+    const client = new data.KnowledgeClient(api, "ws-1");
+    const controller = new AbortController();
+
+    await client.getCalendarFeed({ from: "2026-08-01", to: "2026-08-31" }, controller.signal);
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/calendar/feed?from=2026-08-01&to=2026-08-31",
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: expect.objectContaining({ retry: 2, signal: controller.signal }),
+    }));
   });
 
   it("maps workspace-scoped attachment filters, retry actions, and diagnostics recovery queries", async () => {
@@ -93,7 +139,9 @@ describe("KnowledgeClient", () => {
 
     const controller = new AbortController();
     await client.listAttachments({ mime_type: "application/pdf", ocr_status: "failed", limit: 25 }, controller.signal);
-    await client.createAttachmentUpload({ filename: "scan.pdf", mime_type: "application/pdf", size_bytes: 5 });
+    await client.createAttachmentUpload({ filename: "scan.pdf", mime_type: "application/pdf", size_bytes: 5, note_id: "note-1" });
+    await client.uploadAttachmentContent("attachment-1", new Uint8Array([1, 2, 3]).buffer, controller.signal);
+    await client.completeAttachmentUpload("attachment-1");
     await client.retryAttachmentOcr("attachment-1");
     await client.retryAttachmentOcrBatch(["attachment-1", "attachment-2"]);
     await client.getKnowledgeDiagnostics({ limit: 25 });
@@ -102,6 +150,8 @@ describe("KnowledgeClient", () => {
     expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET"])).toEqual([
       ["/api/v2/attachments?mime_type=application%2Fpdf&ocr_status=failed&limit=25", "GET"],
       ["/api/v2/attachments/uploads", "POST"],
+      ["/api/v2/attachments/attachment-1/content", "PUT"],
+      ["/api/v2/attachments/attachment-1/complete", "POST"],
       ["/api/v2/attachments/attachment-1/ocr/retry", "POST"],
       ["/api/v2/attachments/ocr/retry", "POST"],
       ["/api/v2/knowledge/diagnostics?limit=25", "GET"],
@@ -109,7 +159,9 @@ describe("KnowledgeClient", () => {
     ]);
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
     expect(api.request.mock.calls[0]?.[0].policy.signal).toBe(controller.signal);
-    expect(api.request.mock.calls[2]?.[0].body).toEqual({ attachment_ids: ["attachment-1"] });
-    expect(api.request.mock.calls[3]?.[0].body).toEqual({ attachment_ids: ["attachment-1", "attachment-2"] });
+    expect(api.request.mock.calls[2]?.[0].bodyMode).toBe("raw");
+    expect(api.request.mock.calls[2]?.[0].policy.signal).toBe(controller.signal);
+    expect(api.request.mock.calls[4]?.[0].body).toEqual({ attachment_ids: ["attachment-1"] });
+    expect(api.request.mock.calls[5]?.[0].body).toEqual({ attachment_ids: ["attachment-1", "attachment-2"] });
   });
 });

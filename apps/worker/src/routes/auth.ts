@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AuthSession } from "@nexus/contracts";
+import { CreateWorkspaceInputSchema, type AuthSession } from "@nexus/contracts";
 import type { RouteDefinition } from "../http/route-registry";
 
 const registerSchema = z.object({
@@ -48,6 +48,7 @@ interface AuthRouteService {
     password: string;
     turnstileToken?: string;
     ip: string;
+    userAgent: string;
   }): Promise<{ sessionToken: string; user: unknown }>;
   verifyEmail(input: { email: string; code: string }): Promise<void>;
   resendVerification(input: { email: string; turnstileToken: string; ip: string }): Promise<{ accepted: boolean }>;
@@ -58,6 +59,7 @@ interface AuthRouteService {
   }): Promise<{ accepted: boolean }>;
   resetPassword(input: { token: string; password: string }): Promise<void>;
   getSession(userId: string): Promise<AuthSession>;
+  createWorkspace?(input: { userId: string; name: string }): Promise<unknown>;
   logout(sessionId: string): Promise<void>;
 }
 
@@ -75,7 +77,7 @@ function sessionCookie(token: string) {
   return `nexus_session=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${30 * 24 * 60 * 60}`;
 }
 
-const expiredSessionCookie = "nexus_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0";
+export const expiredSessionCookie = "nexus_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0";
 
 export function registerAuthRoutes<TEnv>(
   registry: AuthRegistry<TEnv>,
@@ -111,6 +113,7 @@ export function registerAuthRoutes<TEnv>(
         password: body.password,
         turnstileToken: body.turnstile_token,
         ip: clientIp(request),
+        userAgent: request.headers.get("user-agent") ?? "",
       });
       return {
         data: { user: result.user },
@@ -170,6 +173,22 @@ export function registerAuthRoutes<TEnv>(
     handler: async ({ env, body }) => {
       await createService(env).resetPassword({ token: body.token, password: body.password });
       return { data: { reset: true } };
+    },
+  });
+
+  registry.register({
+    method: "POST",
+    path: "/api/v2/workspaces",
+    auth: "session",
+    body: CreateWorkspaceInputSchema,
+    rateLimit: { bucket: "ip", limit: 10, windowSeconds: 60 * 60 },
+    handler: async ({ env, principal, body }) => {
+      const service = createService(env);
+      if (!service.createWorkspace) throw new Error("Workspace creation is unavailable");
+      return {
+        status: 201,
+        data: await service.createWorkspace({ userId: principal!.userId, name: body.name }),
+      };
     },
   });
 

@@ -1,4 +1,5 @@
 import {
+  CancelJobInputSchema,
   CreateJobInputSchema,
   FeedbackInputSchema,
   type Feedback,
@@ -12,9 +13,28 @@ interface OperationsRegistry<TEnv> {
   register<TBody, TData>(definition: RouteDefinition<TEnv, TBody, TData>): void;
 }
 
+export class OperationsRouteError extends Error {
+  readonly retryable = false;
+
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "OperationsRouteError";
+  }
+}
+
 export interface OperationsRouteService {
   createJob(context: { workspaceId: string; userId: string }, input: unknown, now: string): Promise<Job>;
   getJob(workspaceId: string, jobId: string): Promise<Job | null>;
+  cancelJob(context: { workspaceId: string }, jobId: string, input: unknown, now: string): Promise<Job | null>;
+  downloadJob?(workspaceId: string, jobId: string): Promise<{
+    body: BodyInit;
+    filename: string;
+    mime_type: string;
+  } | null>;
   listJobs(workspaceId: string, limit?: number): Promise<Job[]>;
   createFeedback(context: { workspaceId: string; userId: string }, input: unknown, requestId: string, now: string): Promise<Feedback>;
   listFeedback(workspaceId: string, limit?: number): Promise<Feedback[]>;
@@ -45,6 +65,29 @@ export function registerOperationsRoutes<TEnv>(
     handler: async ({ env, workspace, params }) => ({
       data: { job: await createService(env).getJob(workspace!.workspaceId, params.jobId!) },
     }),
+  });
+  registry.register({
+    method: "DELETE", path: "/api/v2/operations/jobs/:jobId", auth: "workspace", minimumRole: "editor",
+    body: CancelJobInputSchema,
+    handler: async ({ env, workspace, params, body }) => {
+      const job = await createService(env).cancelJob(workspace!, params.jobId!, body, clock());
+      if (!job) throw new OperationsRouteError("OPERATION_NOT_CANCELLABLE", "Operation is no longer queued or its revision is stale", 409);
+      return { data: { job } };
+    },
+  });
+  registry.register({
+    method: "GET", path: "/api/v2/operations/jobs/:jobId/file", auth: "workspace",
+    handler: async ({ env, workspace, params }) => {
+      const file = await createService(env).downloadJob?.(workspace!.workspaceId, params.jobId!);
+      if (!file) throw new OperationsRouteError("OPERATION_FILE_NOT_FOUND", "Operation file is not available", 404);
+      return new Response(file.body, {
+        headers: {
+          "cache-control": "private, no-store",
+          "content-disposition": `attachment; filename="${file.filename.replace(/[\\"\r\n]/gu, "_")}"`,
+          "content-type": file.mime_type,
+        },
+      });
+    },
   });
   registry.register({
     method: "GET", path: "/api/v2/operations/jobs", auth: "workspace",

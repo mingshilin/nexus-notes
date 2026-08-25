@@ -1,65 +1,89 @@
 # Nexus Notes
 
-Nexus Notes is a modern full-stack notes app built with React, TypeScript, Vite, and Cloudflare Workers. It includes notes, folders, tags, daily notes, workspace collaboration, public sharing, reminders, attachments, OCR, backlinks, and database-style views.
+Nexus Notes is an open-source, full-stack knowledge workspace for notes, daily logs, folders, tags, backlinks, reminders, attachments, OCR, collaboration, public sharing, and structured databases.
+
+The repository contains the current Beta implementation and the earlier compatible application surface. The Beta implementation is the isolated workspace under `apps/` and `packages/`; the legacy root remains available for compatibility and migration reference.
 
 ## Stack
 
-- Frontend: React, TypeScript, Vite, Tailwind CSS
-- Backend: Cloudflare Workers
-- Storage: Cloudflare D1 and R2
-- Tests: Vitest and Testing Library
+- Web: React 19, TypeScript, Vite, Zustand, Tailwind-compatible CSS
+- Worker: Cloudflare Workers, typed route registry, D1, R2, Queues, Durable Objects
+- Contracts and domain: Zod schemas and pure TypeScript validation rules
+- Tests: Vitest, Testing Library, real Chrome/CDP smoke, accessibility and load gates
 
-## Project Structure
+## Repository Layout
 
-- `src/`: React frontend, state hooks, API client, and UI components
-- `worker/`: Cloudflare Worker API routes, DB access, and backend utilities
-- `migrations/`: D1 database migrations
-- `tests/`: frontend and Worker test suites
-- `scripts/`: deployment readiness and browser smoke helpers
-- `docs/`: deployment and release notes
-- `public/`: static assets and service worker
+- `apps/web/`: Beta web application and service worker
+- `apps/worker/`: Beta Worker routes, repositories, queues and migrations
+- `packages/contracts/`: API contracts and sync schemas
+- `packages/domain/`: tenant, permission, recurrence and typed-value rules
+- `packages/ui/`: shared visual primitives and tokens
+- `packages/testkit/`: test helpers
+- `tests/`: legacy compatibility tests
+- `scripts/`: build, deployment readiness, load and browser smoke tools
+- `docs/`: architecture, security, deployment and acceptance handoff
+- `src/`, `worker/`, `migrations/`: legacy-compatible application surface
 
 ## Local Development
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
-For Worker development:
+To typecheck and test the Beta workspaces:
 
 ```bash
-npm run worker:dev
+npm run beta:lint
+npm run beta:test
+npm run beta:build
 ```
 
-## Environment
+Worker development requires a local Wrangler configuration and local D1/R2 state. Never copy Preview or production secrets into the repository.
 
-Create a local env file from the example:
+## Configuration
 
-```bash
-cp .env.example .env.local
-```
+Copy `.env.example` to a local, ignored env file when the web app needs a Turnstile site key. Configure Worker secrets with Wrangler or the Cloudflare dashboard:
 
-Set `VITE_TURNSTILE_SITE_KEY` when Turnstile is enabled. Worker secrets and Cloudflare bindings should be configured through Wrangler or the Cloudflare dashboard, not committed to Git.
+- `TURNSTILE_SECRET_KEY`
+- `RESEND_API_KEY`
+- `RATE_LIMIT_SECRET`
+- `USER_SECRETS_ENCRYPTION_KEY`
+- `WEB_PUSH_VAPID_PUBLIC_KEY`
+- `WEB_PUSH_VAPID_PRIVATE_KEY`
+- `WEB_PUSH_SUBJECT`
+
+AI provider keys must remain Worker Secrets or user-encrypted configuration. They must never be placed in `wrangler.toml`, `.env.example`, IndexedDB, logs, or the frontend bundle.
 
 ## Verification
 
+The standard local gates are:
+
 ```bash
 npm run lint
-npx vitest run --config vite.config.ts
-npx vitest run --config vitest.worker.config.ts
+npm run test:unit
+npm run test:integration
+npm run test:worker
+npm run test:fault
+npm run beta:test
 npm run build
+npm audit --omit=dev
 npm run verify:deploy
+npm run verify:preview
 ```
 
-## Deploy
+For a Preview or local browser gate, use a Chrome profile outside this repository. See [docs/preview-acceptance-handoff.md](docs/preview-acceptance-handoff.md). Do not put cookies, reset tokens, passwords, browser profiles, D1 exports, R2 manifests or provider keys in Git.
 
-Update `wrangler.toml` for your own Cloudflare account, D1 database, R2 bucket, and domain, then run:
+## Preview
 
-```bash
-npm run deploy
-```
+The production deployment is [Nexus Notes](https://notes.msl88ljctengxun.xyz/). The independent [Public Beta Preview](https://nexus-notes-public-beta-preview.shilinming9.workers.dev/) remains available for acceptance testing. See [docs/production-cutover-2026-08-26.md](docs/production-cutover-2026-08-26.md) and [docs/public-beta-cutover-runbook.md](docs/public-beta-cutover-runbook.md).
+
+## Security and Contributions
+
+- Report vulnerabilities through the process in [SECURITY.md](SECURITY.md).
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a change.
+- Review [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

@@ -9,8 +9,10 @@
     "build": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@block65/webcrypto-web-push": "1.0.2",
     "@nexus/contracts": "*",
     "@nexus/domain": "*",
+    "fflate": "^0.8.2",
     "zod": "^4.1.5"
   },
   "devDependencies": {

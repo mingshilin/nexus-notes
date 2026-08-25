@@ -29,6 +29,23 @@ afterEach(() => {
 });
 
 describe("NotesClient", () => {
+  it("opens or creates a daily note as a non-retryable idempotent command", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ note: { ...note, daily_date: "2026-08-23" } })) };
+    const client = new data.NotesClient(api, "ws-1", { createId: () => "daily-operation-1" });
+
+    await expect(client.openOrCreateDaily("2026-08-23")).resolves.toMatchObject({ daily_date: "2026-08-23" });
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/daily",
+      method: "POST",
+      body: { daily_date: "2026-08-23" },
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "command",
+      policy: expect.objectContaining({ retry: 0, idempotencyKey: "daily-operation-1" }),
+    }));
+  });
+
   it("adds workspace context and cancellable dedupe policy to list requests", async () => {
     const data = await loadData();
     expect(data.NotesClient).toBeTypeOf("function");
@@ -49,6 +66,46 @@ describe("NotesClient", () => {
     }));
   });
 
+  it("encodes inbox, daily, and trash filters in the list query", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ items: [], next_cursor: null })) };
+    const client = new data.NotesClient(api, "ws-1");
+
+    await client.list({ status: "active", folderId: null, dailyDate: "2026-08-23", limit: 20 });
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes?status=active&folder_id=none&daily_date=2026-08-23&limit=20",
+      policy: expect.objectContaining({ dedupeKey: "notes:ws-1:first:20:active:none:2026-08-23" }),
+    }));
+  });
+
+  it("encodes favorite and pinned filters without changing the default query contract", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ items: [], next_cursor: null })) };
+    const client = new data.NotesClient(api, "ws-1");
+
+    await client.list({ status: "active", favorite: true, pinned: false, limit: 20 });
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes?status=active&favorite=true&pinned=false&limit=20",
+      policy: expect.objectContaining({ dedupeKey: "notes:ws-1:first:20:active:::true:false" }),
+    }));
+  });
+
+  it("encodes a full-text query without changing workspace scoping", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ items: [], next_cursor: null })) };
+    const client = new data.NotesClient(api, "ws-1");
+
+    await client.list({ query: "计划 项目", limit: 20 });
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes?q=%E8%AE%A1%E5%88%92+%E9%A1%B9%E7%9B%AE&limit=20",
+      headers: { "x-workspace-id": "ws-1" },
+      policy: expect.objectContaining({ dedupeKey: "notes:ws-1:first:20::::计划 项目" }),
+    }));
+  });
+
   it("sends revision-aware autosaves as idempotent commands", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async () => ({ note: { ...note, revision: 2 } })) };
@@ -64,6 +121,37 @@ describe("NotesClient", () => {
       requestClass: "command",
       policy: expect.objectContaining({ retry: 0, idempotencyKey: "operation-1" }),
     }));
+  });
+
+  it("sends permanent deletion as a non-retryable DELETE command", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ deleted: true })) };
+    const client = new data.NotesClient(api, "ws-1", { createId: () => "delete-operation-1" });
+
+    await expect(client.deletePermanently("note-1", { base_revision: 2 })).resolves.toEqual({ deleted: true });
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/note-1",
+      method: "DELETE",
+      body: { base_revision: 2 },
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "command",
+      policy: expect.objectContaining({ retry: 0, idempotencyKey: "delete-operation-1" }),
+    }));
+  });
+
+  it("accepts an explicit idempotency key for retried create and update commands", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ note: { ...note, revision: 2 } })) };
+    const client = new data.NotesClient(api, "ws-1");
+
+    await client.create({ title: "Draft", content: "Body" }, { idempotencyKey: "draft-local-1" });
+    await client.update("note-1", { base_revision: 1, title: "Latest", source: "manual" }, { idempotencyKey: "draft-local-1:update:1" });
+
+    expect(api.request.mock.calls.map(([options]) => options.policy.idempotencyKey)).toEqual([
+      "draft-local-1",
+      "draft-local-1:update:1",
+    ]);
   });
 
   it("maps create, detail, capture, revision, and restore endpoints", async () => {
@@ -89,6 +177,35 @@ describe("NotesClient", () => {
       ["/api/v2/notes/note-1/revisions/1/restore", "POST"],
     ]);
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
+  });
+
+  it("sends Web Clipper captures to the dedicated endpoint with an idempotency key", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ note })) };
+    const client = new data.NotesClient(api, "ws-1", { createId: () => "clip-operation-1" });
+
+    await expect(client.clipperCapture({
+      title: "Article",
+      url: "https://example.com/article",
+      content: "Captured body",
+      target: "database",
+      database_id: "db-1",
+    })).resolves.toEqual(note);
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/clipper/capture",
+      method: "POST",
+      body: {
+        title: "Article",
+        url: "https://example.com/article",
+        content: "Captured body",
+        target: "database",
+        database_id: "db-1",
+      },
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "command",
+      policy: expect.objectContaining({ retry: 0, idempotencyKey: "clip-operation-1" }),
+    }));
   });
 });
 

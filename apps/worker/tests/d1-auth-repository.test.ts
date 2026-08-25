@@ -17,6 +17,27 @@ function statement(result: unknown = null) {
 }
 
 describe("D1AuthRepository", () => {
+  it("persists the bounded user agent only on the created session", async () => {
+    const worker = await loadWorker();
+    const prepared = statement();
+    const db = { prepare: vi.fn(() => prepared), batch: vi.fn() };
+    const Repository = worker.D1AuthRepository as new (db: unknown, id: () => string) => {
+      createSession(input: { userId: string; tokenHash: string; expiresAt: string; now: string; userAgent: string }): Promise<void>;
+    };
+    const repository = new Repository(db, () => "session-1");
+
+    await repository.createSession({
+      userId: "user-1", tokenHash: "hash:session", expiresAt: "2026-09-21T00:00:00.000Z",
+      now: "2026-08-21T00:00:00.000Z", userAgent: "Test Browser",
+    });
+
+    expect(db.prepare).toHaveBeenCalledWith(expect.stringMatching(/INSERT INTO sessions \(id, user_id, token_hash, expires_at, last_seen_at, created_at, user_agent\)/i));
+    expect(prepared.bind).toHaveBeenCalledWith(
+      "session-1", "user-1", "hash:session", "2026-09-21T00:00:00.000Z",
+      "2026-08-21T00:00:00.000Z", "2026-08-21T00:00:00.000Z", "Test Browser",
+    );
+  });
+
   it("atomically consumes a valid unused reset token", async () => {
     const worker = await loadWorker();
     expect(worker.D1AuthRepository).toBeTypeOf("function");

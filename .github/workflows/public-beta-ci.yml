@@ -26,6 +26,8 @@ jobs:
       - run: npm run beta:lint
       - run: npm run beta:test
       - run: npm run beta:build
+      - run: npm run test:fault
       - run: npm run test:perf
       - run: npm run verify:deploy
+      - run: npm run verify:preview
       - run: npm audit --omit=dev

@@ -61,6 +61,48 @@ function splitJsonBatches<T>(items: readonly T[]) {
 }
 
 export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
+  async previewCsv(context: WorkspaceContext, databaseId: string, input: CsvImportInput) {
+    const fields = await this.access.fields(context, databaseId, "write");
+    let parsed: ReturnType<typeof parseDatabaseCsv>;
+    try {
+      parsed = parseDatabaseCsv(input.csv, { maxBytes: 2 * 1024 * 1024, maxRows: 500 });
+    } catch (error) {
+      if (error instanceof DatabaseCsvError) throw new DatabaseRepositoryError(error.code, error.message, 400);
+      throw error;
+    }
+    const mapped = parsed.headers.map((header) => {
+      const propertyId = input.header_property_ids[header];
+      if (!propertyId) throw new DatabaseRepositoryError("CSV_UNKNOWN_PROPERTY", `CSV header ${header} is not mapped`, 400);
+      const property = this.access.findProperty(fields.properties, propertyId);
+      if (!fields.writable.has(property.id)) throw new DatabaseRepositoryError("FIELD_WRITE_DENIED", "CSV field write denied", 403, { property_id: property.id });
+      return property;
+    });
+    if (new Set(mapped.map((property) => property.id)).size !== mapped.length) {
+      throw new DatabaseRepositoryError("CSV_DUPLICATE_PROPERTY", "CSV headers map to duplicate properties", 400);
+    }
+    const rows: Array<{ row_number: number; values: Record<string, unknown> }> = [];
+    const errors: Array<{ row_number: number; code: string; message: string }> = [];
+    parsed.rows.slice(0, 100).forEach((row, index) => {
+      try {
+        rows.push({
+          row_number: index + 2,
+          values: this.normalize(
+            fields.properties,
+            Object.fromEntries(mapped.map((property, column) => [property.id, coerceCsvValue(property, row[column] ?? "")])),
+            fields.writable,
+          ),
+        });
+      } catch (error) {
+        errors.push({
+          row_number: index + 2,
+          code: error instanceof DatabaseRepositoryError ? error.code : "CSV_INVALID_VALUE",
+          message: error instanceof Error ? error.message : "CSV row is invalid",
+        });
+      }
+    });
+    return { headers: parsed.headers, rows, errors, total_rows: parsed.rows.length };
+  }
+
   async importCsv(context: WorkspaceContext, databaseId: string, input: CsvImportInput) {
     const fields = await this.access.fields(context, databaseId, "write");
     let parsed: ReturnType<typeof parseDatabaseCsv>;

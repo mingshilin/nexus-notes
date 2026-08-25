@@ -6,6 +6,34 @@ async function loadData() {
 }
 
 describe("DatabaseClient", () => {
+  it("caches a database bootstrap for two minutes and invalidates it after a mutation", async () => {
+    const data = await loadData();
+    let now = 1_000;
+    const bootstrap = {
+      items: [{ id: "db-1", name: "Projects" }],
+      selected_database_id: "db-1",
+      bundle: { database: { id: "db-1" }, role: "editor", properties: [], views: [], templates: [] },
+      records: { items: [], next_cursor: null },
+    };
+    const api = { request: vi.fn(async ({ path }: { path: string }) => path.includes("/bootstrap")
+      ? bootstrap
+      : { database: { id: "db-2", name: "Created" } }) };
+    const client = new data.DatabaseClient(api, "ws-1", { now: () => now, createId: () => "create" });
+
+    await expect(client.bootstrap({ databaseId: "db-1", limit: 25 })).resolves.toBe(bootstrap);
+    await expect(client.bootstrap({ databaseId: "db-1", limit: 25 })).resolves.toBe(bootstrap);
+    expect(api.request).toHaveBeenCalledTimes(1);
+
+    now += 120_001;
+    await client.bootstrap({ databaseId: "db-1", limit: 25 });
+    expect(api.request).toHaveBeenCalledTimes(2);
+
+    await client.createDatabase({ name: "Created", description: "" });
+    await client.bootstrap({ databaseId: "db-1", limit: 25 });
+    expect(api.request).toHaveBeenCalledTimes(4);
+    expect(api.request.mock.calls[0]![0].path).toBe("/api/v2/databases/bootstrap?database_id=db-1&limit=25");
+  });
+
   it("uses workspace-bound deduplicated queries for bundles, pages, and search", async () => {
     const data = await loadData();
     expect(data.DatabaseClient).toBeTypeOf("function");
@@ -57,6 +85,24 @@ describe("DatabaseClient", () => {
     ]);
     expect(api.request.mock.calls.every(([options]) => options.requestClass === "command" && options.policy.retry === 0)).toBe(true);
     expect(new Set(api.request.mock.calls.map(([options]) => options.policy.idempotencyKey)).size).toBe(9);
+  });
+
+  it("loads management stats and previews CSV without treating preview as a mutation", async () => {
+    const data = await loadData();
+    const stats = { record_count: 12, property_count: 3, view_count: 2, template_count: 1, comment_count: 4, updated_at: "2026-08-25T00:00:00.000Z", role: "owner", database_permission_count: 1, field_permission_count: 2 };
+    const preview = { headers: ["Name"], rows: [{ row_number: 2, values: { name: "Alpha" } }], errors: [], total_rows: 1 };
+    const api = { request: vi.fn(async ({ path }: { path: string }) => path.endsWith("/stats") ? stats : preview) };
+    const client = new data.DatabaseClient(api, "ws-1");
+
+    await expect(client.getStats("db-1")).resolves.toEqual(stats);
+    await expect(client.previewCsv("db-1", { csv: "Name\r\nAlpha", header_property_ids: { Name: "name" } })).resolves.toEqual(preview);
+
+    expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET", options.requestClass])).toEqual([
+      ["/api/v2/databases/db-1/stats", "GET", "query"],
+      ["/api/v2/databases/db-1/import/csv/preview", "POST", "query"],
+    ]);
+    expect(api.request.mock.calls[1]![0].policy).toMatchObject({ retry: 0 });
+    expect(api.request.mock.calls[1]![0].policy.idempotencyKey).toBeUndefined();
   });
 
   it("lists and deletes permission rows through v2 envelopes", async () => {

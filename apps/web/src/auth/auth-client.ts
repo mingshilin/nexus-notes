@@ -1,5 +1,12 @@
 import type { ApiClient } from "../data/api-client";
-import { AuthSessionSchema, type AuthSession } from "@nexus/contracts";
+import {
+  AuthSessionSchema,
+  CreateWorkspaceInputSchema,
+  WorkspaceMembershipSummarySchema,
+  type AuthSession,
+  type CreateWorkspaceInput,
+  type WorkspaceMembershipSummary,
+} from "@nexus/contracts";
 
 export interface AuthUser {
   id: string;
@@ -15,7 +22,17 @@ export class AuthClient {
       path: "/api/v2/auth/session",
       requestClass: "query",
       policy: { timeoutMs: 8_000, retry: 1, dedupeKey: "auth:session" },
-    }).then((session) => AuthSessionSchema.parse(session));
+      }).then((session) => AuthSessionSchema.parse(session));
+  }
+
+  createWorkspace(input: CreateWorkspaceInput, signal?: AbortSignal): Promise<WorkspaceMembershipSummary> {
+    return this.client.request<unknown>({
+      path: "/api/v2/workspaces",
+      method: "POST",
+      body: CreateWorkspaceInputSchema.parse(input),
+      requestClass: "command",
+      policy: { timeoutMs: 10_000, retry: 0, idempotencyKey: crypto.randomUUID(), signal },
+    }).then((workspace) => WorkspaceMembershipSummarySchema.parse(workspace));
   }
 
   login(input: { email: string; password: string; turnstileToken?: string }) {

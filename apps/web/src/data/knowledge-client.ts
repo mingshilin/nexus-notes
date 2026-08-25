@@ -6,17 +6,22 @@ import type {
   Folder,
   Attachment,
   AttachmentListRequest,
+  CalendarFeed,
+  CalendarFeedQuery,
   KnowledgeDiagnostic,
   KnowledgeDiagnosticsRequest,
+  DeleteReminderInput,
   GraphResponse,
   NoteLink,
   Reminder,
+  ReminderListQuery,
   SavedSearch,
   SavedSearchInput,
   SearchHit,
   SearchRequest,
   SetNoteLinksInput,
   SetNoteTagsInput,
+  SnoozeReminderInput,
   Tag,
   UpdateReminderInput,
 } from "@nexus/contracts";
@@ -25,13 +30,16 @@ import type { ApiClient } from "./api-client";
 
 export class KnowledgeClient {
   private readonly createId: () => string;
+  private readonly now: () => number;
+  private readonly reminderCache = new Map<string, { value: unknown; expiresAt: number }>();
 
   constructor(
     private readonly client: Pick<ApiClient, "request">,
     private readonly workspaceId: string,
-    options: { createId?: () => string } = {},
+    options: { createId?: () => string; now?: () => number } = {},
   ) {
     this.createId = options.createId ?? (() => crypto.randomUUID());
+    this.now = options.now ?? (() => Date.now());
   }
 
   search(input: SearchRequest & { signal?: AbortSignal }) {
@@ -110,6 +118,14 @@ export class KnowledgeClient {
     );
   }
 
+  listNoteTags(noteId: string, signal?: AbortSignal) {
+    return this.listQuery<Tag>(
+      `/api/v2/notes/${encodeURIComponent(noteId)}/tags`,
+      `note-tags:${noteId}`,
+      signal,
+    );
+  }
+
   setNoteLinks(noteId: string, input: SetNoteLinksInput) {
     return this.command<{ updated: true }>(
       `/api/v2/notes/${encodeURIComponent(noteId)}/links`,
@@ -143,7 +159,29 @@ export class KnowledgeClient {
 
   listReminders(includeCompleted = false, signal?: AbortSignal) {
     const path = `/api/v2/reminders?include_completed=${includeCompleted}`;
-    return this.listQuery<Reminder>(path, `reminders:${includeCompleted}`, signal);
+    return this.cachedReminder(`legacy:${includeCompleted}`, () => this.listQuery<Reminder>(path, `reminders:${includeCompleted}`, signal));
+  }
+
+  listReminderPage(input: ReminderListQuery, signal?: AbortSignal) {
+    const params = new URLSearchParams({ status: input.status });
+    if (input.query) params.set("query", input.query);
+    if (input.cursor) params.set("cursor", input.cursor);
+    params.set("limit", String(input.limit));
+    const key = params.toString();
+    return this.cachedReminder(key, () => this.query<{ items: Reminder[]; next_cursor: string | null }>(
+      `/api/v2/reminders?${key}`,
+      `reminder-page:${key}`,
+      signal,
+    ));
+  }
+
+  getCalendarFeed(input: CalendarFeedQuery, signal?: AbortSignal) {
+    const params = new URLSearchParams({ from: input.from, to: input.to });
+    return this.query<CalendarFeed>(
+      `/api/v2/calendar/feed?${params.toString()}`,
+      `calendar-feed:${params.toString()}`,
+      signal,
+    );
   }
 
   createReminder(input: CreateReminderInput) {
@@ -157,6 +195,22 @@ export class KnowledgeClient {
       "PATCH",
       input,
     ).then(({ reminder }) => reminder);
+  }
+
+  snoozeReminder(reminderId: string, input: SnoozeReminderInput) {
+    return this.command<{ reminder: Reminder }>(
+      `/api/v2/reminders/${encodeURIComponent(reminderId)}/snooze`,
+      "POST",
+      input,
+    ).then(({ reminder }) => reminder);
+  }
+
+  deleteReminder(reminderId: string, input: DeleteReminderInput) {
+    return this.command<{ deleted: true }>(
+      `/api/v2/reminders/${encodeURIComponent(reminderId)}`,
+      "DELETE",
+      input,
+    );
   }
 
   listAttachments(input: AttachmentListRequest, signal?: AbortSignal) {
@@ -179,6 +233,26 @@ export class KnowledgeClient {
       ...input,
       idempotency_key: this.createId(),
     }).then(({ attachment }) => attachment);
+  }
+
+  uploadAttachmentContent(attachmentId: string, body: ArrayBuffer | ArrayBufferView, signal?: AbortSignal) {
+    return this.client.request<{ attachment: Attachment }>({
+      path: `/api/v2/attachments/${encodeURIComponent(attachmentId)}/content`,
+      method: "PUT",
+      headers: { ...this.headers(), "content-type": "application/octet-stream" },
+      body,
+      bodyMode: "raw",
+      requestClass: "command",
+      policy: { timeoutMs: 30_000, retry: 0, idempotencyKey: this.createId(), signal },
+    }).then(({ attachment }) => attachment);
+  }
+
+  completeAttachmentUpload(attachmentId: string) {
+    return this.command<{ attachment: Attachment }>(
+      `/api/v2/attachments/${encodeURIComponent(attachmentId)}/complete`,
+      "POST",
+      { upload_id: attachmentId },
+    ).then(({ attachment }) => attachment);
   }
 
   retryAttachmentOcr(attachmentId: string, signal?: AbortSignal) {
@@ -237,7 +311,7 @@ export class KnowledgeClient {
     });
   }
 
-  private command<T>(path: string, method: "POST" | "PUT" | "PATCH", body: unknown, signal?: AbortSignal) {
+  private command<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DELETE", body: unknown, signal?: AbortSignal) {
     return this.client.request<T>({
       path,
       method,
@@ -245,6 +319,18 @@ export class KnowledgeClient {
       body,
       requestClass: "command",
       policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId(), signal },
+    }).then((value) => {
+      this.reminderCache.clear();
+      return value;
+    });
+  }
+
+  private cachedReminder<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const current = this.reminderCache.get(key) as { value: T; expiresAt: number } | undefined;
+    if (current && current.expiresAt > this.now()) return Promise.resolve(current.value);
+    return load().then((value) => {
+      this.reminderCache.set(key, { value, expiresAt: this.now() + 60_000 });
+      return value;
     });
   }
 

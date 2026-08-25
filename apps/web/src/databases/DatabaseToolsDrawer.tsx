@@ -1,24 +1,29 @@
-import type { Database, DatabaseComment, DatabasePermission, DatabaseProperty, DatabaseRecord, DatabaseTemplate, DatabaseView, FieldPermission } from "@nexus/contracts";
+import type { CsvPreview, Database, DatabaseComment, DatabasePermission, DatabaseProperty, DatabaseRecord, DatabaseStats, DatabaseTemplate, DatabaseView, FieldPermission } from "@nexus/contracts";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { DatabaseClient } from "../data/database-client";
-import { DatabaseBulkForm, DatabaseCsvForm } from "./DatabaseBulkCsvForms";
+import type { CollaborationClient, CollaborationMember } from "../data/collaboration-client";
+import { DatabaseBulkForm } from "./DatabaseBulkCsvForms";
 import { DatabaseCommentForm, DatabasePermissionForm } from "./DatabaseCollaborationForms";
 import { propertyConfig, type PropertyType, downloadCsvBlob, normalizeFieldValue } from "./database-form-utils";
+import { DatabaseCsvManager, DatabaseOverviewPanel, DatabasePermissionMatrix, parseCsvHeaders } from "./DatabaseManagementPanels";
 import { DatabasePropertyEditor } from "./DatabasePropertyEditor";
 import { DatabaseRecordForm } from "./DatabaseRecordForm";
 import { DatabaseTemplateForm, DatabaseViewForm } from "./DatabaseViewTemplateForms";
 
-type Panel = "database" | "record" | "property" | "view" | "template" | "comment" | "bulk" | "permission" | "csv";
-const panels: readonly [Panel, string][] = [["database", "数据库"], ["record", "记录"], ["property", "属性"], ["view", "视图"], ["template", "模板"], ["comment", "评论"], ["bulk", "批量"], ["permission", "权限"], ["csv", "CSV"]];
+type Panel = "overview" | "database" | "record" | "property" | "view" | "template" | "comment" | "bulk" | "permission" | "csv";
+const panels: readonly [Panel, string][] = [["overview", "概览"], ["database", "设置"], ["record", "记录"], ["property", "属性"], ["view", "视图"], ["template", "模板"], ["comment", "评论"], ["bulk", "批量"], ["permission", "权限"], ["csv", "导入导出"]];
 
-export function DatabaseToolsDrawer({ open, views, activeViewId, database, databases = [database], databaseId, properties, records, templates = [], client, onOpenChange, onViewChange, onMutation, onBulkPreview }: {
-  open: boolean; views: readonly DatabaseView[]; activeViewId: string; database: Database; databases?: readonly Database[]; databaseId: string; properties: readonly DatabaseProperty[]; records: readonly DatabaseRecord[]; templates?: readonly DatabaseTemplate[]; client?: DatabaseClient; onOpenChange(open: boolean): void; onViewChange(viewId: string): void; onMutation?(): void; onBulkPreview?(mutations: { record_id: string; base_revision: number; values: Record<string, unknown> }[]): Promise<void>;
+export function DatabaseToolsDrawer({ open, views, activeViewId, database, databases = [database], databaseId, properties, records, templates = [], client, collaborationClient, onOpenChange, onViewChange, onMutation, onBulkPreview }: {
+  open: boolean; views: readonly DatabaseView[]; activeViewId: string; database: Database; databases?: readonly Database[]; databaseId: string; properties: readonly DatabaseProperty[]; records: readonly DatabaseRecord[]; templates?: readonly DatabaseTemplate[]; client?: DatabaseClient; collaborationClient?: CollaborationClient; onOpenChange(open: boolean): void; onViewChange(viewId: string): void; onMutation?(): void; onBulkPreview?(mutations: { record_id: string; base_revision: number; values: Record<string, unknown> }[]): Promise<void>;
 }) {
-  const [panel, setPanel] = useState<Panel>("record");
+  const [panel, setPanel] = useState<Panel>("overview");
   const [feedback, setFeedback] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [stats, setStats] = useState<DatabaseStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState<string | null>(null);
   const [recordValues, setRecordValues] = useState<Record<string, unknown>>({});
   const [propertyName, setPropertyName] = useState("");
   const [propertyType, setPropertyType] = useState<PropertyType>("text");
@@ -40,10 +45,14 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
   const [role, setRole] = useState<"owner" | "editor" | "viewer">("viewer");
   const [databasePermissions, setDatabasePermissions] = useState<DatabasePermission[]>([]);
   const [fieldPermissions, setFieldPermissions] = useState<FieldPermission[]>([]);
+  const [members, setMembers] = useState<CollaborationMember[]>([]);
   const [permissionPropertyId, setPermissionPropertyId] = useState(properties[0]?.id ?? "");
   const [csv, setCsv] = useState("");
+  const [csvMappings, setCsvMappings] = useState<Record<string, string>>({});
+  const [csvPreview, setCsvPreview] = useState<CsvPreview | null>(null);
   const [databaseName, setDatabaseName] = useState(database.name);
   const [databaseDescription, setDatabaseDescription] = useState(database.description);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const [selectedPropertyId, setSelectedPropertyId] = useState("");
   const [selectedRecordId, setSelectedRecordId] = useState("");
   const [selectedViewId, setSelectedViewId] = useState("");
@@ -66,15 +75,55 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     updateInset(); viewport?.addEventListener("resize", updateInset); viewport?.addEventListener("scroll", updateInset); closeRef.current?.focus();
     return () => { viewport?.removeEventListener("resize", updateInset); viewport?.removeEventListener("scroll", updateInset); };
   }, [open]);
+  useEffect(() => {
+    if (!open || !client) return;
+    let active = true;
+    setStatsLoading(true);
+    setStatsError(null);
+    void client.getStats(databaseId).then((value) => {
+      if (active) setStats(value);
+    }).catch(() => {
+      if (active) setStatsError("数据库概览暂时无法加载，请稍后重试。");
+    }).finally(() => {
+      if (active) setStatsLoading(false);
+    });
+    return () => { active = false; };
+  }, [client, databaseId, open]);
   useEffect(() => { if (panel === "comment" && client && commentRecordId) void client.listComments(databaseId, commentRecordId).then(setComments).catch(() => setComments([])); }, [client, commentRecordId, databaseId, panel]);
   useEffect(() => {
     if (!open || panel !== "permission" || !client) return;
     void client.listDatabasePermissions(databaseId).then(setDatabasePermissions).catch(() => setDatabasePermissions([]));
+    if (collaborationClient) {
+      void collaborationClient.listMembers().then((items) => {
+        setMembers(items);
+        setSubjectId((current) => current || items[0]?.user_id || "");
+      }).catch(() => setMembers([]));
+    }
   }, [client, databaseId, open, panel]);
   useEffect(() => {
-    if (!open || panel !== "permission" || !client || !permissionPropertyId) return;
-    void client.listFieldPermissions(databaseId, permissionPropertyId).then(setFieldPermissions).catch(() => setFieldPermissions([]));
-  }, [client, databaseId, open, panel, permissionPropertyId]);
+    if (!open || panel !== "permission" || !client || properties.length === 0) return;
+    void Promise.all(properties.map((property) => client.listFieldPermissions(databaseId, property.id)))
+      .then((items) => setFieldPermissions(items.flat()))
+      .catch(() => setFieldPermissions([]));
+  }, [client, databaseId, open, panel, properties]);
+
+  useEffect(() => {
+    const headers = parseCsvHeaders(csv);
+    setCsvMappings((current) => Object.fromEntries(headers.map((header) => {
+      const existing = current[header];
+      const matched = properties.find((property) => property.name.localeCompare(header, undefined, { sensitivity: "accent" }) === 0);
+      return [header, existing ?? matched?.id ?? ""];
+    })));
+    setCsvPreview(null);
+  }, [csv, properties]);
+
+  useEffect(() => {
+    setPanel("overview");
+    setStats(null);
+    setDatabaseName(database.name);
+    setDatabaseDescription(database.description);
+    setDeleteConfirmation("");
+  }, [database.id, database.description, database.name]);
 
   useEffect(() => {
     const selected = templates.find((template) => template.id === templateId);
@@ -103,6 +152,10 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
   const selectedView = views.find((view) => view.id === selectedViewId);
   const selectedTemplate = templates.find((template) => template.id === templateId);
   const selectedComment = comments.find((comment) => comment.id === selectedCommentId);
+  const recordLabels = Object.fromEntries(records.map((record) => {
+    const label = properties.map((property) => record.values[property.id]).find((value) => typeof value === "string" && value.trim());
+    return [record.id, typeof label === "string" ? label : record.id];
+  }));
   const normalizedTemplateValues = () => Object.fromEntries(properties.flatMap((property) => {
     const value = normalizeFieldValue(property, templateValues[property.id]);
     return value === undefined ? [] : [[property.id, value]];
@@ -122,6 +175,55 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     const mutations = records.filter((record) => selectedRecordIds.includes(record.id)).map((record) => ({ record_id: record.id, base_revision: record.revision, values: { [property.id]: normalizeFieldValue(property, bulkValue) } }));
     void run(() => onBulkPreview ? onBulkPreview(mutations) : client!.bulkEdit(databaseId, { mutations }), "已保存批量更新。");
   };
+  const previewCsv = async () => {
+    if (disabled || !client) return;
+    setPending(true);
+    setFeedback(null);
+    try {
+      setCsvPreview(await client.previewCsv(databaseId, { csv, header_property_ids: csvMappings }));
+    } catch {
+      setCsvPreview(null);
+      setFeedback("CSV 预览失败，请检查字段映射和数据格式。");
+    } finally {
+      setPending(false);
+    }
+  };
+  const duplicateStructure = () => run(async () => {
+    const copy = await client!.createDatabase({ name: `${database.name} 副本`, description: database.description });
+    const propertyIds = new Map<string, string>();
+    for (const property of properties) {
+      const created = await client!.createProperty(copy.id, {
+        name: property.name,
+        type: property.type,
+        config: property.config,
+        position: property.position,
+        hidden: property.hidden,
+        read_only: property.read_only,
+      });
+      propertyIds.set(property.id, created.id);
+    }
+    const remap = (propertyId: string) => propertyIds.get(propertyId) ?? propertyId;
+    for (const view of views) {
+      await client!.createView(copy.id, {
+        name: view.name,
+        type: view.type,
+        position: view.position,
+        config: {
+          ...view.config,
+          visible_columns: view.config.visible_columns.map(remap),
+          filters: view.config.filters.map((filter) => ({ ...filter, property_id: remap(filter.property_id) })),
+          sorts: view.config.sorts.map((sort) => ({ ...sort, property_id: remap(sort.property_id) })),
+          grouping: view.config.grouping ? { ...view.config.grouping, property_id: remap(view.config.grouping.property_id) } : null,
+        },
+      });
+    }
+    for (const template of templates) {
+      await client!.createTemplate(copy.id, {
+        name: template.name,
+        default_values: Object.fromEntries(Object.entries(template.default_values).map(([propertyId, value]) => [remap(propertyId), value])),
+      });
+    }
+  }, "数据库结构已复制。");
 
   const trapFocus = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.key === "Escape") { changeOpen(false); return; }
@@ -133,18 +235,73 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   };
 
-  return <><button ref={triggerRef} className="database-tools-trigger" type="button" aria-label="数据库工具" aria-expanded={open} onClick={() => changeOpen(!open)}>数据库工具</button>{open && typeof document !== "undefined" ? createPortal(<aside className="database-tools-drawer" role="dialog" aria-modal="true" aria-label="数据库工具" data-scroll-owner="drawer" onKeyDown={trapFocus}><header><strong>数据库工具</strong><button ref={closeRef} type="button" onClick={() => changeOpen(false)}>关闭</button></header>{views.length ? <label>视图<select value={activeViewId} onChange={(event) => onViewChange(event.target.value)}>{views.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}</select></label> : null}<nav className="database-tools-tabs" aria-label="数据库操作">{panels.map(([id, label]) => <button className={panel === id ? "active" : ""} key={id} type="button" onClick={() => { setPanel(id); setFeedback(null); }}>{label}</button>)}</nav><div className="database-tools-form">
-    {panel === "database" ? <section aria-label="数据库表单"><h2>数据库</h2><label>数据库名称<input value={databaseName} onChange={(event) => setDatabaseName(event.target.value)} /></label><label>描述<textarea value={databaseDescription} onChange={(event) => setDatabaseDescription(event.target.value)} /></label><button type="button" disabled={disabled} onClick={() => { if (validate(databaseName.trim(), "请输入数据库名称。")) void run(() => client!.updateDatabase(databaseId, { base_revision: database.revision, name: databaseName.trim(), description: databaseDescription })); }}>保存数据库</button><button type="button" disabled={disabled} onClick={() => void run(() => client!.deleteDatabase(databaseId, { base_revision: database.revision }), "数据库已删除。")}>删除数据库</button></section> : null}
-    {panel === "record" ? <><DatabaseRecordForm properties={properties} values={recordValues} disabled={disabled} onChange={(id, value) => setRecordValues((current) => ({ ...current, [id]: value }))} onSubmit={submitRecord} /><label>选择记录<select value={selectedRecordId} onChange={(event) => { const next = records.find((record) => record.id === event.target.value); setSelectedRecordId(event.target.value); setRecordValues(next?.values ?? {}); }}><option value="">请选择</option>{records.map((record) => <option key={record.id} value={record.id}>{record.id}</option>)}</select></label>{selectedRecord ? <div className="database-tools-actions"><button type="button" disabled={disabled} onClick={() => void run(() => client!.updateRecord(databaseId, selectedRecord.id, { base_revision: selectedRecord.revision, values: Object.fromEntries(Object.entries(recordValues).map(([id, value]) => [id, normalizeFieldValue(properties.find((property) => property.id === id)!, value)]).filter(([, value]) => value !== undefined)) }))}>保存记录</button><button type="button" disabled={disabled} onClick={() => void run(() => client!.deleteRecord(databaseId, selectedRecord.id, { base_revision: selectedRecord.revision }), "记录已删除。")}>删除记录</button></div> : null}</> : null}
-    {panel === "property" ? <><DatabasePropertyEditor name={propertyName} type={propertyType} options={options} relationDatabaseId={relationDatabaseId} databases={databases} disabled={disabled} onNameChange={setPropertyName} onTypeChange={setPropertyType} onOptionsChange={setOptions} onRelationDatabaseChange={setRelationDatabaseId} onSubmit={submitProperty} /><label>选择属性<select value={selectedPropertyId} onChange={(event) => { const next = properties.find((property) => property.id === event.target.value); setSelectedPropertyId(event.target.value); if (next) { setPropertyName(next.name); setPropertyType(next.type as PropertyType); setOptions(((next.config as { options?: { name: string }[] }).options ?? []).map((option) => option.name).join(", ")); setRelationDatabaseId((next.config as { target_database_id?: string }).target_database_id ?? ""); } }}><option value="">请选择</option>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label>{selectedProperty ? <div className="database-tools-actions"><button type="button" disabled={disabled} onClick={() => { const config = propertyConfig(selectedProperty.type as PropertyType, options, relationDatabaseId); if (config) void run(() => client!.updateProperty(databaseId, selectedProperty.id, { base_revision: selectedProperty.revision, name: propertyName.trim(), config, position: selectedProperty.position, hidden: selectedProperty.hidden, read_only: selectedProperty.read_only })); }}>保存属性</button><button type="button" disabled={disabled} onClick={() => void run(() => client!.deleteProperty(databaseId, selectedProperty.id, { base_revision: selectedProperty.revision }), "属性已删除。")}>删除属性</button></div> : null}</> : null}
-    {panel === "view" ? <><label>选择视图<select value={selectedViewId} onChange={(event) => { const next = views.find((view) => view.id === event.target.value); setSelectedViewId(event.target.value); if (next) { setViewName(next.name); setViewType(next.type); } }}><option value="">新视图</option>{views.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}</select></label><DatabaseViewForm name={viewName} type={viewType} properties={properties} position={selectedView?.position ?? views.length} editingView={selectedView} disabled={disabled} onNameChange={setViewName} onTypeChange={setViewType} onSubmit={(input) => { if (validate(input.name.trim(), "请输入视图名称。")) void run(() => client!.createView(databaseId, { ...input, name: input.name.trim() })); }} onUpdate={(input) => { if (selectedView && validate(input.name.trim(), "请输入视图名称。")) void run(() => client!.updateView(databaseId, selectedView.id, { base_revision: selectedView.revision, name: input.name.trim(), config: input.config, position: selectedView.position })); }} />{selectedView ? <button type="button" disabled={disabled} onClick={() => void run(() => client!.deleteView(databaseId, selectedView.id, { base_revision: selectedView.revision }), "视图已删除。")}>删除视图</button> : null}</> : null}
-    {panel === "template" ? <><DatabaseTemplateForm templates={templates} templateId={templateId} name={templateName} records={records} properties={properties} values={templateValues} disabled={disabled} onTemplateChange={setTemplateId} onNameChange={setTemplateName} onValuesChange={(propertyId, value) => setTemplateValues((current) => ({ ...current, [propertyId]: value }))} onCreate={(name) => { if (validate(name.trim(), "请输入模板名称。")) void run(() => client!.createTemplate(databaseId, { name: name.trim(), default_values: normalizedTemplateValues() })); }} onApply={(id) => void run(() => client!.applyTemplate(databaseId, { template_id: id, records: records.slice(0, 100).map((record) => ({ record_id: record.id, base_revision: record.revision })) }))} />{selectedTemplate ? <div className="database-tools-actions"><button type="button" disabled={disabled} onClick={() => void run(() => client!.updateTemplate(databaseId, selectedTemplate.id, { base_revision: selectedTemplate.revision, name: templateName.trim() || selectedTemplate.name, default_values: normalizedTemplateValues() }))}>保存模板</button><button type="button" disabled={disabled} onClick={() => void run(() => client!.deleteTemplate(databaseId, selectedTemplate.id, { base_revision: selectedTemplate.revision }), "模板已删除。")}>删除模板</button></div> : null}</> : null}
-    {panel === "comment" ? <><DatabaseCommentForm records={records} recordId={commentRecordId} comments={comments} body={commentBody} disabled={disabled} onRecordChange={setCommentRecordId} onBodyChange={setCommentBody} onSubmit={() => { if (validate(commentBody.trim(), "请输入评论内容。")) void run(() => client!.createComment(databaseId, commentRecordId, { record_id: commentRecordId, body: commentBody.trim() })); }} /><label>选择评论<select value={selectedCommentId} onChange={(event) => { const next = comments.find((comment) => comment.id === event.target.value); setSelectedCommentId(event.target.value); setCommentBody(next?.body ?? ""); }}><option value="">请选择</option>{comments.map((comment) => <option key={comment.id} value={comment.id}>{comment.id}</option>)}</select></label>{selectedComment ? <div className="database-tools-actions"><button type="button" disabled={disabled} onClick={() => void run(() => client!.updateComment(databaseId, selectedComment.id, { base_revision: (selectedComment as DatabaseComment & { revision: number }).revision, body: commentBody.trim() }))}>保存评论</button><button type="button" disabled={disabled} onClick={() => void run(() => client!.deleteComment(databaseId, selectedComment.id, { base_revision: (selectedComment as DatabaseComment & { revision: number }).revision }), "评论已删除。")}>删除评论</button></div> : null}</> : null}
-    {panel === "bulk" ? <DatabaseBulkForm records={records} properties={properties} selectedIds={selectedRecordIds} propertyId={bulkPropertyId} value={bulkValue} disabled={disabled} onSelectionChange={(id, selected) => setSelectedRecordIds((current) => selected ? [...current, id] : current.filter((currentId) => currentId !== id))} onPropertyChange={setBulkPropertyId} onValueChange={setBulkValue} onSubmit={submitBulk} /> : null}
-    {panel === "permission" ? <><DatabasePermissionForm subjectType={subjectType} subjectId={subjectId} role={role} disabled={disabled} onSubjectTypeChange={changeSubjectType} onSubjectChange={setSubjectId} onRoleChange={setRole} onSubmit={() => { if (!validate(subjectId.trim(), subjectType === "user" ? "请输入成员 ID。" : "请选择工作区角色。")) return; const current = databasePermissions.find((permission) => permission.subject_type === subjectType && permission.subject_id === subjectId.trim()); void run(async () => { await client!.setDatabasePermission(databaseId, { subject_type: subjectType, subject_id: subjectId.trim(), role, base_revision: current?.revision ?? 1 }); setDatabasePermissions(await client!.listDatabasePermissions(databaseId)); }); }} />
-      <ul className="database-entity-list" aria-label="数据库权限列表">{databasePermissions.map((permission) => <li key={permission.id}><span>{permission.subject_id} · {permission.role} · r{permission.revision}</span><button type="button" aria-label={`删除数据库权限 ${permission.subject_id}`} disabled={disabled} onClick={() => void run(async () => { await client!.deleteDatabasePermission(databaseId, permission.id, { base_revision: permission.revision }); setDatabasePermissions((current) => current.filter((item) => item.id !== permission.id)); })}>删除</button></li>)}</ul>
-      <label>权限字段<select aria-label="权限字段" value={permissionPropertyId} onChange={(event) => setPermissionPropertyId(event.target.value)}>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label>
-      <label>字段可读<input type="checkbox" checked={fieldCanRead} onChange={(event) => { setFieldCanRead(event.target.checked); if (!event.target.checked) setFieldCanWrite(false); }} /></label><label>字段可写<input type="checkbox" checked={fieldCanWrite} disabled={!fieldCanRead} onChange={(event) => setFieldCanWrite(event.target.checked)} /></label><button type="button" disabled={disabled || !permissionPropertyId} onClick={() => { if (!validate(subjectId.trim(), subjectType === "user" ? "请输入成员 ID。" : "请选择工作区角色。")) return; const current = fieldPermissions.find((permission) => permission.subject_type === subjectType && permission.subject_id === subjectId.trim()); void run(async () => { await client!.setFieldPermission(databaseId, permissionPropertyId, { subject_type: subjectType, subject_id: subjectId.trim(), can_read: fieldCanRead, can_write: fieldCanWrite, base_revision: current?.revision ?? 1 }); setFieldPermissions(await client!.listFieldPermissions(databaseId, permissionPropertyId)); }); }}>保存字段权限</button><ul className="database-entity-list" aria-label="字段权限列表">{fieldPermissions.map((permission) => <li key={permission.id}><span>{permission.subject_id} · r{permission.revision}</span><button type="button" aria-label={`删除字段权限 ${permission.subject_id}`} disabled={disabled} onClick={() => void run(async () => { await client!.deleteFieldPermission(databaseId, permission.property_id, permission.id, { base_revision: permission.revision }); setFieldPermissions((current) => current.filter((item) => item.id !== permission.id)); })}>删除</button></li>)}</ul></> : null}
-    {panel === "csv" ? <DatabaseCsvForm csv={csv} disabled={disabled} onCsvChange={setCsv} onImport={() => { if (validate(csv.trim(), "请输入 CSV 内容。")) void run(() => client!.importCsv(databaseId, { csv, header_property_ids: Object.fromEntries(properties.map((property) => [property.name, property.id])) })); }} onExport={() => void run(async () => downloadCsvBlob(await client!.exportCsvBlob(databaseId, { property_ids: properties.map((property) => property.id), page_size: 100 })), "CSV 已导出。")} /> : null}
-  </div>{feedback ? <p className="database-operation-feedback" role="status">{feedback}</p> : null}</aside>, document.body) : null}</>;
+  const drawer = (
+    <aside className="database-tools-drawer" role="dialog" aria-modal="true" aria-label="数据库工具" data-scroll-owner="drawer" onKeyDown={trapFocus}>
+      <header>
+        <div><p className="eyebrow">DATABASE MANAGEMENT</p><h2>数据库管理中心</h2></div>
+        <button ref={closeRef} type="button" onClick={() => changeOpen(false)}>关闭</button>
+      </header>
+      {views.length ? <label className="database-active-view">当前视图<select aria-label="视图" value={activeViewId} onChange={(event) => onViewChange(event.target.value)}>{views.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}</select></label> : null}
+      <nav className="database-tools-tabs" aria-label="数据库操作">{panels.map(([id, label]) =>
+        <button className={panel === id ? "active" : ""} key={id} type="button" onClick={() => { setPanel(id); setFeedback(null); }}>{label}</button>,
+      )}</nav>
+      <div className="database-tools-form">
+        {panel === "overview" ? <DatabaseOverviewPanel stats={stats} loading={statsLoading} error={statsError} /> : null}
+        {panel === "database" ? <section aria-label="数据库表单">
+          <h2>数据库设置</h2>
+          <label>数据库名称<input value={databaseName} onChange={(event) => setDatabaseName(event.target.value)} /></label>
+          <label>描述<textarea value={databaseDescription} onChange={(event) => setDatabaseDescription(event.target.value)} /></label>
+          <div className="database-tools-actions">
+            <button type="button" disabled={disabled} onClick={() => { if (validate(databaseName.trim(), "请输入数据库名称。")) void run(() => client!.updateDatabase(databaseId, { base_revision: database.revision, name: databaseName.trim(), description: databaseDescription })); }}>保存数据库</button>
+            <button type="button" disabled={disabled} onClick={() => void duplicateStructure()}>复制结构</button>
+          </div>
+          <section className="database-danger-zone" aria-label="危险操作">
+            <h3>危险操作</h3>
+            <p>删除前会先解除笔记与数据库的关联，笔记正文不会被删除。</p>
+            <label>输入数据库名称以确认删除<input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label>
+            <button type="button" disabled={disabled || deleteConfirmation !== database.name} onClick={() => void run(() => client!.deleteDatabase(databaseId, { base_revision: database.revision }), "数据库已删除。")}>删除数据库</button>
+          </section>
+        </section> : null}
+        {panel === "record" ? <>
+          <DatabaseRecordForm properties={properties} values={recordValues} disabled={disabled} onChange={(id, value) => setRecordValues((current) => ({ ...current, [id]: value }))} onSubmit={submitRecord} />
+          <label>选择记录<select value={selectedRecordId} onChange={(event) => { const next = records.find((record) => record.id === event.target.value); setSelectedRecordId(event.target.value); setRecordValues(next?.values ?? {}); }}><option value="">请选择</option>{records.map((record) => <option key={record.id} value={record.id}>{recordLabels[record.id]}</option>)}</select></label>
+          {selectedRecord ? <div className="database-tools-actions"><button type="button" disabled={disabled} onClick={() => void run(() => client!.updateRecord(databaseId, selectedRecord.id, { base_revision: selectedRecord.revision, values: Object.fromEntries(Object.entries(recordValues).map(([id, value]) => [id, normalizeFieldValue(properties.find((property) => property.id === id)!, value)]).filter(([, value]) => value !== undefined)) }))}>保存记录</button><button type="button" disabled={disabled} onClick={() => void run(() => client!.deleteRecord(databaseId, selectedRecord.id, { base_revision: selectedRecord.revision }), "记录已删除。")}>删除记录</button></div> : null}
+        </> : null}
+        {panel === "property" ? <>
+          <DatabasePropertyEditor name={propertyName} type={propertyType} options={options} relationDatabaseId={relationDatabaseId} databases={databases} disabled={disabled} onNameChange={setPropertyName} onTypeChange={setPropertyType} onOptionsChange={setOptions} onRelationDatabaseChange={setRelationDatabaseId} onSubmit={submitProperty} />
+          <label>选择属性<select value={selectedPropertyId} onChange={(event) => { const next = properties.find((property) => property.id === event.target.value); setSelectedPropertyId(event.target.value); if (next) { setPropertyName(next.name); setPropertyType(next.type as PropertyType); setOptions(((next.config as { options?: { name: string }[] }).options ?? []).map((option) => option.name).join(", ")); setRelationDatabaseId((next.config as { target_database_id?: string }).target_database_id ?? ""); } }}><option value="">请选择</option>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label>
+          {selectedProperty ? <div className="database-tools-actions"><button type="button" disabled={disabled} onClick={() => { const config = propertyConfig(selectedProperty.type as PropertyType, options, relationDatabaseId); if (config) void run(() => client!.updateProperty(databaseId, selectedProperty.id, { base_revision: selectedProperty.revision, name: propertyName.trim(), config, position: selectedProperty.position, hidden: selectedProperty.hidden, read_only: selectedProperty.read_only })); }}>保存属性</button><button type="button" disabled={disabled} onClick={() => void run(() => client!.deleteProperty(databaseId, selectedProperty.id, { base_revision: selectedProperty.revision }), "属性已删除。")}>删除属性</button></div> : null}
+        </> : null}
+        {panel === "view" ? <>
+          <label>选择视图<select value={selectedViewId} onChange={(event) => { const next = views.find((view) => view.id === event.target.value); setSelectedViewId(event.target.value); if (next) { setViewName(next.name); setViewType(next.type); } }}><option value="">新视图</option>{views.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}</select></label>
+          <DatabaseViewForm name={viewName} type={viewType} properties={properties} position={selectedView?.position ?? views.length} editingView={selectedView} disabled={disabled} onNameChange={setViewName} onTypeChange={setViewType} onSubmit={(input) => { if (validate(input.name.trim(), "请输入视图名称。")) void run(() => client!.createView(databaseId, { ...input, name: input.name.trim() })); }} onUpdate={(input) => { if (selectedView && validate(input.name.trim(), "请输入视图名称。")) void run(() => client!.updateView(databaseId, selectedView.id, { base_revision: selectedView.revision, name: input.name.trim(), config: input.config, position: selectedView.position })); }} />
+          {selectedView ? <button type="button" disabled={disabled} onClick={() => void run(() => client!.deleteView(databaseId, selectedView.id, { base_revision: selectedView.revision }), "视图已删除。")}>删除视图</button> : null}
+        </> : null}
+        {panel === "template" ? <>
+          <DatabaseTemplateForm templates={templates} templateId={templateId} name={templateName} records={records} properties={properties} values={templateValues} disabled={disabled} onTemplateChange={setTemplateId} onNameChange={setTemplateName} onValuesChange={(propertyId, value) => setTemplateValues((current) => ({ ...current, [propertyId]: value }))} onCreate={(name) => { if (validate(name.trim(), "请输入模板名称。")) void run(() => client!.createTemplate(databaseId, { name: name.trim(), default_values: normalizedTemplateValues() })); }} onApply={(id) => void run(() => client!.applyTemplate(databaseId, { template_id: id, records: records.slice(0, 100).map((record) => ({ record_id: record.id, base_revision: record.revision })) }))} />
+          {selectedTemplate ? <><details className="database-template-preview"><summary>应用前预览</summary><dl>{properties.map((property) => <div key={property.id}><dt>{property.name}</dt><dd>{String(templateValues[property.id] ?? "未设置")}</dd></div>)}</dl></details><div className="database-tools-actions"><button type="button" disabled={disabled} onClick={() => void run(() => client!.createTemplate(databaseId, { name: `${selectedTemplate.name} 副本`, default_values: selectedTemplate.default_values }), "模板已复制。")}>复制模板</button><button type="button" disabled={disabled} onClick={() => void run(() => client!.updateTemplate(databaseId, selectedTemplate.id, { base_revision: selectedTemplate.revision, name: templateName.trim() || selectedTemplate.name, default_values: normalizedTemplateValues() }))}>保存模板</button><button type="button" disabled={disabled} onClick={() => void run(() => client!.deleteTemplate(databaseId, selectedTemplate.id, { base_revision: selectedTemplate.revision }), "模板已删除。")}>删除模板</button></div></> : null}
+        </> : null}
+        {panel === "comment" ? <>
+          <DatabaseCommentForm records={records} recordLabels={recordLabels} recordId={commentRecordId} comments={comments} body={commentBody} disabled={disabled} onRecordChange={setCommentRecordId} onBodyChange={setCommentBody} onSubmit={() => { if (validate(commentBody.trim(), "请输入评论内容。")) void run(() => client!.createComment(databaseId, commentRecordId, { record_id: commentRecordId, body: commentBody.trim() })); }} />
+          <label>选择评论<select value={selectedCommentId} onChange={(event) => { const next = comments.find((comment) => comment.id === event.target.value); setSelectedCommentId(event.target.value); setCommentBody(next?.body ?? ""); }}><option value="">请选择</option>{comments.map((comment) => <option key={comment.id} value={comment.id}>{comment.id}</option>)}</select></label>
+          {selectedComment ? <div className="database-tools-actions"><button type="button" disabled={disabled} onClick={() => void run(() => client!.updateComment(databaseId, selectedComment.id, { base_revision: (selectedComment as DatabaseComment & { revision: number }).revision, body: commentBody.trim() }))}>保存评论</button><button type="button" disabled={disabled} onClick={() => void run(() => client!.deleteComment(databaseId, selectedComment.id, { base_revision: (selectedComment as DatabaseComment & { revision: number }).revision }), "评论已删除。")}>删除评论</button></div> : null}
+        </> : null}
+        {panel === "bulk" ? <DatabaseBulkForm records={records} properties={properties} selectedIds={selectedRecordIds} propertyId={bulkPropertyId} value={bulkValue} disabled={disabled} onSelectionChange={(id, selected) => setSelectedRecordIds((current) => selected ? [...current, id] : current.filter((currentId) => currentId !== id))} onPropertyChange={setBulkPropertyId} onValueChange={setBulkValue} onSubmit={submitBulk} /> : null}
+        {panel === "permission" ? <>
+          <DatabasePermissionForm subjectType={subjectType} subjectId={subjectId} role={role} members={collaborationClient ? members : undefined} disabled={disabled} onSubjectTypeChange={changeSubjectType} onSubjectChange={setSubjectId} onRoleChange={setRole} onSubmit={() => { if (!validate(subjectId.trim(), subjectType === "user" ? "请选择成员。" : "请选择工作区角色。")) return; const current = databasePermissions.find((permission) => permission.subject_type === subjectType && permission.subject_id === subjectId.trim()); void run(async () => { await client!.setDatabasePermission(databaseId, { subject_type: subjectType, subject_id: subjectId.trim(), role, base_revision: current?.revision ?? 1 }); setDatabasePermissions(await client!.listDatabasePermissions(databaseId)); }); }} />
+          <ul className="database-entity-list" aria-label="数据库权限列表">{databasePermissions.map((permission) => <li key={permission.id}><span>{permission.subject_id} · {permission.role} · r{permission.revision}</span><button type="button" aria-label={`删除数据库权限 ${permission.subject_id}`} disabled={disabled} onClick={() => void run(async () => { await client!.deleteDatabasePermission(databaseId, permission.id, { base_revision: permission.revision }); setDatabasePermissions((current) => current.filter((item) => item.id !== permission.id)); })}>删除</button></li>)}</ul>
+          <label>权限字段<select aria-label="权限字段" value={permissionPropertyId} onChange={(event) => setPermissionPropertyId(event.target.value)}>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label>
+          <label>字段可读<input type="checkbox" checked={fieldCanRead} onChange={(event) => { setFieldCanRead(event.target.checked); if (!event.target.checked) setFieldCanWrite(false); }} /></label>
+          <label>字段可写<input type="checkbox" checked={fieldCanWrite} disabled={!fieldCanRead} onChange={(event) => setFieldCanWrite(event.target.checked)} /></label>
+          <button type="button" disabled={disabled || !permissionPropertyId} onClick={() => { if (!validate(subjectId.trim(), subjectType === "user" ? "请选择成员。" : "请选择工作区角色。")) return; const current = fieldPermissions.find((permission) => permission.property_id === permissionPropertyId && permission.subject_type === subjectType && permission.subject_id === subjectId.trim()); void run(async () => { await client!.setFieldPermission(databaseId, permissionPropertyId, { subject_type: subjectType, subject_id: subjectId.trim(), can_read: fieldCanRead, can_write: fieldCanWrite, base_revision: current?.revision ?? 1 }); const updated = await client!.listFieldPermissions(databaseId, permissionPropertyId); setFieldPermissions((items) => [...items.filter((item) => item.property_id !== permissionPropertyId), ...updated]); }); }}>保存字段权限</button>
+          <ul className="database-entity-list" aria-label="字段权限列表">{fieldPermissions.filter((permission) => permission.property_id === permissionPropertyId).map((permission) => <li key={permission.id}><span>{permission.subject_id} · r{permission.revision}</span><button type="button" aria-label={`删除字段权限 ${permission.subject_id}`} disabled={disabled} onClick={() => void run(async () => { await client!.deleteFieldPermission(databaseId, permission.property_id, permission.id, { base_revision: permission.revision }); setFieldPermissions((current) => current.filter((item) => item.id !== permission.id)); })}>删除</button></li>)}</ul>
+          <DatabasePermissionMatrix members={members} properties={properties} databasePermissions={databasePermissions} fieldPermissions={fieldPermissions} />
+        </> : null}
+        {panel === "csv" ? <DatabaseCsvManager csv={csv} properties={properties} mappings={csvMappings} preview={csvPreview} disabled={disabled} onCsvChange={setCsv} onMappingChange={(header, propertyId) => setCsvMappings((current) => ({ ...current, [header]: propertyId }))} onPreview={() => void previewCsv()} onImport={() => { if (validate(csv.trim(), "请输入 CSV 内容。")) void run(() => client!.importCsv(databaseId, { csv, header_property_ids: csvMappings }), "CSV 已导入。"); }} onExport={() => void run(async () => downloadCsvBlob(await client!.exportCsvBlob(databaseId, { property_ids: properties.map((property) => property.id), page_size: 100 })), "CSV 已导出。")} /> : null}
+      </div>
+      {feedback ? <p className="database-operation-feedback" role="status">{feedback}</p> : null}
+    </aside>
+  );
+
+  return <><button ref={triggerRef} className="database-tools-trigger" type="button" aria-label="数据库工具" aria-expanded={open} onClick={() => changeOpen(!open)}>数据库工具</button>{open && typeof document !== "undefined" ? createPortal(drawer, document.body) : null}</>;
 }

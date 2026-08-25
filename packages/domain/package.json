@@ -8,5 +8,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --config vitest.config.ts",
     "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@js-temporal/polyfill": "0.5.1"
   }
 }

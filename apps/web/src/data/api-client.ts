@@ -16,8 +16,16 @@ export interface ApiRequestOptions {
   path: string;
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
+  bodyMode?: "json" | "raw";
   headers?: Record<string, string>;
   requestClass: RequestClass;
+  policy: RequestPolicy;
+}
+
+export interface ApiDownloadOptions {
+  path: string;
+  headers?: Record<string, string>;
+  requestClass: "query";
   policy: RequestPolicy;
 }
 
@@ -108,6 +116,10 @@ export class ApiClient {
     });
   }
 
+  download(options: ApiDownloadOptions): Promise<Blob> {
+    return this.executeDownload(options);
+  }
+
   private async execute<T>(options: ApiRequestOptions): Promise<T> {
     const method = options.method ?? "GET";
     const canRetry = options.requestClass === "query" || Boolean(options.policy.idempotencyKey);
@@ -116,17 +128,23 @@ export class ApiClient {
     for (let attempt = 0; attempt <= retryCount; attempt += 1) {
       const attemptSignal = createAttemptSignal(options.policy.timeoutMs, options.policy.signal);
       try {
+        const bodyMode = options.bodyMode ?? "json";
         const headers: Record<string, string> = {
           accept: "application/json",
           ...options.headers,
         };
-        if (options.body !== undefined) headers["content-type"] = "application/json";
+        if (options.body !== undefined && bodyMode === "json") headers["content-type"] = "application/json";
         if (options.policy.idempotencyKey) headers["idempotency-key"] = options.policy.idempotencyKey;
+        const requestBody = options.body === undefined
+          ? undefined
+          : bodyMode === "raw"
+            ? options.body as BodyInit
+            : JSON.stringify(options.body);
 
         const response = await this.fetchImpl(`${this.baseUrl}${options.path}`, {
           method,
           headers,
-          body: options.body === undefined ? undefined : JSON.stringify(options.body),
+          body: requestBody,
           signal: attemptSignal.signal,
           credentials: "include",
         });
@@ -159,6 +177,46 @@ export class ApiClient {
     }
 
     throw new ApiClientError({ code: "UNREACHABLE", message: "Request did not complete", retryable: false });
+  }
+
+  private async executeDownload(options: ApiDownloadOptions): Promise<Blob> {
+    const retryCount = options.policy.retry;
+    for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+      const attemptSignal = createAttemptSignal(options.policy.timeoutMs, options.policy.signal);
+      try {
+        const response = await this.fetchImpl(`${this.baseUrl}${options.path}`, {
+          method: "GET",
+          headers: { accept: "application/octet-stream", ...options.headers },
+          signal: attemptSignal.signal,
+          credentials: "include",
+        });
+        if (response.ok) return await response.blob();
+        const envelope = await readResponse<unknown>(response);
+        const payload = envelope.success
+          ? { code: "HTTP_ERROR", message: `Request failed with ${response.status}`, retryable: isRetryableStatus(response.status) }
+          : envelope.error;
+        if (attempt < retryCount && isRetryableStatus(response.status)) {
+          await this.waitBeforeRetry(attempt);
+          continue;
+        }
+        throw new ApiClientError(payload, response.status);
+      } catch (error) {
+        if (error instanceof ApiClientError) throw error;
+        if (options.policy.signal?.aborted) throw error;
+        if (attempt < retryCount) {
+          await this.waitBeforeRetry(attempt);
+          continue;
+        }
+        throw new ApiClientError({
+          code: attemptSignal.signal.reason?.name === "TimeoutError" ? "TIMEOUT" : "NETWORK_ERROR",
+          message: attemptSignal.signal.reason?.name === "TimeoutError" ? "Request timed out" : "Network request failed",
+          retryable: true,
+        });
+      } finally {
+        attemptSignal.dispose();
+      }
+    }
+    throw new ApiClientError({ code: "UNREACHABLE", message: "Download did not complete", retryable: false });
   }
 
   private waitBeforeRetry(attempt: number) {

@@ -40,4 +40,12 @@ describe("Beta Service Worker", () => {
     update.activate();
     expect(postMessage).toHaveBeenCalledWith({ type: "SKIP_WAITING" });
   });
+
+  it("handles privacy-safe push notifications and reminder deep links", () => {
+    const source = readFileSync(resolve(import.meta.dirname, "../public/sw.js"), "utf8");
+    expect(source).toContain('self.addEventListener("push"');
+    expect(source).toContain('self.addEventListener("notificationclick"');
+    expect(source).toContain('"你有一条提醒"');
+    expect(source).toContain("clients.openWindow");
+  });
 });

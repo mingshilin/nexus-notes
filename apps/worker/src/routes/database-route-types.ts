@@ -30,3 +30,12 @@ export function recordSearchOptions(request: Request) {
     limit: Number.isInteger(requested) && requested > 0 ? Math.min(requested, 100) : 50,
   };
 }
+
+export function databaseBootstrapOptions(request: Request) {
+  const params = new URL(request.url).searchParams;
+  const requested = Number(params.get("limit") ?? 50);
+  return {
+    databaseId: params.get("database_id"),
+    limit: Number.isInteger(requested) && requested > 0 ? Math.min(requested, 100) : 50,
+  };
+}

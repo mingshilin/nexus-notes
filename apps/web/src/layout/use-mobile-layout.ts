@@ -36,14 +36,8 @@ export function useMobileChrome() {
   const [state, dispatch] = useReducer(reduceMobileChrome, undefined, createMobileChromeState);
 
   useEffect(() => {
-    let restoreTimer: ReturnType<typeof setTimeout> | undefined;
-    const scheduleRestore = () => {
-      clearTimeout(restoreTimer);
-      restoreTimer = setTimeout(() => dispatch({ type: "restore" }), 900);
-    };
     const onScroll = (event: Event) => {
       dispatch({ type: "scroll", scrollTop: readScrollTop(event.target) });
-      scheduleRestore();
     };
     const onFocusIn = (event: FocusEvent) => {
       if (isTextEntry(event.target)) dispatch({ type: "text-focus", focused: true });
@@ -56,6 +50,7 @@ export function useMobileChrome() {
       const inset = viewport ? calculateKeyboardInset(window.innerHeight, viewport) : 0;
       document.documentElement.style.setProperty("--keyboard-inset", `${inset}px`);
       dispatch({ type: "keyboard", inset });
+      if (viewport) dispatch({ type: "viewport-scale", scale: viewport.scale });
     };
 
     document.addEventListener("scroll", onScroll, true);
@@ -63,15 +58,16 @@ export function useMobileChrome() {
     document.addEventListener("focusout", onFocusOut);
     window.visualViewport?.addEventListener("resize", updateViewport);
     window.visualViewport?.addEventListener("scroll", updateViewport);
+    window.addEventListener("resize", updateViewport);
     updateViewport();
 
     return () => {
-      clearTimeout(restoreTimer);
       document.removeEventListener("scroll", onScroll, true);
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onFocusOut);
       window.visualViewport?.removeEventListener("resize", updateViewport);
       window.visualViewport?.removeEventListener("scroll", updateViewport);
+      window.removeEventListener("resize", updateViewport);
     };
   }, []);
 

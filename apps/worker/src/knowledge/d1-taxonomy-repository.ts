@@ -55,6 +55,18 @@ export class D1TaxonomyRepository {
     return result.results ?? [];
   }
 
+  async listNoteTags(workspaceId: string, noteId: string) {
+    const result = await this.db.prepare(
+      `SELECT tag.id, tag.workspace_id, tag.name, tag.color, tag.revision, tag.created_at, tag.updated_at
+       FROM note_tags assigned
+       JOIN tags tag ON tag.workspace_id = assigned.workspace_id AND tag.id = assigned.tag_id
+       JOIN notes note ON note.workspace_id = assigned.workspace_id AND note.id = assigned.note_id
+       WHERE assigned.workspace_id = ? AND assigned.note_id = ? AND note.deleted_at IS NULL
+       ORDER BY tag.name, tag.id`,
+    ).bind(workspaceId, noteId).all<Tag>();
+    return result.results ?? [];
+  }
+
   async createTag(workspaceId: string, input: CreateTagInput, now: string) {
     const tag: Tag = {
       id: this.createId(),

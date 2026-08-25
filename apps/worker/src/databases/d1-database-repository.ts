@@ -8,6 +8,7 @@ import { D1DatabaseViewRepository } from "./d1-database-views";
 
 export class D1DatabaseRepository {
   readonly listDatabases: D1DatabaseCoreRepository["listDatabases"];
+  readonly getStats: D1DatabaseCoreRepository["getStats"];
   readonly createDatabase: D1DatabaseCoreRepository["createDatabase"];
   readonly updateDatabase: D1DatabaseCoreRepository["updateDatabase"];
   readonly deleteDatabase: D1DatabaseCoreRepository["deleteDatabase"];
@@ -42,6 +43,7 @@ export class D1DatabaseRepository {
   readonly listFieldPermissions: D1DatabasePermissionRepository["listFieldPermissions"];
   readonly deleteFieldPermission: D1DatabasePermissionRepository["deleteFieldPermission"];
   readonly importCsv: D1DatabaseCsvRepository["importCsv"];
+  readonly previewCsv: D1DatabaseCsvRepository["previewCsv"];
   readonly exportCsv: D1DatabaseCsvRepository["exportCsv"];
 
   constructor(db: D1Database, options: Partial<D1DatabaseRepositoryOptions> = {}) {
@@ -53,6 +55,7 @@ export class D1DatabaseRepository {
     const csv = new D1DatabaseCsvRepository(db, options);
 
     this.listDatabases = core.listDatabases.bind(core);
+    this.getStats = core.getStats.bind(core);
     this.createDatabase = core.createDatabase.bind(core);
     this.updateDatabase = core.updateDatabase.bind(core);
     this.deleteDatabase = core.deleteDatabase.bind(core);
@@ -87,6 +90,7 @@ export class D1DatabaseRepository {
     this.listFieldPermissions = permissions.listFieldPermissions.bind(permissions);
     this.deleteFieldPermission = permissions.deleteFieldPermission.bind(permissions);
     this.importCsv = csv.importCsv.bind(csv);
+    this.previewCsv = csv.previewCsv.bind(csv);
     this.exportCsv = csv.exportCsv.bind(csv);
   }
 }

@@ -339,6 +339,7 @@ describe("Task 7 database web behavior", () => {
     }));
     fireEvent.click(screen.getByRole("button", { name: "数据库工具" }));
     const drawer = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(drawer).getByRole("button", { name: "记录" }));
     fireEvent.change(within(drawer).getByLabelText("Name"), { target: { value: "Launch" } });
     fireEvent.change(within(drawer).getByLabelText("Score"), { target: { value: "12.5" } });
     fireEvent.click(within(drawer).getByLabelText("Complete"));
@@ -495,6 +496,7 @@ describe("Task 7 database web behavior", () => {
     const drawer = screen.getByRole("dialog", { name: "数据库工具" });
     expect(within(drawer).getByRole("button", { name: "关闭" })).toHaveFocus();
     expect(document.documentElement.style.getPropertyValue("--database-drawer-keyboard")).toBe("344px");
+    fireEvent.click(within(drawer).getByRole("button", { name: "记录" }));
     fireEvent.change(within(drawer).getByLabelText("Name"), { target: { value: "Mobile" } });
     fireEvent.click(within(drawer).getByRole("button", { name: "创建记录" }));
     await waitFor(() => expect(api.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/databases/db-1/records", method: "POST" })));

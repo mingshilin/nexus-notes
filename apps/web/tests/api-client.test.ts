@@ -163,4 +163,98 @@ describe("ApiClient", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("keeps JSON serialization as the default body mode", async () => {
+    const web = await loadWeb();
+    const fetchImpl = vi.fn(async () => success({ saved: true }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ fetchImpl });
+
+    await client.request({
+      path: "/api/v2/profile",
+      method: "PATCH",
+      body: { display_name: "Updated" },
+      requestClass: "command",
+      policy: { timeoutMs: 1_000, retry: 0 },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledWith("/api/v2/profile", expect.objectContaining({
+      body: JSON.stringify({ display_name: "Updated" }),
+      headers: expect.objectContaining({ "content-type": "application/json" }),
+    }));
+  });
+
+  it("sends a raw avatar body unchanged without overwriting its content type", async () => {
+    const web = await loadWeb();
+    const fetchImpl = vi.fn(async () => success({ uploaded: true }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ fetchImpl });
+    const file = new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" });
+
+    await client.request({
+      path: "/api/v2/profile/avatar",
+      method: "POST",
+      body: file,
+      bodyMode: "raw",
+      headers: { "content-type": "image/png" },
+      requestClass: "command",
+      policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: "avatar-1" },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledWith("/api/v2/profile/avatar", expect.objectContaining({
+      body: file,
+      credentials: "include",
+      headers: expect.objectContaining({
+        "content-type": "image/png",
+        "idempotency-key": "avatar-1",
+      }),
+    }));
+  });
+
+  it("preserves timeout and external abort propagation for raw bodies", async () => {
+    vi.useFakeTimers();
+    try {
+      const web = await loadWeb();
+      let requestSignal: AbortSignal | undefined;
+      const fetchImpl = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        requestSignal = init.signal as AbortSignal;
+        requestSignal.addEventListener("abort", () => reject(requestSignal?.reason), { once: true });
+      }));
+      const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+        request<T>(options: Record<string, unknown>): Promise<T>;
+      };
+      const client = new ApiClient({ fetchImpl });
+      const controller = new AbortController();
+      const request = client.request({
+        path: "/api/v2/profile/avatar",
+        method: "POST",
+        body: new Blob(["avatar"], { type: "image/png" }),
+        bodyMode: "raw",
+        requestClass: "command",
+        policy: { timeoutMs: 15_000, retry: 0, signal: controller.signal },
+      });
+
+      controller.abort(new DOMException("Cancelled", "AbortError"));
+      await expect(request).rejects.toMatchObject({ name: "AbortError" });
+      expect(requestSignal?.aborted).toBe(true);
+
+      const timedOut = client.request({
+        path: "/api/v2/profile/avatar",
+        method: "POST",
+        body: new Blob(["avatar"], { type: "image/png" }),
+        bodyMode: "raw",
+        requestClass: "command",
+        policy: { timeoutMs: 15_000, retry: 0 },
+      });
+      const timeoutAssertion = expect(timedOut).rejects.toMatchObject({ code: "TIMEOUT" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await timeoutAssertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

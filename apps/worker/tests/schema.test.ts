@@ -7,6 +7,7 @@ const searchMigrationPath = resolve(import.meta.dirname, "../migrations/0002_sea
 const attachmentMigrationPath = resolve(import.meta.dirname, "../migrations/0003_private_attachments_ocr.sql");
 const consistencyMigrationPath = resolve(import.meta.dirname, "../migrations/0004_attachment_consistency.sql");
 const operationsMigrationPath = resolve(import.meta.dirname, "../migrations/0009_task9_operations.sql");
+const profileMigrationPath = resolve(import.meta.dirname, "../migrations/0010_profile_account_center.sql");
 
 describe("Beta D1 schema", () => {
   it("creates all public Beta domain tables", () => {
@@ -70,5 +71,23 @@ describe("Beta D1 schema", () => {
     expect(sql).toMatch(/workspace_id TEXT NOT NULL REFERENCES workspaces/i);
     expect(sql).toMatch(/UNIQUE \(workspace_id, idempotency_key\)/i);
     expect(sql).toMatch(/kind TEXT NOT NULL CHECK \(kind IN \('index', 'import', 'export', 'email'\)\)/i);
+  });
+
+  it("adds profile and session fields without rewriting the published schema", () => {
+    expect(existsSync(profileMigrationPath)).toBe(true);
+    const sql = readFileSync(profileMigrationPath, "utf8");
+
+    for (const column of [
+      "biography TEXT NOT NULL DEFAULT ''",
+      "locale TEXT NOT NULL DEFAULT 'zh-CN'",
+      "timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'",
+      "avatar_key TEXT",
+      "deletion_requested_at TEXT",
+      "user_agent TEXT NOT NULL DEFAULT ''",
+    ]) {
+      expect(sql).toContain(column);
+    }
+    expect(sql).toMatch(/CREATE TABLE email_change_requests/i);
+    expect(sql).toMatch(/CREATE TABLE account_audit_logs/i);
   });
 });

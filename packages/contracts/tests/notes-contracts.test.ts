@@ -25,6 +25,22 @@ const note = {
 };
 
 describe("note contracts", () => {
+  it("accepts only a calendar date when opening a daily note", async () => {
+    const contracts = await loadContracts();
+    expect(contracts.DailyNoteInputSchema).toBeDefined();
+    const schema = contracts.DailyNoteInputSchema as { safeParse(value: unknown): { success: boolean } };
+
+    expect(schema.safeParse({ daily_date: "2026-08-23" }).success).toBe(true);
+    expect(schema.safeParse({ daily_date: "2024-02-29" }).success).toBe(true);
+    expect(schema.safeParse({ daily_date: "2026-8-23" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2026-02-31" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2025-02-29" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2026-00-10" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2026-13-10" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2026-01-00" }).success).toBe(false);
+    expect(schema.safeParse({ daily_date: "2026-08-23", title: "ignored" }).success).toBe(false);
+  });
+
   it("validates tenant-scoped notes and immutable revision snapshots", async () => {
     const contracts = await loadContracts();
     expect(contracts.NoteSchema).toBeDefined();
@@ -58,6 +74,17 @@ describe("note contracts", () => {
     expect(schema.safeParse({ base_revision: 2, content: "x".repeat(200_001) }).success).toBe(false);
   });
 
+  it("requires a positive integer revision for permanent note deletion", async () => {
+    const contracts = await loadContracts();
+    expect(contracts.DeleteNoteInputSchema).toBeDefined();
+    const schema = contracts.DeleteNoteInputSchema as { safeParse(value: unknown): { success: boolean } };
+
+    expect(schema.safeParse({ base_revision: 2 }).success).toBe(true);
+    expect(schema.safeParse({}).success).toBe(false);
+    expect(schema.safeParse({ base_revision: 0 }).success).toBe(false);
+    expect(schema.safeParse({ base_revision: 1.5 }).success).toBe(false);
+  });
+
   it("bounds create, restore, and quick-capture payloads", async () => {
     const contracts = await loadContracts();
     expect(contracts.CreateNoteInputSchema).toBeDefined();
@@ -73,5 +100,24 @@ describe("note contracts", () => {
     expect(restore.safeParse({ base_revision: 0 }).success).toBe(false);
     expect(capture.safeParse({ content: "A quick thought" }).success).toBe(true);
     expect(capture.safeParse({ content: "" }).success).toBe(false);
+  });
+
+  it("validates Web Clipper targets and rejects unsafe source URLs", async () => {
+    const contracts = await loadContracts();
+    expect(contracts.ClipperInputSchema).toBeDefined();
+    const schema = contracts.ClipperInputSchema as { safeParse(value: unknown): { success: boolean } };
+
+    expect(schema.safeParse({
+      title: "Article",
+      url: "https://example.com/article",
+      content: "Captured body",
+      target: "inbox",
+    }).success).toBe(true);
+    expect(schema.safeParse({ content: "Captured body", target: "daily" }).success).toBe(true);
+    expect(schema.safeParse({ content: "Captured body", target: "database", database_id: "db-1" }).success).toBe(true);
+    expect(schema.safeParse({ content: "Captured body", target: "database" }).success).toBe(false);
+    expect(schema.safeParse({ content: "Captured body", target: "archive" }).success).toBe(false);
+    expect(schema.safeParse({ content: "Captured body", url: "javascript:alert(1)" }).success).toBe(false);
+    expect(schema.safeParse({ content: "Captured body", url: "data:text/html,unsafe" }).success).toBe(false);
   });
 });

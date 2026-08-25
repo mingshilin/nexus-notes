@@ -24,6 +24,13 @@ describe("mobile layout state", () => {
     expect(state.visible).toBe(false);
     state = reduce(state, { type: "text-focus", focused: false });
     expect(state.visible).toBe(true);
+    state = reduce(state, { type: "text-focus", focused: true });
+    state = reduce(state, { type: "viewport-scale", scale: 2 });
+    expect(state.visible).toBe(true);
+    expect((state as { zoomed: boolean }).zoomed).toBe(true);
+    state = reduce(state, { type: "viewport-scale", scale: 1 });
+    expect(state.visible).toBe(false);
+    expect((state as { zoomed: boolean }).zoomed).toBe(false);
   });
 
   it("calculates keyboard-safe visual viewport inset", async () => {
@@ -37,5 +44,6 @@ describe("mobile layout state", () => {
     expect(calculateKeyboardInset(844, { height: 844, offsetTop: 0 })).toBe(0);
     expect(calculateKeyboardInset(844, { height: 524, offsetTop: 0 })).toBe(320);
     expect(calculateKeyboardInset(844, { height: 524, offsetTop: 20 })).toBe(300);
+    expect(calculateKeyboardInset(844, { height: 422, offsetTop: 0, scale: 2 })).toBe(0);
   });
 });

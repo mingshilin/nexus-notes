@@ -12,9 +12,11 @@ async function loadWeb() {
 interface WorkbenchProps {
   mode: "desktop" | "tablet" | "mobile";
   navigation: ReactNode;
+  mobileNavigation?: ReactNode;
   contextualList: ReactNode;
   inspector: ReactNode;
   inspectorOpen: boolean;
+  externalModalOpen?: boolean;
   activePane?: "context" | "canvas";
   onInspectorClose: () => void;
   children: ReactNode;
@@ -128,5 +130,107 @@ describe("adaptive workbench", () => {
     expect(screen.queryByRole("dialog", { name: "检查器" })).not.toBeInTheDocument();
     expect(container.querySelector(".workbench-canvas")).not.toHaveAttribute("aria-hidden");
     expect(container.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);
+  });
+
+  it("applies the existing modal boundary for a parent-owned external modal", async () => {
+    const web = await loadWeb();
+    const AdaptiveWorkbench = web.AdaptiveWorkbench as ComponentType<WorkbenchProps>;
+    const { container } = render(createElement(
+      AdaptiveWorkbench,
+      {
+        mode: "desktop",
+        navigation: "Navigation",
+        contextualList: "Notes",
+        inspector: "Inspector",
+        inspectorOpen: false,
+        externalModalOpen: true,
+        onInspectorClose: vi.fn(),
+      },
+      "Editor",
+    ));
+
+    expect(container.querySelector('nav[aria-label="主导航"]')).toHaveAttribute("aria-hidden", "true");
+    expect(container.querySelector('nav[aria-label="主导航"]')).toHaveAttribute("inert");
+    expect(container.querySelector(".workbench-context")).toHaveAttribute("inert");
+    expect(container.querySelector(".workbench-canvas")).toHaveAttribute("inert");
+    expect(container.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(0);
+    expect(document.body.style.overflow).toBe("hidden");
+  });
+
+  it("keeps one page scroll owner on the tablet canvas", async () => {
+    const web = await loadWeb();
+    const AdaptiveWorkbench = web.AdaptiveWorkbench as ComponentType<WorkbenchProps>;
+    const { container } = render(createElement(
+      AdaptiveWorkbench,
+      {
+        mode: "tablet",
+        navigation: "Navigation",
+        contextualList: "Notes",
+        inspector: "Inspector",
+        inspectorOpen: false,
+        onInspectorClose: vi.fn(),
+      },
+      "Editor",
+    ));
+    const pageScrollArea = container.querySelector<HTMLElement>(".page-scroll-area");
+    expect(pageScrollArea).toHaveStyle({ overflowY: "auto" });
+    expect(container.querySelectorAll('[data-scroll-owner="page"]')).toHaveLength(1);
+  });
+
+  it("suppresses mobile fixed chrome while a modal is open and restores the opener focus", async () => {
+    const web = await loadWeb();
+    const AdaptiveWorkbench = web.AdaptiveWorkbench as ComponentType<WorkbenchProps>;
+    const close = vi.fn();
+    const { rerender } = render(createElement(AdaptiveWorkbench, {
+      mode: "mobile",
+      navigation: "Navigation",
+      mobileNavigation: createElement("button", { type: "button" }, "账户"),
+      inspector: "Inspector",
+      inspectorOpen: false,
+      onInspectorClose: close,
+      onInspectorOpen: () => undefined,
+    }, createElement("div", null, "Editor")));
+    rerender(createElement(AdaptiveWorkbench, {
+      mode: "mobile",
+      navigation: "Navigation",
+      mobileNavigation: createElement("button", { type: "button" }, "账户"),
+      inspector: "Inspector",
+      inspectorOpen: true,
+      onInspectorClose: close,
+    }, createElement("div", null, "Editor")));
+    const mobileNav = document.querySelector<HTMLElement>('.mobile-bottom-nav[aria-label="移动端主导航"]');
+    expect(mobileNav).toHaveAttribute("aria-hidden", "true");
+    expect(mobileNav).toHaveAttribute("inert");
+    fireEvent.click(screen.getByRole("button", { name: "关闭检查器" }));
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("contains Tab and Shift+Tab inside the inspector while the background is inert", async () => {
+    const web = await loadWeb();
+    const AdaptiveWorkbench = web.AdaptiveWorkbench as ComponentType<WorkbenchProps>;
+    const close = vi.fn();
+    const { container } = render(createElement(AdaptiveWorkbench, {
+      mode: "desktop",
+      navigation: "Navigation",
+      contextualList: "Notes",
+      inspector: createElement("button", { type: "button" }, "检查器动作"),
+      inspectorOpen: true,
+      onInspectorClose: close,
+    }, "Editor"));
+
+    const dialog = screen.getByRole("dialog", { name: "检查器" });
+    const closeButton = screen.getByRole("button", { name: "关闭检查器" });
+    const action = screen.getByRole("button", { name: "检查器动作" });
+    expect(document.activeElement).toBe(closeButton);
+    expect(document.querySelector(".workbench-canvas")).toHaveAttribute("inert");
+    expect(container.querySelector('nav[aria-label="主导航"]')).toHaveAttribute("inert");
+
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(document.activeElement).toBe(action);
+    expect(dialog).toContainElement(document.activeElement);
+
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(closeButton);
+    expect(dialog).toContainElement(document.activeElement);
   });
 });

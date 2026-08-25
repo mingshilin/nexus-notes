@@ -63,17 +63,19 @@ describe("collaboration center", () => {
     }) };
     render(createElement(App, { authClient, apiClient, turnstileSiteKey: "test" }));
 
-    const [notificationButton, editorNotificationButton] = await screen.findAllByRole("button", { name: "通知，1 条未读" });
-    expect(notificationButton).toHaveTextContent("1");
-    fireEvent.click(editorNotificationButton!);
+    const editorNotificationButton = await screen.findByRole("button", { name: "通知，1 条未读" });
+    fireEvent.click(editorNotificationButton);
     expect(await screen.findByRole("dialog", { name: "通知中心" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "关闭通知中心" }));
     fireEvent.click(screen.getByRole("button", { name: "协作" }));
     expect(await screen.findByRole("heading", { name: "协作中心" })).toBeInTheDocument();
-    expect(screen.getByText("Lin")).toBeInTheDocument();
+    expect(await screen.findByText("Lin")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Public Beta 重写计划" })).not.toBeInTheDocument();
 
-    fireEvent.click(notificationButton);
+    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    const accountNotification = screen.getByRole("menuitem", { name: "通知，1 条未读" });
+    expect(accountNotification).toHaveTextContent("1");
+    fireEvent.click(accountNotification);
     expect(await screen.findByRole("dialog", { name: "通知中心" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("link", { name: "打开 mention" }));
     await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/notifications/notification-1/read", method: "POST", body: { base_revision: 1 } })));
@@ -141,7 +143,7 @@ describe("collaboration center", () => {
     await waitFor(() => expect(client.readAllNotifications).toHaveBeenCalledTimes(1));
   });
 
-  it("gives the editor and rail notification controls the same unread-count label", async () => {
+  it("gives the editor control and account-menu action the same unread-count label", async () => {
     const { App } = await import("../src/index") as Record<string, any>;
     const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "ming@example.com", displayName: "Ming" }, workspaces: [{ id: "ws-1", name: "Nexus", slug: "nexus", role: "owner", revision: 1 }], active_workspace_id: "ws-1" })) };
     const apiClient = { request: vi.fn(async ({ path }: { path: string }) => {
@@ -151,7 +153,9 @@ describe("collaboration center", () => {
     }) };
     render(createElement(App, { authClient, apiClient, turnstileSiteKey: "test" }));
 
-    expect(await screen.findAllByRole("button", { name: "通知，2 条未读" })).toHaveLength(2);
+    expect(await screen.findByRole("button", { name: "通知，2 条未读" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    expect(screen.getByRole("menuitem", { name: "通知，2 条未读" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "通知" })).not.toBeInTheDocument();
   });
 

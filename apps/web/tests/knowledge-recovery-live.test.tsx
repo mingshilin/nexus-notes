@@ -3,7 +3,11 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 
-const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "user@example.com" } })) };
+const authClient = { session: vi.fn(async () => ({
+  user: { id: "user-1", email: "user@example.com" },
+  workspaces: [{ id: "ws-1", name: "Personal", slug: "personal", role: "owner" as const, revision: 1 }],
+  active_workspace_id: "ws-1",
+})) };
 
 function attachment(id: string, next_cursor: string | null = null) {
   return { items: [{ id, filename: `${id}.pdf`, mime_type: "application/pdf", ocr_status: "failed" }], next_cursor };
@@ -103,6 +107,67 @@ describe("live knowledge recovery", () => {
     await act(async () => resolveRetry?.({ queued: ["attachment-1", "attachment-2"], ineligible: [], duplicate: [] }));
     await waitFor(() => expect(apiClient.request.mock.calls.filter(([request]) => request.path.startsWith("/api/v2/attachments?")).length).toBeGreaterThan(1));
     expect(apiClient.request.mock.calls.filter(([request]) => request.path.startsWith("/api/v2/knowledge/diagnostics?")).length).toBeGreaterThan(1);
+  });
+
+  it("classifies unfiled notes through the visible recovery action and refreshes diagnostics", async () => {
+    const note = {
+      id: "note-1", workspace_id: "ws-1", folder_id: null, database_id: null, created_by: "user-1", updated_by: "user-1",
+      title: "未整理笔记", content: "正文", status: "active", is_favorite: false, is_pinned: false, daily_date: null,
+      revision: 1, created_at: "2026-08-24T00:00:00.000Z", updated_at: "2026-08-24T00:00:00.000Z",
+    };
+    const folder = { id: "folder-1", workspace_id: "ws-1", name: "项目", position: 0, created_at: "2026-08-24T00:00:00.000Z", updated_at: "2026-08-24T00:00:00.000Z" };
+    const apiClient = { request: vi.fn((input: { path: string; method?: string; body?: Record<string, unknown> }) => {
+      if (input.path.startsWith("/api/v2/attachments")) return Promise.resolve({ items: [], next_cursor: null });
+      if (input.path.startsWith("/api/v2/knowledge/diagnostics")) return Promise.resolve({ items: [{ kind: "unfiled_note", entity_id: note.id, title: note.title, count: 1 }], next_cursor: null });
+      if (input.path.startsWith("/api/v2/folders")) return Promise.resolve({ items: [folder] });
+      if (input.path.startsWith("/api/v2/tags")) return Promise.resolve({ items: [] });
+      if (input.path.startsWith("/api/v2/notes?") && input.method === undefined) return Promise.resolve({ items: [note], next_cursor: null });
+      if (input.path === "/api/v2/notes/note-1" && input.method === undefined) return Promise.resolve({ note });
+      if (input.path === "/api/v2/notes/note-1" && input.method === "PATCH") return Promise.resolve({ note: { ...note, folder_id: "folder-1", revision: 2 } });
+      return Promise.resolve({ items: [], next_cursor: null });
+    }) };
+    render(<App authClient={authClient as any} apiClient={apiClient as any} workspaceId="ws-1" turnstileSiteKey="test" />);
+
+    fireEvent.change(await screen.findByRole("combobox", { name: "未整理笔记目标文件夹" }), { target: { value: "folder-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "批量归类未整理笔记" }));
+
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/note-1",
+      method: "PATCH",
+      body: expect.objectContaining({ base_revision: 1, folder_id: "folder-1" }),
+    })));
+  });
+
+  it("merges duplicate titles into the newest note and archives the preserved copies", async () => {
+    const primary = {
+      id: "note-primary", workspace_id: "ws-1", folder_id: null, database_id: null, created_by: "user-1", updated_by: "user-1",
+      title: "同一个标题", content: "主内容", status: "active", is_favorite: false, is_pinned: false, daily_date: null,
+      revision: 2, created_at: "2026-08-24T00:00:00.000Z", updated_at: "2026-08-24T00:00:02.000Z",
+    };
+    const duplicate = { ...primary, id: "note-duplicate", content: "重复内容", revision: 1, updated_at: "2026-08-24T00:00:01.000Z" };
+    const apiClient = { request: vi.fn((input: { path: string; method?: string; body?: Record<string, unknown> }) => {
+      if (input.path.startsWith("/api/v2/attachments")) return Promise.resolve({ items: [], next_cursor: null });
+      if (input.path.startsWith("/api/v2/knowledge/diagnostics")) return Promise.resolve({ items: [{ kind: "duplicate_title", entity_id: primary.id, title: primary.title, count: 2 }], next_cursor: null });
+      if (input.path.startsWith("/api/v2/folders") || input.path.startsWith("/api/v2/tags")) return Promise.resolve({ items: [] });
+      if (input.path.startsWith("/api/v2/notes?") && input.method === undefined) return Promise.resolve({ items: [primary, duplicate], next_cursor: null });
+      if (input.path === "/api/v2/notes/note-primary" && input.method === "PATCH") return Promise.resolve({ note: { ...primary, content: String(input.body?.content), revision: 3 } });
+      if (input.path === "/api/v2/notes/note-duplicate" && input.method === "PATCH") return Promise.resolve({ note: { ...duplicate, status: "archived", revision: 2 } });
+      return Promise.resolve({ items: [], next_cursor: null });
+    }) };
+    render(<App authClient={authClient as any} apiClient={apiClient as any} workspaceId="ws-1" turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "整理同名笔记" }));
+
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/note-primary",
+      method: "PATCH",
+      body: expect.objectContaining({ base_revision: 2, content: expect.stringContaining("重复内容") }),
+    })));
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/note-duplicate",
+      method: "PATCH",
+      body: expect.objectContaining({ base_revision: 1, status: "archived" }),
+    })));
   });
 
   it("keeps the inspector as the only accessible scroll surface at 390px", async () => {

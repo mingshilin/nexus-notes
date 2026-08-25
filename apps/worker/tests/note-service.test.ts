@@ -27,16 +27,79 @@ const serverNote = {
 function createRepository(overrides: Record<string, unknown> = {}) {
   return {
     createNote: vi.fn(async (input) => ({ ...serverNote, ...input, revision: 1 })),
+    openOrCreateDaily: vi.fn(async (input) => ({ ...serverNote, ...input, daily_date: input.dailyDate, revision: 1 })),
+    hasDatabase: vi.fn(async () => true),
     getNote: vi.fn(async () => serverNote),
     listNotes: vi.fn(async () => ({ items: [serverNote], nextCursor: null })),
     updateNote: vi.fn(async () => ({ note: { ...serverNote, revision: 4 }, current: null })),
     listRevisions: vi.fn(async () => []),
     restoreRevision: vi.fn(async () => ({ note: { ...serverNote, revision: 4 }, current: null, revisionFound: true })),
+    deletePermanently: vi.fn(async () => ({ deleted: true, state: "deleted" })),
     ...overrides,
   };
 }
 
 describe("NoteService", () => {
+  it("returns an existing repository Daily Note without using the normal create path", async () => {
+    const worker = await loadWorker();
+    const existing = { ...serverNote, daily_date: "2026-08-23", title: "Daily Note 2026-08-23" };
+    const repository = createRepository({
+      openOrCreateDaily: vi.fn(async () => existing),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository, { createId: () => "unused-create-id" });
+
+    await expect(service.openOrCreateDaily(
+      { workspaceId: "ws-1", userId: "user-1" },
+      { daily_date: "2026-08-23" },
+    )).resolves.toEqual(existing);
+    expect(repository.createNote).not.toHaveBeenCalled();
+    expect(repository.openOrCreateDaily).toHaveBeenCalledOnce();
+  });
+
+  it.each(["create", "update"] as const)("maps a Daily Note uniqueness failure during %s to a stable conflict", async (operation) => {
+    const worker = await loadWorker();
+    const repository = createRepository({
+      createNote: vi.fn(async () => { throw new Error("DAILY_NOTE_EXISTS: SQLITE_CONSTRAINT"); }),
+      updateNote: vi.fn(async () => { throw new Error("DAILY_NOTE_EXISTS: SQLITE_CONSTRAINT"); }),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository);
+    const context = { workspaceId: "ws-1", userId: "user-1" };
+
+    const result = operation === "create"
+      ? service.create(context, { title: "Daily", content: "", daily_date: "2026-08-23" })
+      : service.update(context, "note-1", { base_revision: 1, daily_date: "2026-08-23" });
+    await expect(result).rejects.toMatchObject({ code: "DAILY_NOTE_CONFLICT", status: 409, retryable: false });
+  });
+
+  it("maps a daily date to the repository operation without falling back to normal creation", async () => {
+    const worker = await loadWorker();
+    const repository = createRepository();
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository, {
+      createId: () => "daily-note",
+      clock: () => new Date("2026-08-23T00:00:00.000Z"),
+    });
+
+    await expect(service.openOrCreateDaily(
+      { workspaceId: "ws-1", userId: "user-1", requestId: "req-daily" },
+      { daily_date: "2026-08-23" },
+    )).resolves.toMatchObject({ daily_date: "2026-08-23", revision: 1 });
+
+    expect(repository.openOrCreateDaily).toHaveBeenCalledWith(expect.objectContaining({
+      id: "daily-note",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      dailyDate: "2026-08-23",
+      title: expect.stringContaining("2026-08-23"),
+      content: "",
+      source: "manual",
+      requestId: "req-daily",
+    }));
+    expect(repository.createNote).not.toHaveBeenCalled();
+  });
+
   it("creates tenant-scoped notes and derives readable quick-capture titles", async () => {
     const worker = await loadWorker();
     expect(worker.NoteService).toBeTypeOf("function");
@@ -69,6 +132,70 @@ describe("NoteService", () => {
       content: "  First useful line  \nMore context",
       source: "manual",
     }));
+  });
+
+  it("appends a clip to today's Daily Note with a revision-aware update", async () => {
+    const worker = await loadWorker();
+    const existing = { ...serverNote, id: "daily-1", daily_date: "2026-08-24", content: "Earlier entry", revision: 4 };
+    const repository = createRepository({
+      openOrCreateDaily: vi.fn(async () => existing),
+      updateNote: vi.fn(async (input) => ({ note: { ...existing, content: input.patch.content, revision: 5 }, current: null })),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository, {
+      createId: () => "clip-id",
+      clock: () => new Date("2026-08-24T12:00:00.000Z"),
+    });
+
+    await expect(service.clipperCapture(
+      { workspaceId: "ws-1", userId: "user-1", requestId: "req-clip" },
+      { title: "Article", url: "https://example.com/article", content: "Captured body", target: "daily" },
+    )).resolves.toMatchObject({ id: "daily-1", revision: 5, content: "Earlier entry\n\nSource: https://example.com/article\n\nCaptured body" });
+
+    expect(repository.openOrCreateDaily).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "ws-1",
+      dailyDate: "2026-08-24",
+      source: "import",
+    }));
+    expect(repository.updateNote).toHaveBeenCalledWith(expect.objectContaining({
+      noteId: "daily-1",
+      baseRevision: 4,
+      patch: { content: "Earlier entry\n\nSource: https://example.com/article\n\nCaptured body", source: "import" },
+    }));
+  });
+
+  it("does not drop a clip when an existing Daily Note has an empty body", async () => {
+    const worker = await loadWorker();
+    const existing = { ...serverNote, id: "daily-empty", daily_date: "2026-08-24", content: "", revision: 2 };
+    const repository = createRepository({
+      openOrCreateDaily: vi.fn(async () => existing),
+      updateNote: vi.fn(async (input) => ({ note: { ...existing, content: input.patch.content, revision: 3 }, current: null })),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository, { clock: () => new Date("2026-08-24T12:00:00.000Z") });
+
+    await expect(service.clipperCapture(
+      { workspaceId: "ws-1", userId: "user-1" },
+      { content: "Captured body", target: "daily" },
+    )).resolves.toMatchObject({ id: "daily-empty", content: "Captured body", revision: 3 });
+    expect(repository.updateNote).toHaveBeenCalledWith(expect.objectContaining({
+      noteId: "daily-empty",
+      baseRevision: 2,
+      patch: { content: "Captured body", source: "import" },
+    }));
+  });
+
+  it("rejects a database clip that is outside the current workspace", async () => {
+    const worker = await loadWorker();
+    const repository = createRepository({ hasDatabase: vi.fn(async () => false) });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository);
+
+    await expect(service.clipperCapture(
+      { workspaceId: "ws-1", userId: "user-1" },
+      { content: "Captured body", target: "database", database_id: "db-other" },
+    )).rejects.toMatchObject({ code: "DATABASE_NOT_FOUND", status: 404 });
+    expect(repository.createNote).not.toHaveBeenCalled();
   });
 
   it("returns both server and submitted revisions when an update conflicts", async () => {
@@ -163,5 +290,28 @@ describe("NoteService", () => {
     await expect(missingRevision.restore(context, "note-1", 99, {
       base_revision: 3,
     })).rejects.toMatchObject({ code: "NOTE_REVISION_NOT_FOUND", status: 404 });
+  });
+
+  it("classifies permanent deletion outcomes without exposing cross-workspace notes", async () => {
+    const worker = await loadWorker();
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const context = { workspaceId: "ws-1", userId: "user-1" };
+
+    for (const [state, expected] of [
+      ["not_found", { code: "NOTE_NOT_FOUND", status: 404 }],
+      ["not_trashed", { code: "NOTE_NOT_TRASHED", status: 409 }],
+      ["conflict", { code: "NOTE_CONFLICT", status: 409 }],
+    ] as const) {
+      const repository = createRepository({ deletePermanently: vi.fn(async () => ({ deleted: false, state })) });
+      const service = new Service(repository);
+      await expect(service.deletePermanently(context, "note-1", { base_revision: 2 })).rejects.toMatchObject(expected);
+    }
+
+    const repository = createRepository();
+    const service = new Service(repository, { clock: () => new Date("2026-08-21T00:00:00.000Z") });
+    await expect(service.deletePermanently(context, "note-1", { base_revision: 2 })).resolves.toEqual({ deleted: true });
+    expect(repository.deletePermanently).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "ws-1", userId: "user-1", noteId: "note-1", baseRevision: 2,
+    }));
   });
 });

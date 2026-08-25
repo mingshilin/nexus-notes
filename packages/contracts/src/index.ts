@@ -1,6 +1,8 @@
 export * from "./api";
+export * from "./ai";
 export * from "./auth";
 export * from "./collaboration";
+export * from "./calendar";
 export * from "./attachments";
 export * from "./databases";
 export * from "./jobs";
@@ -8,6 +10,7 @@ export * from "./operations";
 export * from "./knowledge";
 export * from "./notes";
 export * from "./pagination";
+export * from "./profile";
 export * from "./request-policy";
 export * from "./sync";
 export * from "./tenancy";

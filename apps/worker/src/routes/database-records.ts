@@ -80,6 +80,13 @@ export function registerDatabaseRecordRoutes<TEnv>(
     }),
   });
   registry.register({
+    method: "POST", path: "/api/v2/databases/:databaseId/import/csv/preview", auth: "workspace", body: CsvImportInputSchema,
+    bodyLimitBytes: CSV_IMPORT_JSON_BODY_LIMIT,
+    handler: async ({ env, workspace, params, body }) => ({
+      data: await createRepository(env).previewCsv(workspace!, params.databaseId!, body),
+    }),
+  });
+  registry.register({
     method: "POST", path: "/api/v2/databases/:databaseId/import/csv", auth: "workspace", body: CsvImportInputSchema,
     bodyLimitBytes: CSV_IMPORT_JSON_BODY_LIMIT,
     timeoutMs: 30_000,

@@ -1,5 +1,8 @@
 import type {
   CreateNoteInput,
+  ClipperInput,
+  DailyNoteInput,
+  DeleteNoteInput,
   Note,
   NoteRevision,
   QuickCaptureInput,
@@ -13,6 +16,22 @@ export interface NotesClientOptions {
   createId(): string;
 }
 
+export interface NoteCommandOptions {
+  idempotencyKey?: string;
+}
+
+export interface NoteListOptions {
+  cursor?: string;
+  limit?: number;
+  signal?: AbortSignal;
+  query?: string;
+  status?: Note["status"];
+  folderId?: string | null;
+  dailyDate?: string;
+  favorite?: boolean;
+  pinned?: boolean;
+}
+
 export class NotesClient {
   private readonly createId: () => string;
 
@@ -24,12 +43,28 @@ export class NotesClient {
     this.createId = options.createId ?? (() => crypto.randomUUID());
   }
 
-  list(options: { cursor?: string; limit?: number; signal?: AbortSignal } = {}) {
+  list(options: NoteListOptions = {}) {
     const limit = options.limit ?? 50;
     const params = new URLSearchParams();
+    const query = options.query?.trim();
+    if (query) params.set("q", query);
+    if (options.status) params.set("status", options.status);
+    if (options.folderId !== undefined) params.set("folder_id", options.folderId ?? "none");
+    if (options.dailyDate) params.set("daily_date", options.dailyDate);
+    if (options.favorite !== undefined) params.set("favorite", String(options.favorite));
+    if (options.pinned !== undefined) params.set("pinned", String(options.pinned));
     if (options.cursor) params.set("cursor", options.cursor);
     params.set("limit", String(limit));
     const cursorKey = options.cursor ?? "first";
+    const filterParts = [
+      options.status ?? "",
+      options.folderId === undefined ? "" : options.folderId ?? "none",
+      options.dailyDate ?? "",
+    ];
+    if (query) filterParts.push(query);
+    if (options.favorite !== undefined) filterParts.push(String(options.favorite));
+    if (options.pinned !== undefined) filterParts.push(String(options.pinned));
+    const filterKey = filterParts.join(":");
     return this.client.request<{ items: Note[]; next_cursor: string | null }>({
       path: `/api/v2/notes?${params.toString()}`,
       headers: this.headers(),
@@ -37,7 +72,7 @@ export class NotesClient {
       policy: {
         timeoutMs: 8_000,
         retry: 2,
-        dedupeKey: `notes:${this.workspaceId}:${cursorKey}:${limit}`,
+        dedupeKey: `notes:${this.workspaceId}:${cursorKey}:${limit}${filterKey === "::" ? "" : `:${filterKey}`}`,
         signal: options.signal,
       },
     });
@@ -57,16 +92,28 @@ export class NotesClient {
     }).then(({ note }) => note);
   }
 
-  create(input: CreateNoteInput) {
-    return this.noteCommand("/api/v2/notes", "POST", input);
+  create(input: CreateNoteInput, options: NoteCommandOptions = {}) {
+    return this.noteCommand<Note>("/api/v2/notes", "POST", input, options.idempotencyKey);
   }
 
-  update(noteId: string, input: UpdateNoteInput) {
-    return this.noteCommand(`/api/v2/notes/${encodeURIComponent(noteId)}`, "PATCH", input);
+  openOrCreateDaily(dailyDate: DailyNoteInput["daily_date"]) {
+    return this.noteCommand<Note>("/api/v2/notes/daily", "POST", { daily_date: dailyDate });
+  }
+
+  update(noteId: string, input: UpdateNoteInput, options: NoteCommandOptions = {}) {
+    return this.noteCommand<Note>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "PATCH", input, options.idempotencyKey);
+  }
+
+  deletePermanently(noteId: string, input: DeleteNoteInput) {
+    return this.noteCommand<{ deleted: true }>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "DELETE", input);
   }
 
   quickCapture(input: QuickCaptureInput) {
-    return this.noteCommand("/api/v2/capture", "POST", input);
+    return this.noteCommand<Note>("/api/v2/capture", "POST", input);
+  }
+
+  clipperCapture(input: ClipperInput, options: NoteCommandOptions = {}) {
+    return this.noteCommand<Note>("/api/v2/clipper/capture", "POST", input, options.idempotencyKey);
   }
 
   listRevisions(noteId: string, signal?: AbortSignal) {
@@ -84,15 +131,15 @@ export class NotesClient {
   }
 
   restore(noteId: string, revision: number, input: RestoreNoteInput) {
-    return this.noteCommand(
+    return this.noteCommand<Note>(
       `/api/v2/notes/${encodeURIComponent(noteId)}/revisions/${revision}/restore`,
       "POST",
       input,
     );
   }
 
-  private noteCommand(path: string, method: "POST" | "PATCH", body: unknown) {
-    return this.client.request<{ note: Note }>({
+  private noteCommand<T extends object>(path: string, method: "POST" | "PATCH" | "DELETE", body: unknown, idempotencyKey?: string) {
+    return this.client.request<{ note: T } | T>({
       path,
       method,
       body,
@@ -101,9 +148,9 @@ export class NotesClient {
       policy: {
         timeoutMs: 10_000,
         retry: 0,
-        idempotencyKey: this.createId(),
+        idempotencyKey: idempotencyKey ?? this.createId(),
       },
-    }).then(({ note }) => note);
+    }).then((result) => "note" in result ? result.note : result as T);
   }
 
   private headers() {

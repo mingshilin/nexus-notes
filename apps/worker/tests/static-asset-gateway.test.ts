@@ -28,5 +28,30 @@ describe("Beta static asset gateway", () => {
     expect(response.headers.get("x-frame-options")).toBe("DENY");
     expect(response.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
     expect(response.headers.get("permissions-policy")).toContain("camera=()");
+    expect(response.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+  });
+
+  it("caches versioned Vite assets immutably", async () => {
+    const assetFetch = vi.fn(async () => new Response("export default true", {
+      status: 200,
+      headers: {
+        "cache-control": "public, must-revalidate, max-age=0",
+        "content-type": "text/javascript; charset=utf-8",
+      },
+    }));
+    const worker = createBetaWorker({ logger: { log: vi.fn() } });
+    const response = await worker.fetch(new Request("https://beta.test/assets/index-AbC123.js"), {
+      DB: {} as D1Database,
+      ASSETS: { fetch: assetFetch } as unknown as Fetcher,
+      APP_BASE_URL: "https://beta.test",
+      RATE_LIMIT_SECRET: "r".repeat(32),
+      TURNSTILE_SECRET_KEY: "",
+      RESEND_API_KEY: "",
+      EMAIL_FROM: "preview@example.test",
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("export default true");
+    expect(response.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
   });
 });

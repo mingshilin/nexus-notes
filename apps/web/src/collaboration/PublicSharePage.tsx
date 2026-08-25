@@ -3,7 +3,7 @@ import { FileText, LockKeyhole } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import type { CollaborationClient } from "../data/collaboration-client";
-import { collaborationErrorMessage } from "./CollaborationCenter";
+import { collaborationErrorMessage } from "./collaboration-types";
 
 export function PublicSharePage({ client, token }: { client: CollaborationClient; token: string }) {
   const [content, setContent] = useState<PublicSharedContent | null>(null);

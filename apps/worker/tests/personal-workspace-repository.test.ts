@@ -192,4 +192,35 @@ describe("D1AuthRepository personal workspaces", () => {
     ).first<{ id: string; slug: string }>();
     expect(personal).toEqual({ id: "generated-1", slug: "personal-generated-1" });
   });
+
+  it("creates a team workspace with its owner membership and enforces the workspace quota", async () => {
+    await seedUser("user-1", true);
+    const now = "2026-08-21T00:00:00.000Z";
+    const auth = repository() as D1AuthRepository & {
+      createTeamWorkspace(input: { userId: string; name: string; now: string }): Promise<{
+        id: string;
+        name: string;
+        slug: string;
+        role: "owner";
+        revision: number;
+      }>;
+    };
+
+    await auth.ensurePersonalWorkspace("user-1", now);
+    await expect(auth.createTeamWorkspace({ userId: "user-1", name: "研究团队", now })).resolves.toEqual({
+      id: "generated-2",
+      name: "研究团队",
+      slug: "team-generated-2",
+      role: "owner",
+      revision: 1,
+    });
+    await expect(auth.createTeamWorkspace({ userId: "user-1", name: "第二团队", now })).rejects.toThrow(/workspace quota exceeded/i);
+
+    const state = await db.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM workspaces WHERE owner_user_id = 'user-1') AS workspace_count,
+         (SELECT COUNT(*) FROM workspace_members WHERE user_id = 'user-1') AS membership_count`,
+    ).first<{ workspace_count: number; membership_count: number }>();
+    expect(state).toEqual({ workspace_count: 2, membership_count: 2 });
+  });
 });

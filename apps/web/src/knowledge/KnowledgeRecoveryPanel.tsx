@@ -1,3 +1,6 @@
+import type { Folder, KnowledgeDiagnostic } from "@nexus/contracts";
+import { KnowledgeDiagnosticActions } from "./KnowledgeDiagnosticActions";
+
 export interface RecoveryAttachment {
   id: string;
   filename: string;
@@ -34,10 +37,18 @@ export function KnowledgeRecoveryPanel({
   diagnosticNextCursor,
   onRetry,
   onBatchRetry,
+  onUpload,
+  uploading = false,
+  uploadError,
   onRecover,
   onFiltersChange,
   onLoadMoreAttachments,
   onLoadMoreDiagnostics,
+  folders = [],
+  onClassifyUnfiled,
+  onMoveOrphansToInbox,
+  onIgnoreOrphans,
+  onMergeDuplicate,
 }: {
   attachments: RecoveryAttachment[];
   diagnostics: RecoveryDiagnostic[];
@@ -52,10 +63,18 @@ export function KnowledgeRecoveryPanel({
   diagnosticNextCursor?: string | null;
   onRetry(attachmentId: string): void;
   onBatchRetry(attachmentIds: string[]): void;
+  onUpload?(file: File): void;
+  uploading?: boolean;
+  uploadError?: string | null;
   onRecover(diagnostic: RecoveryDiagnostic): void;
   onFiltersChange(filters: RecoveryFilters): void;
   onLoadMoreAttachments(): void;
   onLoadMoreDiagnostics(): void;
+  folders?: Folder[];
+  onClassifyUnfiled?(folderId: string): void;
+  onMoveOrphansToInbox?(): void;
+  onIgnoreOrphans?(): void;
+  onMergeDuplicate?(diagnostic: KnowledgeDiagnostic): void;
 }) {
   const failed = attachments.filter((attachment) => attachment.ocr_status === "failed" || attachment.ocr_status === "dead_letter");
   const empty = attachments.length === 0 && diagnostics.length === 0;
@@ -65,9 +84,25 @@ export function KnowledgeRecoveryPanel({
     <section className="knowledge-recovery" aria-label="知识恢复">
       <div className="knowledge-recovery-heading">
         <div><small>KNOWLEDGE RECOVERY</small><h3>附件与诊断</h3></div>
-        {failed.length > 0 ? (
-          <button type="button" disabled={isRetryPending} onClick={() => onBatchRetry(failed.map((attachment) => attachment.id))}>重试全部失败 OCR</button>
-        ) : null}
+        <div className="knowledge-recovery-heading-actions">
+          {onUpload ? <label className="knowledge-upload-button">
+            上传附件
+            <input
+              type="file"
+              aria-label="上传附件"
+              accept="application/pdf,image/jpeg,image/png,image/webp,text/plain"
+              disabled={uploading}
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0];
+                event.currentTarget.value = "";
+                if (file) onUpload(file);
+              }}
+            />
+          </label> : null}
+          {failed.length > 0 ? (
+            <button type="button" disabled={isRetryPending || uploading} onClick={() => onBatchRetry(failed.map((attachment) => attachment.id))}>重试全部失败 OCR</button>
+          ) : null}
+        </div>
       </div>
       <div className="knowledge-recovery-filters">
         <label className="knowledge-filter">附件类型
@@ -84,9 +119,22 @@ export function KnowledgeRecoveryPanel({
         </label>
         {(filters.mimeType || filters.ocrStatus) ? <button type="button" className="knowledge-filter-reset" onClick={resetFilters}>清除过滤</button> : null}
       </div>
+      {onClassifyUnfiled && onMoveOrphansToInbox && onIgnoreOrphans && onMergeDuplicate ? (
+        <KnowledgeDiagnosticActions
+          diagnostics={diagnostics as KnowledgeDiagnostic[]}
+          folders={folders}
+          disabled={isRetryPending || uploading}
+          onClassifyUnfiled={onClassifyUnfiled}
+          onMoveOrphansToInbox={onMoveOrphansToInbox}
+          onIgnoreOrphans={onIgnoreOrphans}
+          onMergeDuplicate={onMergeDuplicate}
+        />
+      ) : null}
       {loading && empty ? <p className="knowledge-recovery-state" role="status">正在加载附件与诊断…</p> : null}
       {refreshing ? <p className="knowledge-recovery-state" role="status">正在刷新，保留最近可用数据…</p> : null}
       {attachmentError ? <p className="knowledge-recovery-error" role="alert">{attachmentError}</p> : null}
+      {uploadError ? <p className="knowledge-recovery-error" role="alert">{uploadError}</p> : null}
+      {uploading ? <p className="knowledge-recovery-state" role="status">正在上传附件…</p> : null}
       {diagnosticError ? <p className="knowledge-recovery-error" role="alert">{diagnosticError}</p> : null}
       {retryFeedback ? <p className="knowledge-recovery-feedback" aria-live="polite">{retryFeedback}</p> : null}
       {!loading && empty && !attachmentError && !diagnosticError ? <p className="knowledge-recovery-state">暂无附件或待处理诊断。</p> : null}
