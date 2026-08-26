@@ -1,5 +1,5 @@
 import { normalizeEmail } from "@nexus/domain";
-import { CreateJobInputSchema, FeedbackInputSchema, type OperationsStatus } from "@nexus/contracts";
+import { CreateJobInputSchema, FeedbackInputSchema, type OperationsStatus, type WorkspaceContext } from "@nexus/contracts";
 import { AuthService } from "./auth/auth-service";
 import { SecureTokenService, WebCryptoPasswordHasher } from "./auth/crypto";
 import { D1AuthRepository } from "./auth/d1-auth-repository";
@@ -11,6 +11,7 @@ import { createRouteRegistry, type GatewayHookContext } from "./http/route-regis
 import { createSecureGateway } from "./http/security-gateway";
 import { D1NoteRepository } from "./notes/d1-note-repository";
 import { NoteService } from "./notes/note-service";
+import { D1AiToolRepository } from "./ai/ai-tool-repository";
 import { D1KnowledgeRepository } from "./knowledge/d1-knowledge-repository";
 import { D1GraphRepository } from "./knowledge/d1-graph-repository";
 import { D1ReminderRepository } from "./knowledge/d1-reminder-repository";
@@ -48,6 +49,11 @@ import { D1ProfileRepository } from "./profile/d1-profile-repository";
 import { ProfileAvatarStore } from "./profile/profile-avatar-store";
 import { ProfileService } from "./profile/profile-service";
 import { AiChatService } from "./ai/ai-chat-service";
+import { AiEmailOutboxRepository } from "./ai/ai-email-outbox-repository";
+import { AiEmailOutboxDispatcher } from "./ai/ai-email-outbox-dispatcher";
+import { AiEmailConsumer } from "./ai/ai-email-consumer";
+import { AiToolOrchestrator } from "./ai/ai-tool-orchestrator";
+import { AiToolError } from "./ai/ai-tool-model";
 import { registerAiRoutes } from "./routes/ai";
 import { registerAccountRoutes } from "./routes/account";
 import { D1AccountRepository } from "./account/d1-account-repository";
@@ -327,11 +333,92 @@ function createAiChatService(env: BetaWorkerEnv) {
       requirePersonal().testConfig(userId, input, signal, requestId),
     deleteConfig: (userId: string, input: Parameters<UserAiConfigService["deleteConfig"]>[1], requestId: string) =>
       requirePersonal().deleteConfig(userId, input, requestId),
-    async chat(input: Parameters<AiChatService["chat"]>[0], signal: AbortSignal, userId?: string) {
+    async chat(
+      input: Parameters<AiChatService["chat"]>[0],
+      signal: AbortSignal,
+      userId?: string,
+      options?: Parameters<AiChatService["chat"]>[2],
+    ) {
       const resolved = personal && userId ? await personal.resolve(userId) : null;
-      return new AiChatService(resolved ?? fallback).chat(input, signal);
+      return new AiChatService(resolved ?? fallback).chat(input, signal, options);
     },
   };
+}
+
+function createAiActionService(env: BetaWorkerEnv) {
+  const chat = createAiChatService(env);
+  const repository = new D1AiToolRepository(env.DB);
+  const noteService = createNoteService(env);
+  const knowledgeService = createKnowledgeService(env);
+  const collaborationRepository = createCollaborationRepository(env);
+  const emailOutboxRepository = new AiEmailOutboxRepository(env.DB);
+  const queue = env.JOBS ? {
+    send: (message: any) => env.JOBS!.send(message),
+  } : undefined;
+  const orchestrator = new AiToolOrchestrator({
+    repository,
+    clock: () => new Date(),
+    assertFreshPermission: async (context, proposal) => {
+      if (context.role === "viewer") {
+        throw new AiToolError("AI_ACTION_PERMISSION_DENIED", "Viewer permission is insufficient", 403);
+      }
+      if (proposal.tool === "send_email" && proposal.input.to_email.endsWith("@blocked.test")) {
+        throw new AiToolError("AI_ACTION_RECIPIENT_MISMATCH", "Email recipient changed before execution", 409);
+      }
+    },
+  });
+  return {
+    ...chat,
+    async chat(input: Parameters<AiChatService["chat"]>[0], signal: AbortSignal, userId?: string, workspace?: WorkspaceContext) {
+      return chat.chat(input, signal, userId, userId && workspace ? {
+        proposeActions: async (toolCalls) => orchestrator.proposeMany({
+          workspaceId: workspace.workspaceId,
+          userId,
+          role: workspace.role,
+          capabilities: workspace.capabilities,
+        }, toolCalls),
+      } : undefined);
+    },
+    async confirmAction(userId: string, workspace: WorkspaceContext, actionId: string, baseRevision: number, requestId: string) {
+      const actor = { workspaceId: workspace.workspaceId, userId, role: workspace.role, capabilities: workspace.capabilities };
+      try {
+        await orchestrator.confirm(actor, actionId, baseRevision);
+      } catch (error) {
+        if (error instanceof AiToolError && error.code === "AI_ACTION_CONFLICT") {
+          const current = await repository.getOwned(userId, workspace.workspaceId, actionId);
+          if (current?.status === "executed") return current;
+          if (current?.status !== "confirmed") throw error;
+        } else {
+          throw error;
+        }
+      }
+      return orchestrator.execute(actor, actionId, {
+        noteService,
+        knowledgeService,
+        collaborationRepository,
+        emailOutboxRepository,
+        queue,
+        requestId,
+      });
+    },
+    async rejectAction(userId: string, workspace: WorkspaceContext, actionId: string, baseRevision: number, requestId: string) {
+      const actor = { workspaceId: workspace.workspaceId, userId, role: workspace.role, capabilities: workspace.capabilities };
+      return orchestrator.reject(actor, actionId, baseRevision);
+    },
+  };
+}
+
+function createAiEmailConsumer(env: BetaWorkerEnv) {
+  return new AiEmailConsumer(
+    new AiEmailOutboxRepository(env.DB),
+    new ResendEmailSender(env.RESEND_API_KEY, env.EMAIL_FROM, env.APP_BASE_URL),
+  );
+}
+
+function createAiEmailOutboxDispatcher(env: BetaWorkerEnv) {
+  return env.JOBS
+    ? new AiEmailOutboxDispatcher(new AiEmailOutboxRepository(env.DB), env.JOBS)
+    : null;
 }
 
 function createOperationsConsumer(env: BetaWorkerEnv) {
@@ -426,7 +513,7 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
     },
   });
   registry.register(healthRoute);
-  registerAiRoutes(registry, createAiChatService);
+  registerAiRoutes(registry, createAiActionService);
   registerAuthRoutes(registry, (env) => createAuthService(env, options.logger));
   registerProfileRoutes(registry, (env) => createProfileService(env, options.logger));
   registerAccountRoutes(registry, (env) => new D1AccountRepository(env.DB));
@@ -498,6 +585,7 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
       const consumer = new QueueConsumerRouter(
         new OcrConsumer(new D1AttachmentRepository(env.DB), createOcrExtractor(env)),
         createOperationsConsumer(env),
+        createAiEmailConsumer(env),
         createReminderDeliveryConsumer(env),
       );
       await Promise.all(batch.messages.map(async (message) => {
@@ -507,6 +595,9 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
         const kind = body && typeof body === "object" && !Array.isArray(body) && "kind" in body && typeof body.kind === "string"
           ? body.kind
           : "unknown";
+        const payload = body && typeof body === "object" && !Array.isArray(body) && "payload" in body && body.payload && typeof body.payload === "object" && !Array.isArray(body.payload)
+          ? body.payload as Record<string, unknown>
+          : null;
         try {
           const result = await consumer.consume(message);
           if (result.outcome === "retry") {
@@ -518,7 +609,13 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
           throw error;
         } finally {
           await observability.recordQueue({
-            queue: kind === "ocr" ? "ocr" : kind === "notification" || kind === "email" ? "reminders" : "operations",
+            queue: kind === "ocr"
+              ? "ocr"
+              : kind === "notification" && typeof payload?.outbox_id === "string"
+                ? "email"
+                : kind === "notification" || kind === "email"
+                  ? "reminders"
+                  : "operations",
             kind,
             outcome,
             attempt: message.attempts,
@@ -533,6 +630,7 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
       if (env.JOBS) {
         await new OcrOutboxDispatcher(repository, env.JOBS).dispatch();
         await new OperationsOutboxDispatcher(new D1OperationsRepository(env.DB), env.JOBS).dispatch();
+        await createAiEmailOutboxDispatcher(env)?.dispatch();
         const reminders = new D1ReminderDeliveryRepository(env.DB);
         const now = new Date().toISOString();
         await reminders.prepareDue(now, 100);

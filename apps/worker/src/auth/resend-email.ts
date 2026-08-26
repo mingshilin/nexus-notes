@@ -41,7 +41,11 @@ export class ResendEmailSender {
     });
   }
 
-  private async send(message: { to: string; subject: string; text: string }) {
+  async send(message: { to: string; subject: string; text: string }) {
+    return this.sendMessage(message);
+  }
+
+  private async sendMessage(message: { to: string; subject: string; text: string }) {
     if (!this.apiKey) throw new Error("RESEND_API_KEY is not configured");
     let response: Response;
     try {
@@ -51,7 +55,7 @@ export class ResendEmailSender {
           authorization: `Bearer ${this.apiKey}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ from: this.from, ...message }),
+        body: JSON.stringify({ ...message, from: this.from }),
       });
     } catch {
       this.emitDiagnostic({ outcome: "failure", failure: "network_error" });

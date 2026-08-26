@@ -1,4 +1,11 @@
-import { AiChatResponseSchema, type AiChatInput, type AiChatResponse } from "@nexus/contracts";
+import {
+  AiChatResponseSchema,
+  AiToolNameSchema,
+  type AiActionProposal,
+  type AiChatInput,
+  type AiChatResponse,
+} from "@nexus/contracts";
+import { AiToolError } from "./ai-tool-model";
 
 export interface AiChatServiceOptions {
   apiUrl?: string;
@@ -7,6 +14,10 @@ export interface AiChatServiceOptions {
   fetchImpl?: typeof fetch;
   maxResponseBytes?: number;
   timeoutMs?: number;
+}
+
+export interface AiChatToolProposalOptions {
+  proposeActions?(toolCalls: Array<{ name: string; arguments: unknown }>): Promise<AiActionProposal[]>;
 }
 
 export class AiChatServiceError extends Error {
@@ -50,6 +61,116 @@ function providerMessage(payload: unknown) {
   return null;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function toolParameters(properties: Record<string, unknown>, required: string[] = []) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties,
+    required,
+  };
+}
+
+const PROVIDER_TOOL_DEFINITIONS = [
+  {
+    type: "function",
+    function: {
+      name: "create_note",
+      description: "Propose creating a note.",
+      parameters: toolParameters({
+        title: { type: "string" },
+        content: { type: "string" },
+        folder_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+        daily_date: { anyOf: [{ type: "string" }, { type: "null" }] },
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_reminder",
+      description: "Propose creating a reminder.",
+      parameters: toolParameters({
+        note_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+        title: { type: "string" },
+        remind_at: { type: "string" },
+        timezone: { type: "string" },
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_notification",
+      description: "Propose creating a notification.",
+      parameters: toolParameters({
+        title: { type: "string" },
+        body_text: { type: "string" },
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "send_email",
+      description: "Propose sending an email.",
+      parameters: toolParameters({
+        to_email: { type: "string" },
+        subject: { type: "string" },
+        body_text: { type: "string" },
+      }),
+    },
+  },
+] as const;
+
+function providerToolCalls(payload: unknown): Array<{ name: string; arguments: unknown }> | null {
+  if (!payload || typeof payload !== "object") return null;
+  const choice = (payload as { choices?: unknown[] }).choices?.[0];
+  if (!choice || typeof choice !== "object") return null;
+  const message = (choice as { message?: { tool_calls?: unknown } }).message;
+  const rawToolCalls = message && typeof message === "object" && "tool_calls" in message
+    ? (message as { tool_calls?: unknown }).tool_calls
+    : (choice as { tool_calls?: unknown }).tool_calls;
+  if (rawToolCalls == null) return [];
+  if (!Array.isArray(rawToolCalls)) return null;
+
+  const toolCalls: Array<{ name: string; arguments: unknown }> = [];
+  for (const rawCall of rawToolCalls) {
+    if (!isPlainObject(rawCall)) return null;
+    const toolType = rawCall.type;
+    const functionCall = rawCall.function;
+    if (toolType !== "function" || !isPlainObject(functionCall)) return null;
+    const name = functionCall.name;
+    if (typeof name !== "string" || !AiToolNameSchema.safeParse(name).success) return null;
+    const rawArguments = functionCall.arguments;
+    if (typeof rawArguments === "string") {
+      try {
+        toolCalls.push({ name, arguments: rawArguments.trim() ? JSON.parse(rawArguments) : {} });
+        continue;
+      } catch {
+        return null;
+      }
+    }
+    if (isPlainObject(rawArguments)) {
+      toolCalls.push({ name, arguments: rawArguments });
+      continue;
+    }
+    if (rawArguments === undefined || rawArguments === null) {
+      toolCalls.push({ name, arguments: {} });
+      continue;
+    }
+    return null;
+  }
+  return toolCalls;
+}
+
+function toolFallbackMessage(count: number) {
+  return count === 1 ? "已生成 1 个待确认操作。" : `已生成 ${count} 个待确认操作。`;
+}
+
 export class AiChatService {
   private readonly fetchImpl: typeof fetch;
   private readonly maxResponseBytes: number;
@@ -68,7 +189,7 @@ export class AiChatService {
     return { configured: Boolean(apiUrl && apiKey && model && model.length <= 128) };
   }
 
-  async chat(input: AiChatInput, signal: AbortSignal): Promise<AiChatResponse> {
+  async chat(input: AiChatInput, signal: AbortSignal, options: AiChatToolProposalOptions = {}): Promise<AiChatResponse> {
     const apiUrl = configuredUrl(this.options.apiUrl);
     const apiKey = this.options.apiKey?.trim();
     const model = this.options.model?.trim();
@@ -95,7 +216,13 @@ export class AiChatService {
           authorization: `Bearer ${apiKey}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ model, messages: input.messages, stream: false }),
+        body: JSON.stringify({
+          model,
+          messages: input.messages,
+          stream: false,
+          tools: PROVIDER_TOOL_DEFINITIONS,
+          tool_choice: "auto",
+        }),
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -115,11 +242,38 @@ export class AiChatService {
       } catch {
         throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned invalid JSON", 502, false);
       }
-      const message = providerMessage(payload);
+      const toolCalls = providerToolCalls(payload);
+      if (toolCalls === null) {
+        throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned invalid tool calls", 502, false);
+      }
+
+      let proposals: AiActionProposal[] = [];
+      if (toolCalls.length > 0) {
+        if (!options.proposeActions) {
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned tool calls without a proposal handler", 502, false);
+        }
+        try {
+          proposals = await options.proposeActions(toolCalls);
+        } catch (error) {
+          if (error instanceof AiToolError) {
+            throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned an invalid tool call", 502, false);
+          }
+          throw error;
+        }
+        if (!Array.isArray(proposals) || proposals.length !== toolCalls.length) {
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned an invalid tool call", 502, false);
+        }
+      }
+
+      const message = providerMessage(payload) ?? (toolCalls.length > 0 ? toolFallbackMessage(toolCalls.length) : null);
       if (!message || message.length > 8_000) {
         throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned no usable message", 502, false);
       }
-      const result = AiChatResponseSchema.safeParse({ message, model });
+      const result = AiChatResponseSchema.safeParse({
+        message,
+        model,
+        ...(proposals.length ? { action_proposals: proposals } : {}),
+      });
       if (!result.success) {
         throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider response failed validation", 502, false);
       }

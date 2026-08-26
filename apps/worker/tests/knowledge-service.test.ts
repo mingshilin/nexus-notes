@@ -100,6 +100,31 @@ describe("KnowledgeService", () => {
     })).rejects.toMatchObject({ code: "REMINDER_NOTE_NOT_FOUND", status: 404 });
   });
 
+  it("maps an idempotent reminder replay mismatch to a stable conflict without details", async () => {
+    const worker = await loadWorker();
+    const repository = {
+      createReminder: vi.fn(async () => { throw new Error("REMINDER_IDEMPOTENCY_CONFLICT"); }),
+    };
+    const Service = worker.KnowledgeService as new (...args: any[]) => any;
+    const service = new Service(repository, { clock: () => new Date("2026-08-21T00:00:00.000Z") });
+    const promise = service.createReminder(
+      { workspaceId: "ws-1", userId: "user-1", targetId: "reminder-action-1" },
+      { note_id: "note-1", title: "Follow up", remind_at: "2026-08-22T00:00:00.000Z", timezone: "Asia/Shanghai" },
+    );
+
+    await expect(promise).rejects.toMatchObject({
+      code: "REMINDER_IDEMPOTENCY_CONFLICT",
+      status: 409,
+      retryable: false,
+    });
+    const error = await promise.catch((value) => value as { details?: unknown });
+    expect(error.details).toBeUndefined();
+    expect(repository.createReminder).toHaveBeenCalledWith(expect.objectContaining({
+      id: "reminder-action-1",
+      idempotencyKey: "reminder-action-1",
+    }));
+  });
+
   it("scopes calendar feed reads to the workspace and requested date range", async () => {
     const worker = await loadWorker();
     const repository = {

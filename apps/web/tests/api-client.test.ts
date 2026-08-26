@@ -35,10 +35,11 @@ describe("ApiClient", () => {
       request<T>(options: Record<string, unknown>): Promise<T>;
     };
     const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    const sharedSignal = new AbortController().signal;
     const request = {
       path: "/api/v2/notes",
       requestClass: "query",
-      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "notes:ws-1" },
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "notes:ws-1", signal: sharedSignal },
     };
 
     const first = client.request(request);
@@ -48,6 +49,78 @@ describe("ApiClient", () => {
     await expect(first).resolves.toEqual({ items: [] });
     await expect(second).resolves.toEqual({ items: [] });
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("does not share active queries across different abort signals", async () => {
+    const web = await loadWeb();
+    const pending: Array<{ resolve(response: Response): void }> = [];
+    const fetchImpl = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((resolve, reject) => {
+      pending.push({ resolve });
+      (init.signal as AbortSignal).addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const first = client.request<{ items: string[] }>({
+      path: "/api/v2/databases",
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "databases", signal: firstController.signal },
+    });
+    const firstRejected = first.then(
+      () => { throw new Error("Expected the first query to reject after abort"); },
+      (error) => error,
+    );
+    const second = client.request<{ items: string[] }>({
+      path: "/api/v2/databases",
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "databases", signal: secondController.signal },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    firstController.abort();
+    pending[1]!.resolve(success({ items: ["fresh"] }));
+
+    await expect(second).resolves.toEqual({ items: ["fresh"] });
+    await expect(firstRejected).resolves.toMatchObject({ name: "AbortError" });
+  });
+
+  it("scopes active query dedupe by workspace headers", async () => {
+    const web = await loadWeb();
+    const pending: Array<{ resolve(response: Response): void; signal: AbortSignal }> = [];
+    const fetchImpl = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const signal = init.signal as AbortSignal;
+      pending.push({ resolve, signal });
+      signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    const firstController = new AbortController();
+    const first = client.request<{ items: string[] }>({
+      path: "/api/v2/databases",
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "databases", signal: firstController.signal },
+    }).catch((error) => error);
+    const second = client.request<{ items: string[] }>({
+      path: "/api/v2/databases",
+      headers: { "x-workspace-id": "ws-2" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "databases" },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    firstController.abort();
+    pending[1]!.resolve(success({ items: ["ws-2"] }));
+
+    await expect(second).resolves.toEqual({ items: ["ws-2"] });
+    await expect(first).resolves.toMatchObject({ name: "AbortError" });
   });
 
   it("starts a fresh controlled fetch when an active query signal was aborted", async () => {

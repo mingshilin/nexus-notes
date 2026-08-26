@@ -62,6 +62,7 @@ export interface DatabaseBootstrap {
 interface DatabaseCacheEntry<T> {
   value: T;
   expiresAt: number;
+  refreshPromise?: Promise<void>;
 }
 
 const DATABASE_CACHE_TTL_MS = 2 * 60_000;
@@ -70,6 +71,7 @@ export class DatabaseClient {
   private readonly createId: () => string;
   private readonly now: () => number;
   private readonly cache = new Map<string, DatabaseCacheEntry<unknown>>();
+  private cacheGeneration = 0;
 
   constructor(
     private readonly client: Pick<ApiClient, "request">,
@@ -84,7 +86,7 @@ export class DatabaseClient {
     return this.cached("databases", async () => {
       const { items } = await this.query<{ items: Database[] }>("/api/v2/databases", `databases:${this.workspaceId}`, signal);
       return items;
-    });
+    }, signal);
   }
 
   getDatabase(databaseId: string, signal?: AbortSignal) {
@@ -92,7 +94,7 @@ export class DatabaseClient {
         `/api/v2/databases/${encodeURIComponent(databaseId)}`,
         `database:${this.workspaceId}:${databaseId}`,
         signal,
-      ));
+      ), signal);
   }
 
   getStats(databaseId: string, signal?: AbortSignal) {
@@ -100,7 +102,7 @@ export class DatabaseClient {
       `${this.databasePath(databaseId)}/stats`,
       `database-stats:${this.workspaceId}:${databaseId}`,
       signal,
-    ));
+    ), signal);
   }
 
   bootstrap(options: { databaseId?: string; limit?: number; signal?: AbortSignal } = {}) {
@@ -108,16 +110,19 @@ export class DatabaseClient {
     if (options.databaseId) params.set("database_id", options.databaseId);
     params.set("limit", String(options.limit ?? 50));
     const key = `bootstrap:${options.databaseId ?? "first"}:${options.limit ?? 50}`;
+    const generation = this.cacheGeneration;
     return this.cached(key, async () => {
       const value = await this.query<DatabaseBootstrap>(
         `/api/v2/databases/bootstrap?${params}`,
         `database-bootstrap:${this.workspaceId}:${key}`,
         options.signal,
       );
-      this.writeCache("databases", value.items);
-      if (value.bundle) this.writeCache(`database:${value.bundle.database.id}`, value.bundle);
+      if (generation === this.cacheGeneration && !options.signal?.aborted) {
+        this.writeCache("databases", value.items);
+        if (value.bundle) this.writeCache(`database:${value.bundle.database.id}`, value.bundle);
+      }
       return value;
-    });
+    }, options.signal, generation);
   }
 
   createDatabase(input: CreateDatabaseInput) {
@@ -344,16 +349,34 @@ export class DatabaseClient {
       path, method, body, headers: this.headers(), requestClass: "command",
       policy: { timeoutMs: 30_000, retry: 0, idempotencyKey: this.createId() },
     }).then((value) => {
+      this.cacheGeneration += 1;
       this.cache.clear();
       return value;
     });
   }
 
-  private cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+  private cached<T>(key: string, load: () => Promise<T>, signal?: AbortSignal, generation = this.cacheGeneration): Promise<T> {
     const current = this.cache.get(key) as DatabaseCacheEntry<T> | undefined;
     if (current && current.expiresAt > this.now()) return Promise.resolve(current.value);
+    if (current) {
+      if (!current.refreshPromise) {
+        const refreshPromise = load().then((value) => {
+          const active = this.cache.get(key) as DatabaseCacheEntry<T> | undefined;
+          if (active === current && generation === this.cacheGeneration && !signal?.aborted) {
+            current.value = value;
+            current.expiresAt = this.now() + DATABASE_CACHE_TTL_MS;
+          }
+        }).catch(() => undefined).finally(() => {
+          if ((this.cache.get(key) as DatabaseCacheEntry<T> | undefined) === current) {
+            current.refreshPromise = undefined;
+          }
+        });
+        current.refreshPromise = refreshPromise;
+      }
+      return Promise.resolve(current.value);
+    }
     return load().then((value) => {
-      this.writeCache(key, value);
+      if (generation === this.cacheGeneration && !signal?.aborted) this.writeCache(key, value);
       return value;
     });
   }

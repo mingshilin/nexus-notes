@@ -1,12 +1,35 @@
-import { fireEvent, render, renderHook, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+const lazyDomainModules = vi.hoisted(() => {
+  let resolveReminders!: (value: { ReminderPanel: () => JSX.Element }) => void;
+  return {
+    reminderPromise: new Promise<{ ReminderPanel: () => JSX.Element }>((resolve) => { resolveReminders = resolve; }),
+    resolveReminders: (value: { ReminderPanel: () => JSX.Element }) => resolveReminders(value),
+    preloadWorkspaceDomain: vi.fn(() => new Promise<never>(() => undefined)),
+  };
+});
+
+vi.mock("../src/app/workspace-domain-loader", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/app/workspace-domain-loader")>();
+  return {
+    ...actual,
+    loadReminderPanel: vi.fn(() => lazyDomainModules.reminderPromise),
+    preloadWorkspaceDomain: lazyDomainModules.preloadWorkspaceDomain,
+  };
+});
+
+import { App } from "../src/app/App";
 import { useWorkspaceClients } from "../src/app/use-workspace-clients";
 import { createDomainPreloader } from "../src/app/workspace-domain-loader";
 import { WorkspaceShell } from "../src/app/WorkspaceShell";
 import { ProductNavigation } from "../src/navigation/ProductNavigation";
 
 const user = { id: "u1", email: "u@example.test", displayName: "用户" };
+
+afterEach(() => {
+  lazyDomainModules.preloadWorkspaceDomain.mockClear();
+});
 
 describe("workspace performance foundation", () => {
   it("keeps clients stable for a workspace and rotates them without tenant leakage", async () => {
@@ -98,5 +121,34 @@ describe("workspace performance foundation", () => {
       <section aria-label="数据库页面">数据库内容</section>
     </WorkspaceShell>);
     expect(screen.getByRole("region", { name: "数据库页面" })).toBeVisible();
+  });
+
+  it("commits navigation shell before a deferred lazy import resolves", async () => {
+    const authClient = {
+      session: vi.fn(async () => ({
+        user,
+        workspaces: [{ id: "ws-1", name: "Personal", slug: "personal", role: "owner" as const, revision: 1 }],
+        active_workspace_id: "ws-1",
+      })),
+    };
+    const apiClient = {
+      request: vi.fn(async (request: { path: string }) => {
+        if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
+        return { items: [], next_cursor: null };
+      }),
+    };
+
+    render(<App authClient={authClient as never} apiClient={apiClient as never} turnstileSiteKey="test" />);
+    expect(lazyDomainModules.preloadWorkspaceDomain).not.toHaveBeenCalled();
+
+    await screen.findByRole("heading", { name: "Public Beta 重写计划" });
+    fireEvent.click(screen.getByRole("button", { name: "提醒" }));
+
+    expect(document.querySelector('[data-domain="reminders"]')).toBeInTheDocument();
+    expect(screen.getByText("正在加载提醒中心…")).toBeVisible();
+    expect(lazyDomainModules.preloadWorkspaceDomain).toHaveBeenCalledWith("reminders");
+
+    lazyDomainModules.resolveReminders({ ReminderPanel: () => <section aria-label="提醒中心">提醒内容</section> });
+    await waitFor(() => expect(screen.getByRole("region", { name: "提醒中心" })).toBeVisible());
   });
 });
