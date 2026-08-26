@@ -13,6 +13,8 @@ describe("AI chat proxy", () => {
       { method: "PUT", path: "/api/v2/ai/config", auth: "session" },
       { method: "POST", path: "/api/v2/ai/config/test", auth: "session" },
       { method: "DELETE", path: "/api/v2/ai/config", auth: "session" },
+      { method: "POST", path: "/api/v2/ai/actions/:actionId/confirm", auth: "workspace" },
+      { method: "POST", path: "/api/v2/ai/actions/:actionId/reject", auth: "workspace" },
       { method: "POST", path: "/api/v2/ai/chat", auth: "workspace" },
     ]);
     expect(definitions[0]).toEqual(expect.objectContaining({ minimumRole: "viewer" }));
@@ -35,12 +37,23 @@ describe("AI chat proxy", () => {
   it("sends the configured model and secret only from the Worker", async () => {
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       expect(init?.headers).toEqual(expect.objectContaining({ authorization: "Bearer server-only-key" }));
-      expect(JSON.parse(String(init?.body))).toEqual({
+      const body = JSON.parse(String(init?.body));
+      expect(body).toMatchObject({
         model: "beta-model",
         messages: [{ role: "user", content: "整理我的任务" }],
         stream: false,
+        tool_choice: "auto",
       });
-      return Response.json({ choices: [{ message: { content: "先列出三个最重要的任务。" } }] });
+      expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
+        "create_note",
+        "create_reminder",
+        "create_notification",
+        "send_email",
+      ]);
+      expect(JSON.stringify(body)).not.toContain("server-only-key");
+      return Response.json({
+        choices: [{ message: { content: "先列出三个最重要的任务。" } }],
+      });
     });
     const service = new AiChatService({
       apiUrl: "https://ai.example.test/v1/chat/completions",

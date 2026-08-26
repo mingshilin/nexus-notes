@@ -25,6 +25,7 @@ import type {
 export interface KnowledgeActorContext {
   workspaceId: string;
   userId: string;
+  targetId?: string;
 }
 
 export interface KnowledgeRepository {
@@ -58,6 +59,7 @@ export interface KnowledgeRepository {
     now: string,
   ): Promise<{ items: Reminder[]; nextCursor: string | null }>;
   createReminder(input: {
+    id?: string;
     workspaceId: string;
     userId: string;
     input: CreateReminderInput;
@@ -204,12 +206,21 @@ export class KnowledgeService {
   }
 
   async createReminder(context: KnowledgeActorContext, input: CreateReminderInput) {
-    const reminder = await this.repository.createReminder({
-      workspaceId: context.workspaceId,
-      userId: context.userId,
-      input,
-      now: this.clock().toISOString(),
-    });
+    let reminder: Reminder | null;
+    try {
+      reminder = await this.repository.createReminder({
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+        ...(context.targetId ? { id: context.targetId, idempotencyKey: context.targetId } : {}),
+        input,
+        now: this.clock().toISOString(),
+      });
+    } catch (error) {
+      if (error instanceof Error && /REMINDER_IDEMPOTENCY_CONFLICT/iu.test(error.message)) {
+        throw new KnowledgeServiceError("REMINDER_IDEMPOTENCY_CONFLICT", "Reminder creation request conflicts with an existing request", 409);
+      }
+      throw error;
+    }
     if (!reminder) {
       throw new KnowledgeServiceError("REMINDER_NOTE_NOT_FOUND", "Reminder note not found", 404);
     }

@@ -73,6 +73,31 @@ describe("NoteService", () => {
     await expect(result).rejects.toMatchObject({ code: "DAILY_NOTE_CONFLICT", status: 409, retryable: false });
   });
 
+  it("maps an idempotent note replay mismatch to a stable conflict without details", async () => {
+    const worker = await loadWorker();
+    const repository = createRepository({
+      createNote: vi.fn(async () => { throw new Error("NOTE_IDEMPOTENCY_CONFLICT"); }),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository);
+    const promise = service.create(
+      { workspaceId: "ws-1", userId: "user-1", targetId: "note-action-1" },
+      { title: "Draft", content: "Body" },
+    );
+
+    await expect(promise).rejects.toMatchObject({
+      code: "NOTE_IDEMPOTENCY_CONFLICT",
+      status: 409,
+      retryable: false,
+    });
+    const error = await promise.catch((value) => value as { details?: unknown });
+    expect(error.details).toBeUndefined();
+    expect(repository.createNote).toHaveBeenCalledWith(expect.objectContaining({
+      id: "note-action-1",
+      idempotencyKey: "note-action-1",
+    }));
+  });
+
   it("maps a daily date to the repository operation without falling back to normal creation", async () => {
     const worker = await loadWorker();
     const repository = createRepository();

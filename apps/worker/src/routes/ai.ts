@@ -1,4 +1,6 @@
 import {
+  AiActionConfirmSchema,
+  AiActionRejectSchema,
   AiChatInputSchema,
   DeleteAiUserConfigInputSchema,
   TestAiUserConfigInputSchema,
@@ -9,6 +11,7 @@ import {
   type DeleteAiUserConfigInput,
   type TestAiUserConfigInput,
   type UpsertAiUserConfigInput,
+  type WorkspaceContext,
 } from "@nexus/contracts";
 import type { RouteDefinition } from "../http/route-registry";
 
@@ -17,12 +20,26 @@ interface AiRegistry<TEnv> {
 }
 
 export interface AiChatRouteService {
-  chat(input: AiChatInput, signal: AbortSignal, userId?: string): Promise<AiChatResponse>;
+  chat(input: AiChatInput, signal: AbortSignal, userId?: string, workspace?: WorkspaceContext): Promise<AiChatResponse>;
   status?(userId?: string): AiStatus | { configured: boolean } | Promise<AiStatus | { configured: boolean }>;
   getConfig?(userId: string): Promise<AiStatus>;
   saveConfig?(userId: string, input: UpsertAiUserConfigInput, requestId: string): Promise<AiStatus>;
   testConfig?(userId: string, input: TestAiUserConfigInput, signal: AbortSignal, requestId: string): Promise<unknown>;
   deleteConfig?(userId: string, input: DeleteAiUserConfigInput, requestId: string): Promise<{ deleted: true }>;
+  confirmAction?(
+    userId: string,
+    workspace: WorkspaceContext,
+    actionId: string,
+    baseRevision: number,
+    requestId: string,
+  ): Promise<unknown>;
+  rejectAction?(
+    userId: string,
+    workspace: WorkspaceContext,
+    actionId: string,
+    baseRevision: number,
+    requestId: string,
+  ): Promise<{ rejected: true }>;
 }
 
 class AiConfigurationRouteError extends Error {
@@ -75,6 +92,54 @@ export function registerAiRoutes<TEnv>(registry: AiRegistry<TEnv>, createService
   });
   registry.register({
     method: "POST",
+    path: "/api/v2/ai/actions/:actionId/confirm",
+    auth: "workspace",
+    rateLimit: { bucket: "ip", limit: 30, windowSeconds: 60 },
+    body: AiActionConfirmSchema,
+    handler: async ({ env, principal, workspace, params, body, requestId }) => {
+      const service = createService(env);
+      const confirmAction = service.confirmAction;
+      if (!confirmAction) throw new AiConfigurationRouteError("AI action confirmation is unavailable");
+      if (params.actionId !== body.action_id) {
+        throw Object.assign(new Error("AI action id does not match the route"), {
+          code: "AI_ACTION_MISMATCH",
+          status: 400,
+          retryable: false,
+        });
+      }
+      return {
+        data: {
+          action: await confirmAction(principal!.userId, workspace!, params.actionId!, body.base_revision, requestId),
+        },
+      };
+    },
+  });
+  registry.register({
+    method: "POST",
+    path: "/api/v2/ai/actions/:actionId/reject",
+    auth: "workspace",
+    rateLimit: { bucket: "ip", limit: 30, windowSeconds: 60 },
+    body: AiActionRejectSchema,
+    handler: async ({ env, principal, workspace, params, body, requestId }) => {
+      const service = createService(env);
+      const rejectAction = service.rejectAction;
+      if (!rejectAction) throw new AiConfigurationRouteError("AI action rejection is unavailable");
+      if (params.actionId !== body.action_id) {
+        throw Object.assign(new Error("AI action id does not match the route"), {
+          code: "AI_ACTION_MISMATCH",
+          status: 400,
+          retryable: false,
+        });
+      }
+      return {
+        data: {
+          action: await rejectAction(principal!.userId, workspace!, params.actionId!, body.base_revision, requestId),
+        },
+      };
+    },
+  });
+  registry.register({
+    method: "POST",
     path: "/api/v2/ai/chat",
     auth: "workspace",
     minimumRole: "viewer",
@@ -82,8 +147,8 @@ export function registerAiRoutes<TEnv>(registry: AiRegistry<TEnv>, createService
     bodyLimitBytes: 256 * 1024,
     timeoutMs: 35_000,
     body: AiChatInputSchema,
-    handler: async ({ env, body, signal, principal }) => ({
-      data: await createService(env).chat(body, signal, principal?.userId),
+    handler: async ({ env, body, signal, principal, workspace }) => ({
+      data: await createService(env).chat(body, signal, principal?.userId, workspace),
     }),
   });
 }

@@ -36,6 +36,18 @@ function toNote(row: NoteRow): Note {
   };
 }
 
+function isSameCreate(input: CreateNoteRecordInput, existing: Note) {
+  return existing.workspace_id === input.workspaceId
+    && existing.created_by === input.userId
+    && existing.title === input.title
+    && existing.content === input.content
+    && existing.folder_id === input.folderId
+    && existing.database_id === input.databaseId
+    && existing.daily_date === input.dailyDate
+    && existing.is_favorite === input.isFavorite
+    && existing.is_pinned === input.isPinned;
+}
+
 function firstResultRow(result: D1Result<NoteRow> | undefined) {
   return result?.results?.[0] ?? null;
 }
@@ -72,6 +84,13 @@ export class D1NoteRepository implements NoteRepository {
   ) {}
 
   async createNote(input: CreateNoteRecordInput) {
+    if (input.idempotencyKey) {
+      const existing = await this.getNote(input.workspaceId, input.id);
+      if (existing) {
+        if (isSameCreate(input, existing)) return existing;
+        throw new Error("NOTE_IDEMPOTENCY_CONFLICT");
+      }
+    }
     const note: Note = {
       id: input.id,
       workspace_id: input.workspaceId,
@@ -135,13 +154,21 @@ export class D1NoteRepository implements NoteRepository {
        ) VALUES (?, ?, 'note', ?, ?, ?, '', '', '', '', 1, ?)`,
     ).bind(`search:note:${note.id}`, note.workspace_id, note.id, note.title, note.content, note.updated_at);
 
-    await this.db.batch([
-      insertNote,
-      insertRevision,
-      insertSyncChange,
-      insertSearchDocument,
-      ...this.auditStatements(input, "note.created", note.id, 1, input.now),
-    ]);
+    try {
+      await this.db.batch([
+        insertNote,
+        insertRevision,
+        insertSyncChange,
+        insertSearchDocument,
+        ...this.auditStatements(input, "note.created", note.id, 1, input.now),
+      ]);
+    } catch (error) {
+      if (input.idempotencyKey) {
+        const replay = await this.getNote(input.workspaceId, input.id);
+        if (replay && isSameCreate(input, replay)) return replay;
+      }
+      throw error;
+    }
     await this.notifyPresence(input.workspaceId, note.id, note.revision);
     return note;
   }

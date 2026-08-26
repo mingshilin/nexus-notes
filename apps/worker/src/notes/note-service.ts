@@ -14,6 +14,8 @@ export interface NoteActorContext {
   workspaceId: string;
   userId: string;
   requestId?: string;
+  /** Internal retry key used by trusted job handlers; ordinary API calls omit it. */
+  targetId?: string;
 }
 
 export interface CreateNoteRecordInput {
@@ -30,6 +32,7 @@ export interface CreateNoteRecordInput {
   source: "manual" | "import";
   now: string;
   requestId?: string;
+  idempotencyKey?: string;
 }
 
 export interface NoteRepository {
@@ -136,6 +139,9 @@ function mapRepositoryError(error: unknown): never {
   if (error instanceof Error && /DAILY_NOTE_EXISTS/iu.test(error.message)) {
     throw new NoteServiceError("DAILY_NOTE_CONFLICT", "Daily note already exists", 409);
   }
+  if (error instanceof Error && /NOTE_IDEMPOTENCY_CONFLICT/iu.test(error.message)) {
+    throw new NoteServiceError("NOTE_IDEMPOTENCY_CONFLICT", "Note creation request conflicts with an existing request", 409);
+  }
   throw error;
 }
 
@@ -155,7 +161,7 @@ export class NoteService {
   async create(context: NoteActorContext, input: CreateNoteInput) {
     try {
       return await this.repository.createNote({
-        id: this.options.createId(),
+        id: context.targetId ?? this.options.createId(),
         workspaceId: context.workspaceId,
         userId: context.userId,
         title: input.title,
@@ -168,6 +174,7 @@ export class NoteService {
         source: "manual",
         now: this.options.clock().toISOString(),
         requestId: context.requestId,
+        ...(context.targetId ? { idempotencyKey: context.targetId } : {}),
       });
     } catch (error) {
       return mapRepositoryError(error);

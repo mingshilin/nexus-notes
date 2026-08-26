@@ -29,6 +29,20 @@ export interface ApiDownloadOptions {
   policy: RequestPolicy;
 }
 
+export interface ConfirmAiActionResult {
+  action: {
+    action_id: string;
+    revision?: number;
+    status?: string;
+  };
+}
+
+export interface RejectAiActionResult {
+  action: {
+    rejected: true;
+  };
+}
+
 export class ApiClientError extends Error {
   readonly code: string;
   readonly requestId?: string;
@@ -99,10 +113,14 @@ export class ApiClient {
   }
 
   request<T>(options: ApiRequestOptions): Promise<T> {
-    const dedupeKey = options.requestClass === "query" ? options.policy.dedupeKey : undefined;
+    const workspaceId = options.headers?.["x-workspace-id"] ?? "";
+    const dedupeKey = options.requestClass === "query" && options.policy.dedupeKey
+      ? `${workspaceId}:${options.policy.dedupeKey}`
+      : undefined;
     if (dedupeKey) {
       const active = this.activeQueries.get(dedupeKey);
-      if (active && !active.signal?.aborted) return active.promise as Promise<T>;
+      const sameSignal = active?.signal === options.policy.signal;
+      if (active && !active.signal?.aborted && sameSignal) return active.promise as Promise<T>;
       if (active) this.activeQueries.delete(dedupeKey);
     }
 
@@ -118,6 +136,28 @@ export class ApiClient {
 
   download(options: ApiDownloadOptions): Promise<Blob> {
     return this.executeDownload(options);
+  }
+
+  confirmAiAction(workspaceId: string, actionId: string, baseRevision: number) {
+    return this.request<ConfirmAiActionResult>({
+      path: `/api/v2/ai/actions/${encodeURIComponent(actionId)}/confirm`,
+      method: "POST",
+      headers: { "x-workspace-id": workspaceId },
+      body: { action_id: actionId, base_revision: baseRevision },
+      requestClass: "command",
+      policy: { timeoutMs: 12_000, retry: 0, idempotencyKey: crypto.randomUUID() },
+    });
+  }
+
+  rejectAiAction(workspaceId: string, actionId: string, baseRevision: number) {
+    return this.request<RejectAiActionResult>({
+      path: `/api/v2/ai/actions/${encodeURIComponent(actionId)}/reject`,
+      method: "POST",
+      headers: { "x-workspace-id": workspaceId },
+      body: { action_id: actionId, base_revision: baseRevision },
+      requestClass: "command",
+      policy: { timeoutMs: 12_000, retry: 0, idempotencyKey: crypto.randomUUID() },
+    });
   }
 
   private async execute<T>(options: ApiRequestOptions): Promise<T> {

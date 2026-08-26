@@ -1,20 +1,54 @@
-import type { AiChatMessage, AiChatResponse } from "@nexus/contracts";
+import type { AiActionProposal, AiChatMessage, AiChatResponse } from "@nexus/contracts";
 import { Bot, Send, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { ApiClient } from "../data/api-client";
 import { AIConfigPanel } from "./AIConfigPanel";
+import { AIActionCard, type AIActionCardStatus } from "./AIActionCard";
 
 const QUICK_PROMPTS = ["制定今日计划", "整理我的任务", "如何改进这篇笔记"] as const;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 interface AIChatPanelProps {
-  client: Pick<ApiClient, "request">;
+  client: Pick<ApiClient, "request" | "confirmAiAction" | "rejectAiAction">;
   workspaceId: string;
   showStatus?: boolean;
 }
 
+type TranscriptEntry =
+  | { id: string; kind: "message"; message: AiChatMessage }
+  | { id: string; kind: "proposal"; proposal: AiActionProposal };
+
+interface ActionState {
+  status: AIActionCardStatus;
+  baseRevision: number;
+  error?: string | null;
+}
+
+function isFinalActionStatus(status: AIActionCardStatus) {
+  return status === "confirmed" || status === "rejected" || status === "expired";
+}
+
+function isProposalExpired(proposal: AiActionProposal, now = Date.now()) {
+  return Date.parse(proposal.expires_at) <= now;
+}
+
+function expireActionStates(entries: TranscriptEntry[], current: Record<string, ActionState>, now = Date.now()) {
+  let changed = false;
+  const next = { ...current };
+  for (const entry of entries) {
+    if (entry.kind !== "proposal") continue;
+    const state = next[entry.proposal.action_id];
+    if (!state || isFinalActionStatus(state.status) || !isProposalExpired(entry.proposal, now)) continue;
+    next[entry.proposal.action_id] = { ...state, status: "expired", error: null };
+    changed = true;
+  }
+  return changed ? next : current;
+}
+
 function errorMessage(error: unknown) {
-  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
   if (code === "AI_NOT_CONFIGURED") return "AI 服务尚未配置，请管理员设置 AI_CHAT_API_URL、AI_CHAT_API_KEY 和 AI_CHAT_MODEL。";
+  if (code === "AI_ACTION_EXPIRED") return "AI 操作已过期，请重新生成。";
   if (code === "UNAUTHENTICATED" || code === "FORBIDDEN") return "当前工作区没有使用 AI 助手的权限，请重新登录或切换工作区。";
   return "AI 服务暂时不可用，请稍后重试。你的问题仍保留在输入框中。";
 }
@@ -23,8 +57,16 @@ function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+function normalizeActionError(error: unknown) {
+  const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+  if (code === "AI_ACTION_EXPIRED") return { status: "expired" as const, message: null };
+  if (code === "AI_ACTION_CONFLICT") return { status: "failed" as const, message: "AI 操作状态已变化，请刷新后重试。" };
+  return { status: "failed" as const, message: "AI 操作暂时失败，请重试。" };
+}
+
 export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatPanelProps) {
-  const [messages, setMessages] = useState<AiChatMessage[]>([]);
+  const [entries, setEntries] = useState<TranscriptEntry[]>([]);
+  const [actionStates, setActionStates] = useState<Record<string, ActionState>>({});
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,27 +103,82 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
     return () => controller.abort();
   }, [client, showStatus, workspaceId]);
 
+  useEffect(() => {
+    setActionStates((current) => expireActionStates(entries, current));
+
+    let nextExpiryAt = Number.POSITIVE_INFINITY;
+    const now = Date.now();
+    for (const entry of entries) {
+      if (entry.kind !== "proposal") continue;
+      const state = actionStates[entry.proposal.action_id];
+      if (!state || isFinalActionStatus(state.status)) continue;
+      const expiresAt = Date.parse(entry.proposal.expires_at);
+      if (Number.isNaN(expiresAt) || expiresAt <= now) continue;
+      nextExpiryAt = Math.min(nextExpiryAt, expiresAt);
+    }
+    if (!Number.isFinite(nextExpiryAt)) return undefined;
+
+    const delay = Math.max(0, nextExpiryAt - now) + 1;
+    if (delay > MAX_TIMER_DELAY_MS) return undefined;
+
+    const timer = window.setTimeout(() => {
+      setActionStates((current) => expireActionStates(entries, current, Date.now()));
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [actionStates, entries]);
+
   const fillQuickPrompt = (prompt: string) => {
     setDraft(prompt);
     inputRef.current?.focus();
   };
 
   const clearConversation = () => {
-    setMessages([]);
+    setEntries([]);
+    setActionStates({});
     setError(null);
+  };
+
+  const updateActionState = (actionId: string, next: Partial<ActionState> | null) => {
+    setActionStates((current) => {
+      if (!next) {
+        const clone = { ...current };
+        delete clone[actionId];
+        return clone;
+      }
+      return { ...current, [actionId]: { ...current[actionId], ...next } };
+    });
+  };
+
+  const setProposalState = (proposal: AiActionProposal, next?: Partial<ActionState>) => {
+    const baseRevision = 1;
+    setActionStates((current) => ({
+      ...current,
+      [proposal.action_id]: {
+        ...current[proposal.action_id],
+        status: isProposalExpired(proposal) ? "expired" : "proposed",
+        baseRevision,
+        error: null,
+        ...next,
+      },
+    }));
   };
 
   const send = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const content = draft.trim();
     if (!content || pending || !workspaceId) return;
-    const nextMessages: AiChatMessage[] = [...messages, { role: "user", content }];
-    const totalCharacters = nextMessages.reduce((total, message) => total + message.content.length, 0);
-    if (nextMessages.length > 20 || totalCharacters > 32_000) {
+    const previousEntries = entries;
+    const nextMessages: AiChatMessage[] = entries
+      .filter((entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message")
+      .map((entry) => entry.message);
+    const requestMessages = [...nextMessages, { role: "user", content }];
+    const totalCharacters = requestMessages.reduce((total, message) => total + message.content.length, 0);
+    if (requestMessages.length > 20 || totalCharacters > 32_000) {
       setError("本次对话最多保留 20 条消息、32,000 个字符，请先缩短内容。");
       return;
     }
-    setMessages(nextMessages);
+    const userEntry: TranscriptEntry = { id: crypto.randomUUID(), kind: "message", message: { role: "user", content } };
+    setEntries([...previousEntries, userEntry]);
     setDraft("");
     setError(null);
     setPending(true);
@@ -97,22 +194,27 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
         path: "/api/v2/ai/chat",
         method: "POST",
         headers: { "x-workspace-id": workspaceId },
-        body: { messages: nextMessages },
+        body: { messages: requestMessages },
         requestClass: "command",
         policy: { timeoutMs: 35_000, retry: 0, idempotencyKey: crypto.randomUUID(), signal: controller.signal },
       });
       if (!isCurrentRequest()) return;
-      setMessages([...nextMessages, { role: "assistant", content: response.message }]);
+      const assistantEntry: TranscriptEntry = { id: crypto.randomUUID(), kind: "message", message: { role: "assistant", content: response.message } };
+      const proposalEntries = (response.action_proposals ?? []).map((proposal) => {
+        setProposalState(proposal);
+        return { id: proposal.action_id, kind: "proposal" as const, proposal };
+      });
+      setEntries([...previousEntries, userEntry, assistantEntry, ...proposalEntries]);
     } catch (caught) {
       if (controller.signal.aborted || isAbortError(caught)) {
         if (isCurrentRequest()) {
-          setMessages(messages);
+          setEntries(previousEntries);
           setDraft(content);
         }
         return;
       }
       if (!isCurrentRequest()) return;
-      setMessages(messages);
+      setEntries(previousEntries);
       setError(errorMessage(caught));
       setDraft(content);
     } finally {
@@ -123,6 +225,44 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
     }
   };
 
+  const confirmProposal = async (proposal: AiActionProposal) => {
+    const state = actionStates[proposal.action_id];
+    if (!workspaceId || state?.status === "confirming" || state?.status === "rejecting" || state?.status === "confirmed" || state?.status === "rejected" || state?.status === "expired") return;
+    if (isProposalExpired(proposal)) {
+      updateActionState(proposal.action_id, { status: "expired", error: null });
+      return;
+    }
+    updateActionState(proposal.action_id, { status: "confirming", error: null });
+    try {
+      await client.confirmAiAction(workspaceId, proposal.action_id, state?.baseRevision ?? 1);
+      updateActionState(proposal.action_id, { status: "confirmed", error: null, baseRevision: (state?.baseRevision ?? 1) + 1 });
+    } catch (caught) {
+      const normalized = normalizeActionError(caught);
+      updateActionState(proposal.action_id, { ...normalized, error: normalized.message, baseRevision: state?.baseRevision ?? 1 });
+    }
+  };
+
+  const rejectProposal = async (proposal: AiActionProposal) => {
+    const state = actionStates[proposal.action_id];
+    if (!workspaceId || state?.status === "confirming" || state?.status === "rejecting" || state?.status === "confirmed" || state?.status === "rejected" || state?.status === "expired") return;
+    if (isProposalExpired(proposal)) {
+      updateActionState(proposal.action_id, { status: "expired", error: null });
+      return;
+    }
+    updateActionState(proposal.action_id, { status: "rejecting", error: null });
+    try {
+      await client.rejectAiAction(workspaceId, proposal.action_id, state?.baseRevision ?? 1);
+      updateActionState(proposal.action_id, { status: "rejected", error: null, baseRevision: (state?.baseRevision ?? 1) + 1 });
+    } catch (caught) {
+      const normalized = normalizeActionError(caught);
+      updateActionState(proposal.action_id, { ...normalized, error: normalized.message, baseRevision: state?.baseRevision ?? 1 });
+    }
+  };
+
+  const firstActionId = entries.find((entry) => entry.kind === "proposal" && (actionStates[entry.proposal.action_id]?.status === "proposed" || actionStates[entry.proposal.action_id]?.status === "failed"))?.kind === "proposal"
+    ? (entries.find((entry) => entry.kind === "proposal" && (actionStates[entry.proposal.action_id]?.status === "proposed" || actionStates[entry.proposal.action_id]?.status === "failed")) as Extract<TranscriptEntry, { kind: "proposal" }>).proposal.action_id
+    : null;
+
   return (
     <section className="product-domain-page ai-chat-page" aria-labelledby="ai-chat-title">
       <div className="ai-chat-heading">
@@ -131,7 +271,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
           <h1 id="ai-chat-title">AI 助手</h1>
           <p className="product-domain-lead">围绕你的问题展开对话。服务端密钥不会进入浏览器或笔记内容。</p>
         </div>
-        {messages.length > 0 ? <button type="button" onClick={clearConversation}>清空对话</button> : null}
+        {entries.length > 0 ? <button type="button" onClick={clearConversation}>清空对话</button> : null}
         <span className="ai-chat-mark" aria-hidden="true"><Bot size={22} /></span>
       </div>
       {configuration === "unconfigured" ? <p className="ai-chat-config-status" role="status">AI 尚未配置。你可以在下方添加自己的 OpenAI-compatible provider，API Key 不会以明文返回。</p> : null}
@@ -139,7 +279,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
       {showStatus ? <AIConfigPanel client={client} /> : null}
       {!workspaceId ? <p role="status">未选择工作区，无法使用 AI 助手。</p> : null}
       <div className="ai-chat-messages" aria-live="polite">
-        {messages.length === 0 ? (
+        {entries.length === 0 ? (
           <div className="ai-chat-empty">
             <Sparkles size={18} aria-hidden="true" />
             <div>
@@ -151,12 +291,28 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
               </div>
             </div>
           </div>
-        ) : messages.map((message, index) => (
-          <article className={`ai-chat-message ai-chat-message-${message.role}`} key={`${message.role}-${index}`}>
-            <small>{message.role === "user" ? "你" : "AI 助手"}</small>
-            <p>{message.content}</p>
-          </article>
-        ))}
+        ) : entries.map((entry) => {
+          if (entry.kind === "message") {
+            return (
+              <article className={`ai-chat-message ai-chat-message-${entry.message.role}`} key={entry.id}>
+                <small>{entry.message.role === "user" ? "你" : "AI 助手"}</small>
+                <p>{entry.message.content}</p>
+              </article>
+            );
+          }
+          const state = actionStates[entry.proposal.action_id] ?? { status: "proposed", baseRevision: 1, error: null };
+          return (
+            <AIActionCard
+              key={entry.id}
+              proposal={entry.proposal}
+              status={state.status}
+              error={state.error ?? null}
+              autoFocus={entry.proposal.action_id === firstActionId}
+              onConfirm={() => { void confirmProposal(entry.proposal); }}
+              onReject={() => { void rejectProposal(entry.proposal); }}
+            />
+          );
+        })}
         {pending ? <p className="ai-chat-pending" role="status">AI 正在思考…</p> : null}
       </div>
       {error ? <p className="database-operation-error" role="alert">{error}</p> : null}

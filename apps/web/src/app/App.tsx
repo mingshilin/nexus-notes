@@ -321,7 +321,7 @@ function AuthenticatedWorkspace({
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
   const [activeDomain, setActiveDomain] = useState<ProductDomain>("notes");
   const [requestedDomain, setRequestedDomain] = useState<ProductDomain>("notes");
-  const [domainPending, startDomainTransition] = useTransition();
+  const [domainPending] = useTransition();
   const [accountSubsection, setAccountSubsection] = useState<AccountSubsection>("overview");
   const workspaceClients = useWorkspaceClients(apiClient, workspaceId ?? "");
   const collaborationClient = workspaceClients.collaboration;
@@ -333,10 +333,8 @@ function AuthenticatedWorkspace({
   const transitionToDomain = useCallback((domain: ProductDomain) => {
     setRequestedDomain(domain);
     setActivePane("canvas");
-    // Commit navigation synchronously so the shell responds immediately. Keep the
-    // heavier lazy-domain work outside the urgent interaction update.
     setActiveDomain(domain);
-    startDomainTransition(() => { void preloadWorkspaceDomain(domain).catch(() => undefined); });
+    void preloadWorkspaceDomain(domain).catch(() => undefined);
   }, []);
   const [navigationUser, setNavigationUser] = useState(user);
   const [unreadCount, setUnreadCount] = useState(0);
