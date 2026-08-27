@@ -2,7 +2,7 @@
 
 ## Status
 
-- Implementation complete on `codex/ai-assistant-fluency`; commit and independent review are the remaining task gate.
+- Implementation complete on `codex/ai-assistant-fluency`; the cursor hardening follow-up and independent review are the remaining task gate.
 - The existing AI action boundary remains limited to the four implemented proposal tools. Read tools execute directly through tenant-bound services.
 - No production deployment, remote migration, secret configuration, or session change was performed.
 
@@ -17,13 +17,14 @@
 - Added bounded `search_notes`, `get_note`, `list_reminders`, `search_databases`, and `get_database_record` tools backed by Note, Knowledge, and Database services.
 - Enforced workspace and selected-entity scope, server-derived role/capability forwarding, cross-workspace checks, field-level redaction, result count/byte bounds, and safe dependency error mapping.
 - Added selected-note cursors bound to the normalized query and selected ID set; workspace cursors remain delegated to the note repository.
+- Made malformed reminder cursors fail closed before SQL execution and map to the stable AI cursor error.
 - Propagated an internal deadline/cancellation signal through every read dependency and bounded provider read loop to three rounds, five calls, and 64 KiB of cumulative results.
 - Validated provider tool calls, duplicate IDs, read result schemas, and the fixed read/action allowlists before proposal or execution.
 - Added source metadata (`source_type`, `source_id`, `workspace_id`, hit sources, and scope) without exposing internal actor fields.
 
 ## GREEN
 
-- Task-focused Worker tests: `27/27`.
+- Task-focused Worker tests: `37/37` in the latest affected-test run.
 - Contracts full suite: `55/55`.
 - Domain full suite: `31/31`.
 - Worker full suite: `82` files, `495/495`.
@@ -35,4 +36,4 @@
 
 ## Review
 
-Independent review is pending before Task 5 is marked complete and Task 6 begins.
+Independent review is pending after the cursor hardening follow-up; Task 5 is not marked complete and Task 6 has not begun.

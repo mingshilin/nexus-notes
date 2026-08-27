@@ -69,8 +69,17 @@ function encodeCursor(reminder: Reminder) {
 
 function decodeCursor(cursor: string | undefined) {
   if (!cursor) return null;
-  const [remindAt, id, ...rest] = decodeURIComponent(cursor).split("|");
-  return remindAt && id && rest.length === 0 ? { remindAt, id } : null;
+  try {
+    const [remindAt, id, ...rest] = decodeURIComponent(cursor).split("|");
+    if (remindAt && id && rest.length === 0) return { remindAt, id };
+  } catch {
+    // Convert malformed percent-encoding into the same stable cursor error.
+  }
+  const error = Object.assign(new Error("INVALID_REMINDER_CURSOR"), {
+    code: "INVALID_REMINDER_CURSOR",
+    status: 400,
+  });
+  throw error;
 }
 
 function escapeLike(value: string) {

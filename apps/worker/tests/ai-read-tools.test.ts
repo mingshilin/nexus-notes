@@ -3,6 +3,7 @@ import type { WorkspaceContext } from "@nexus/contracts";
 
 import { AiReadToolError, AiReadTools, type AiReadExecutionContext } from "../src/ai/ai-read-tools";
 import { D1DatabaseRepository } from "../src/databases/d1-database-repository";
+import { D1ReminderRepository } from "../src/knowledge/d1-reminder-repository";
 import { createTestD1, seedTenants } from "./helpers/d1";
 
 const disposals: Array<() => Promise<void>> = [];
@@ -258,6 +259,28 @@ describe("AI read tools", () => {
     const result = await tools.execute("list_reminders", { include_completed: true, limit: 500 }, context({ selectedNoteIds: [], selectedDatabaseIds: [] }), new AbortController().signal);
     expect(result.items[0]).toEqual(expect.objectContaining({ source_type: "reminder", source_id: "reminder-1", workspace_id: "ws-1", title: "Follow up" }));
     expect(result.items[0]).not.toHaveProperty("user_id");
+  });
+
+  it("maps malformed reminder cursors to a stable AI read error", async () => {
+    const test = await createTestD1();
+    disposals.push(test.dispose);
+    await seedTenants(test.db);
+    const reminders = new D1ReminderRepository(test.db);
+    const tools = createTools({
+      knowledge: {
+        listReminderPage: (actor: { workspaceId: string; userId: string }, query: Parameters<D1ReminderRepository["listReminderPage"]>[2], signal?: AbortSignal) => {
+          signal?.throwIfAborted();
+          return reminders.listReminderPage(actor.workspaceId, actor.userId, query, now);
+        },
+      },
+    });
+
+    await expect(tools.execute(
+      "list_reminders",
+      { cursor: "not-a-reminder-cursor" },
+      context({ selectedNoteIds: [], selectedDatabaseIds: [] }),
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400, retryable: false });
   });
 
   it("propagates the bounded cancellation signal to reminder reads", async () => {

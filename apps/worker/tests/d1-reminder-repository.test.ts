@@ -77,6 +77,21 @@ describe("D1ReminderRepository", () => {
     expect(statements[2]?.sql).toMatch(/FROM reminders[\s\S]*workspace_id = \?[\s\S]*user_id = \?/i);
   });
 
+  it("rejects malformed page cursors before querying the database", async () => {
+    const worker = await loadWorker();
+    const db = { prepare: vi.fn() };
+    const Repository = worker.D1ReminderRepository as new (db: unknown) => any;
+    const repository = new Repository(db);
+
+    await expect(repository.listReminderPage(
+      "ws-1",
+      "user-1",
+      { status: "pending", limit: 20, cursor: "not-a-reminder-cursor" },
+      "2026-08-21T00:00:00.000Z",
+    )).rejects.toThrow("INVALID_REMINDER_CURSOR");
+    expect(db.prepare).not.toHaveBeenCalled();
+  });
+
   it("updates reminders with a tenant/user/base-revision lock and syncs the result", async () => {
     const worker = await loadWorker();
     expect(worker.D1ReminderRepository).toBeTypeOf("function");
