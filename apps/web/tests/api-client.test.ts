@@ -51,6 +51,72 @@ describe("ApiClient", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
+  it("builds active query dedupe from workspace, path, normalized query, and normalized body", async () => {
+    const web = await loadWeb();
+    const pending: Array<{ resolve(response: Response): void }> = [];
+    const fetchImpl = vi.fn(() => new Promise<Response>((resolve) => { pending.push({ resolve }); }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+
+    const first = client.request<{ page: string }>({
+      path: "/api/v2/databases/db-1/records?view_id=view-1&cursor=cursor-1&limit=25",
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "records" },
+    });
+    const sameQueryDifferentOrder = client.request<{ page: string }>({
+      path: "/api/v2/databases/db-1/records?limit=25&cursor=cursor-1&view_id=view-1",
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "records" },
+    });
+    const differentPath = client.request<{ page: string }>({
+      path: "/api/v2/databases/db-2/records?view_id=view-1&cursor=cursor-1&limit=25",
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "records" },
+    });
+    const preview = client.request<{ preview: string }>({
+      path: "/api/v2/databases/db-1/import/csv/preview",
+      method: "POST",
+      body: { csv: "Name\r\nAlpha", header_property_ids: { Name: "name", Owner: "owner" } },
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "csv-preview" },
+    });
+    const samePreviewDifferentBodyOrder = client.request<{ preview: string }>({
+      path: "/api/v2/databases/db-1/import/csv/preview",
+      method: "POST",
+      body: { header_property_ids: { Owner: "owner", Name: "name" }, csv: "Name\r\nAlpha" },
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "csv-preview" },
+    });
+    const differentPreviewBody = client.request<{ preview: string }>({
+      path: "/api/v2/databases/db-1/import/csv/preview",
+      method: "POST",
+      body: { csv: "Name\r\nBeta", header_property_ids: { Name: "name", Owner: "owner" } },
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "csv-preview" },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    pending[0]!.resolve(success({ page: "db-1" }));
+    pending[1]!.resolve(success({ page: "db-2" }));
+    pending[2]!.resolve(success({ preview: "alpha" }));
+    pending[3]!.resolve(success({ preview: "beta" }));
+
+    await expect(first).resolves.toEqual({ page: "db-1" });
+    await expect(sameQueryDifferentOrder).resolves.toEqual({ page: "db-1" });
+    await expect(differentPath).resolves.toEqual({ page: "db-2" });
+    await expect(preview).resolves.toEqual({ preview: "alpha" });
+    await expect(samePreviewDifferentBodyOrder).resolves.toEqual({ preview: "alpha" });
+    await expect(differentPreviewBody).resolves.toEqual({ preview: "beta" });
+  });
+
   it("does not share active queries across different abort signals", async () => {
     const web = await loadWeb();
     const pending: Array<{ resolve(response: Response): void }> = [];

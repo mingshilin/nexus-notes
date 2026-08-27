@@ -98,12 +98,31 @@ async function readResponse<T>(response: Response): Promise<ApiResponse<T>> {
   }
 }
 
+function normalizeJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => item === undefined ? null : normalizeJsonValue(item));
+  }
+  if (!value || typeof value !== "object") return value;
+  if (value instanceof Date) return value.toJSON();
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, normalizeJsonValue(entry)]),
+  );
+}
+
+function stableJson(value: unknown) {
+  return JSON.stringify(normalizeJsonValue(value));
+}
+
 export class ApiClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly random: () => number;
-  private readonly activeQueries = new Map<string, { promise: Promise<unknown>; signal?: AbortSignal }>();
+  private readonly activeQueries = new Map<string, Array<{ promise: Promise<unknown>; signal?: AbortSignal }>>();
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = options.baseUrl?.replace(/\/$/, "") ?? "";
@@ -113,24 +132,28 @@ export class ApiClient {
   }
 
   request<T>(options: ApiRequestOptions): Promise<T> {
-    const workspaceId = options.headers?.["x-workspace-id"] ?? "";
-    const dedupeKey = options.requestClass === "query" && options.policy.dedupeKey
-      ? `${workspaceId}:${options.policy.dedupeKey}`
-      : undefined;
+    const dedupeKey = options.requestClass === "query" ? this.createActiveQueryKey(options) : undefined;
     if (dedupeKey) {
-      const active = this.activeQueries.get(dedupeKey);
-      const sameSignal = active?.signal === options.policy.signal;
-      if (active && !active.signal?.aborted && sameSignal) return active.promise as Promise<T>;
-      if (active) this.activeQueries.delete(dedupeKey);
+      const activeQueries = this.activeQueries.get(dedupeKey)?.filter((active) => !active.signal?.aborted) ?? [];
+      const active = activeQueries.find((query) => query.signal === options.policy.signal);
+      if (active) return active.promise as Promise<T>;
+      if (activeQueries.length > 0) this.activeQueries.set(dedupeKey, activeQueries);
+      else this.activeQueries.delete(dedupeKey);
     }
 
     const promise = this.execute<T>(options);
     if (!dedupeKey) return promise;
 
     const active = { promise, signal: options.policy.signal };
-    this.activeQueries.set(dedupeKey, active);
+    const activeQueries = this.activeQueries.get(dedupeKey) ?? [];
+    activeQueries.push(active);
+    this.activeQueries.set(dedupeKey, activeQueries);
     return promise.finally(() => {
-      if (this.activeQueries.get(dedupeKey) === active) this.activeQueries.delete(dedupeKey);
+      const activeQueries = this.activeQueries.get(dedupeKey);
+      if (!activeQueries) return;
+      const remaining = activeQueries.filter((query) => query !== active);
+      if (remaining.length > 0) this.activeQueries.set(dedupeKey, remaining);
+      else this.activeQueries.delete(dedupeKey);
     });
   }
 
@@ -158,6 +181,29 @@ export class ApiClient {
       requestClass: "command",
       policy: { timeoutMs: 12_000, retry: 0, idempotencyKey: crypto.randomUUID() },
     });
+  }
+
+  private createActiveQueryKey(options: ApiRequestOptions) {
+    const workspaceId = options.headers?.["x-workspace-id"] ?? "";
+    return [
+      workspaceId,
+      options.method ?? "GET",
+      this.normalizePath(options.path),
+      this.normalizeBody(options.body, options.bodyMode),
+    ].join("\n");
+  }
+
+  private normalizePath(path: string) {
+    const url = new URL(path, "https://nexus.local");
+    url.searchParams.sort();
+    const query = url.searchParams.toString();
+    return query ? `${url.pathname}?${query}` : url.pathname;
+  }
+
+  private normalizeBody(body: unknown, bodyMode: ApiRequestOptions["bodyMode"]) {
+    if (body === undefined) return "";
+    if (bodyMode === "raw") return "[raw-body]";
+    return stableJson(body);
   }
 
   private async execute<T>(options: ApiRequestOptions): Promise<T> {
