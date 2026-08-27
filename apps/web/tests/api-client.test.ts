@@ -117,6 +117,123 @@ describe("ApiClient", () => {
     await expect(differentPreviewBody).resolves.toEqual({ preview: "beta" });
   });
 
+  it("does not deduplicate raw query bodies that may contain different bytes", async () => {
+    const web = await loadWeb();
+    const pending: Array<{ resolve(response: Response): void }> = [];
+    const fetchImpl = vi.fn(() => new Promise<Response>((resolve) => { pending.push({ resolve }); }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    const signal = new AbortController().signal;
+
+    const first = client.request<{ uploaded: string }>({
+      path: "/api/v2/databases/db-1/import/csv/preview",
+      method: "POST",
+      body: new Blob(["Name\r\nAlpha"], { type: "text/csv" }),
+      bodyMode: "raw",
+      headers: { "x-workspace-id": "ws-1", "content-type": "text/csv" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "raw-preview", signal },
+    });
+    const second = client.request<{ uploaded: string }>({
+      path: "/api/v2/databases/db-1/import/csv/preview",
+      method: "POST",
+      body: new Blob(["Name\r\nBeta"], { type: "text/csv" }),
+      bodyMode: "raw",
+      headers: { "x-workspace-id": "ws-1", "content-type": "text/csv" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "raw-preview", signal },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    pending[0]!.resolve(success({ uploaded: "alpha" }));
+    pending[1]!.resolve(success({ uploaded: "beta" }));
+
+    await expect(first).resolves.toEqual({ uploaded: "alpha" });
+    await expect(second).resolves.toEqual({ uploaded: "beta" });
+  });
+
+  it("keeps cyclic JSON query body errors asynchronous by skipping active dedupe", async () => {
+    const web = await loadWeb();
+    const fetchImpl = vi.fn(async () => success({ ok: true }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    const body: Record<string, unknown> = { title: "Cycle" };
+    body.self = body;
+    let request: Promise<unknown> | undefined;
+
+    expect(() => {
+      request = client.request({
+        path: "/api/v2/databases/db-1/import/csv/preview",
+        method: "POST",
+        body,
+        headers: { "x-workspace-id": "ws-1" },
+        requestClass: "query",
+        policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "cyclic-preview" },
+      });
+    }).not.toThrow();
+
+    expect(request).toBeInstanceOf(Promise);
+    await expect(request).rejects.toMatchObject({ code: "NETWORK_ERROR" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("keeps stable JSON body dedupe for nested objects and isolates different abort signals", async () => {
+    const web = await loadWeb();
+    const pending: Array<{ resolve(response: Response): void }> = [];
+    const fetchImpl = vi.fn(() => new Promise<Response>((resolve) => { pending.push({ resolve }); }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    const sharedSignal = new AbortController().signal;
+    const otherSignal = new AbortController().signal;
+    const requestBody = {
+      filters: [{ config: { value: "open", operator: "eq" }, property_id: "status" }],
+      sorts: [{ direction: "asc", property_id: "name" }],
+    };
+    const sameBodyDifferentOrder = {
+      sorts: [{ property_id: "name", direction: "asc" }],
+      filters: [{ property_id: "status", config: { operator: "eq", value: "open" } }],
+    };
+
+    const first = client.request<{ rows: string[] }>({
+      path: "/api/v2/databases/db-1/records/query",
+      method: "POST",
+      body: requestBody,
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "records-query", signal: sharedSignal },
+    });
+    const sameSignal = client.request<{ rows: string[] }>({
+      path: "/api/v2/databases/db-1/records/query",
+      method: "POST",
+      body: sameBodyDifferentOrder,
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "records-query", signal: sharedSignal },
+    });
+    const differentSignal = client.request<{ rows: string[] }>({
+      path: "/api/v2/databases/db-1/records/query",
+      method: "POST",
+      body: sameBodyDifferentOrder,
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "records-query", signal: otherSignal },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    pending[0]!.resolve(success({ rows: ["shared"] }));
+    pending[1]!.resolve(success({ rows: ["isolated"] }));
+
+    await expect(first).resolves.toEqual({ rows: ["shared"] });
+    await expect(sameSignal).resolves.toEqual({ rows: ["shared"] });
+    await expect(differentSignal).resolves.toEqual({ rows: ["isolated"] });
+  });
+
   it("does not share active queries across different abort signals", async () => {
     const web = await loadWeb();
     const pending: Array<{ resolve(response: Response): void }> = [];

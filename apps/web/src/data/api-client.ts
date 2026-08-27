@@ -98,23 +98,40 @@ async function readResponse<T>(response: Response): Promise<ApiResponse<T>> {
   }
 }
 
-function normalizeJsonValue(value: unknown): unknown {
+function normalizeJsonValue(value: unknown, seen = new WeakSet<object>()): unknown {
   if (Array.isArray(value)) {
-    return value.map((item) => item === undefined ? null : normalizeJsonValue(item));
+    if (seen.has(value)) throw new TypeError("Cannot normalize cyclic JSON value");
+    seen.add(value);
+    const normalized = value.map((item) => item === undefined ? null : normalizeJsonValue(item, seen));
+    seen.delete(value);
+    return normalized;
   }
   if (!value || typeof value !== "object") return value;
   if (value instanceof Date) return value.toJSON();
+  if (seen.has(value)) throw new TypeError("Cannot normalize cyclic JSON value");
 
-  return Object.fromEntries(
+  seen.add(value);
+  const normalized = Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
       .filter(([, entry]) => entry !== undefined)
       .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => [key, normalizeJsonValue(entry)]),
+      .map(([key, entry]) => [key, normalizeJsonValue(entry, seen)]),
   );
+  seen.delete(value);
+  return normalized;
 }
 
 function stableJson(value: unknown) {
   return JSON.stringify(normalizeJsonValue(value));
+}
+
+function hashString(value: string) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 export class ApiClient {
@@ -184,12 +201,14 @@ export class ApiClient {
   }
 
   private createActiveQueryKey(options: ApiRequestOptions) {
+    const bodyKey = this.normalizeBody(options.body, options.bodyMode);
+    if (bodyKey === undefined) return undefined;
     const workspaceId = options.headers?.["x-workspace-id"] ?? "";
     return [
       workspaceId,
       options.method ?? "GET",
       this.normalizePath(options.path),
-      this.normalizeBody(options.body, options.bodyMode),
+      bodyKey,
     ].join("\n");
   }
 
@@ -202,8 +221,13 @@ export class ApiClient {
 
   private normalizeBody(body: unknown, bodyMode: ApiRequestOptions["bodyMode"]) {
     if (body === undefined) return "";
-    if (bodyMode === "raw") return "[raw-body]";
-    return stableJson(body);
+    if (bodyMode === "raw") return undefined;
+    try {
+      const serialized = stableJson(body);
+      return `${serialized.length}:${hashString(serialized)}`;
+    } catch {
+      return undefined;
+    }
   }
 
   private async execute<T>(options: ApiRequestOptions): Promise<T> {
