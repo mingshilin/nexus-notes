@@ -20,6 +20,150 @@ function context(): WorkspaceContext {
 }
 
 describe("AI chat tool protocol", () => {
+  it("executes bounded read tools before returning an answer with source-aware results", async () => {
+    const responses = [
+      Response.json({ choices: [{ message: {
+        content: null,
+        tool_calls: [{ id: "read-call-1", type: "function", function: {
+          name: "search_notes",
+          arguments: JSON.stringify({ query: "roadmap", limit: 10 }),
+        } }],
+      } }] }),
+      Response.json({ choices: [{ message: { content: "我找到一条相关笔记。" } }] }),
+    ];
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
+        "search_notes", "get_note", "list_reminders", "search_databases", "get_database_record",
+        "create_note", "create_reminder", "create_notification", "send_email",
+      ]);
+      const searchNotesTool = body.tools.find((tool: { function: { name: string } }) => tool.function.name === "search_notes");
+      expect(searchNotesTool.function.description).toContain("same query and selected-note scope");
+      if (body.messages.some((message: { role: string; content?: string }) => message.role === "tool")) {
+        expect(body.messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "read-call-1" });
+        expect(String(body.messages.at(-1).content)).toContain("note-1");
+      }
+      return responses.shift()!;
+    });
+    const readTools = {
+      execute: vi.fn(async () => ({
+        tool: "search_notes",
+        items: [{ source_type: "note", source_id: "note-1", workspace_id: "ws-1", title: "Roadmap", excerpt: "Visible", revision: 2, updated_at: "2026-08-28T00:00:00.000Z" }],
+        next_cursor: null,
+        scope: { workspace_id: "ws-1", selected_only: true },
+      })),
+    };
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl,
+    });
+
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "查找 roadmap" }] },
+      new AbortController().signal,
+      {
+        readTools,
+        readContext: {
+          workspaceId: "ws-1",
+          userId: "user-1",
+          selectedNoteIds: ["note-1"],
+          selectedDatabaseIds: [],
+          allowWorkspaceSearch: false,
+          role: "viewer",
+          capabilities: new Set<string>(),
+        },
+      },
+    )).resolves.toMatchObject({
+      message: "我找到一条相关笔记。",
+      read_results: [expect.objectContaining({ tool: "search_notes" })],
+    });
+    expect(readTools.execute).toHaveBeenCalledWith(
+      "search_notes",
+      { query: "roadmap", limit: 10 },
+      expect.objectContaining({ workspaceId: "ws-1" }),
+      expect.any(AbortSignal),
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not expose read tools or accept read calls without an explicit read executor and context", async () => {
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
+        "create_note", "create_reminder", "create_notification", "send_email",
+      ]);
+      return Response.json({ choices: [{ message: { content: "ok", tool_calls: [{ id: "read-1", type: "function", function: { name: "search_notes", arguments: "{}" } }] } }] });
+    });
+    const service = new AiChatService({ apiUrl: "https://ai.example.test/v1/chat/completions", apiKey: "key", model: "model", fetchImpl });
+    await expect(service.chat({ messages: [{ role: "user", content: "查找" }] }, new AbortController().signal))
+      .rejects.toMatchObject({ code: "AI_PROVIDER_INVALID_RESPONSE" });
+  });
+
+  it("bounds cumulative read results before issuing another provider request", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ choices: [{ message: {
+      content: null,
+      tool_calls: Array.from({ length: 4 }, (_, index) => ({
+        id: `read-${index}`,
+        type: "function",
+        function: { name: "get_note", arguments: JSON.stringify({ note_id: `note-${index}` }) },
+      })),
+    } }] }));
+    const readTools = {
+      execute: vi.fn(async (_tool: string, _input: unknown, _context: unknown, _signal?: AbortSignal) => ({
+        tool: "get_note" as const,
+        items: [{
+          source_type: "note" as const,
+          source_id: "note-1",
+          workspace_id: "ws-1",
+          title: "Large",
+          content: "x".repeat(20_000),
+          revision: 1,
+          updated_at: "2026-08-28T00:00:00.000Z",
+        }],
+        next_cursor: null,
+        scope: { workspace_id: "ws-1", selected_only: true },
+      })),
+    };
+    const service = new AiChatService({ apiUrl: "https://ai.example.test/v1/chat/completions", apiKey: "key", model: "model", fetchImpl });
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "查找" }] },
+      new AbortController().signal,
+      {
+        readTools,
+        readContext: {
+          workspaceId: "ws-1", userId: "user-1", selectedNoteIds: ["note-1"], selectedDatabaseIds: [], allowWorkspaceSearch: false,
+          role: "viewer", capabilities: new Set<string>(),
+        },
+      },
+    )).rejects.toMatchObject({ code: "AI_PROVIDER_INVALID_RESPONSE" });
+    expect(readTools.execute).toHaveBeenCalledTimes(4);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("rejects duplicate provider tool-call IDs before executing a read", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ choices: [{ message: {
+      content: null,
+      tool_calls: [
+        { id: "same", type: "function", function: { name: "get_note", arguments: JSON.stringify({ note_id: "note-1" }) } },
+        { id: "same", type: "function", function: { name: "get_note", arguments: JSON.stringify({ note_id: "note-1" }) } },
+      ],
+    } }] }));
+    const service = new AiChatService({ apiUrl: "https://ai.example.test/v1/chat/completions", apiKey: "key", model: "model", fetchImpl });
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "查找" }] },
+      new AbortController().signal,
+      {
+        readTools: { execute: vi.fn() },
+        readContext: {
+          workspaceId: "ws-1", userId: "user-1", selectedNoteIds: ["note-1"], selectedDatabaseIds: [], allowWorkspaceSearch: false,
+          role: "viewer", capabilities: new Set<string>(),
+        },
+      },
+    )).rejects.toMatchObject({ code: "AI_PROVIDER_INVALID_RESPONSE" });
+  });
+
   it("sends only the fixed tool declarations and no internal credentials to the provider", async () => {
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));

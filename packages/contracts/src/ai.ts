@@ -11,8 +11,34 @@ const AiMessageSchema = z.object({
   content: message.content.trim(),
 }));
 
+export const AiReadToolNameSchema = z.enum([
+  "search_notes",
+  "get_note",
+  "list_reminders",
+  "search_databases",
+  "get_database_record",
+]);
+export type AiReadToolName = z.infer<typeof AiReadToolNameSchema>;
+
+export const AiReadContextSchema = z.object({
+  workspaceId: EntityIdSchema,
+  userId: EntityIdSchema,
+  selectedNoteIds: z.array(EntityIdSchema).max(100).transform((ids) => [...new Set(ids)]),
+  selectedDatabaseIds: z.array(EntityIdSchema).max(100).transform((ids) => [...new Set(ids)]),
+  allowWorkspaceSearch: z.boolean(),
+}).strict();
+export type AiReadContext = z.infer<typeof AiReadContextSchema>;
+
+export const AiReadScopeInputSchema = z.object({
+  selected_note_ids: z.array(EntityIdSchema).max(100).default([]),
+  selected_database_ids: z.array(EntityIdSchema).max(100).default([]),
+  allow_workspace_search: z.boolean().default(false),
+}).strict();
+export type AiReadScopeInput = z.infer<typeof AiReadScopeInputSchema>;
+
 export const AiChatInputSchema = z.object({
   messages: z.array(AiMessageSchema).min(1).max(20),
+  read_context: AiReadScopeInputSchema.optional(),
 }).strict().superRefine((input, context) => {
   const totalCharacters = input.messages.reduce((total, message) => total + message.content.length, 0);
   if (totalCharacters > 32_000) {
@@ -26,6 +52,7 @@ export const AiChatResponseSchema = z.object({
   message: z.string().trim().min(1).max(8_000),
   model: z.string().trim().min(1).max(128),
   action_proposals: z.array(z.lazy(() => AiActionProposalSchema)).optional(),
+  read_results: z.array(z.lazy(() => AiReadResultSchema)).max(5).optional(),
 }).strict();
 export type AiChatResponse = z.infer<typeof AiChatResponseSchema>;
 
@@ -36,6 +63,76 @@ const PositiveRevisionSchema = z.number().int().positive();
 
 export const AI_ACTION_PROPOSAL_TTL_MS = 10 * 60 * 1000;
 export const AI_TRUSTED_MODE_TTL_MS = 24 * 60 * 60 * 1000;
+
+const ReadLimitSchema = z.coerce.number().int().min(1).max(1_000).default(20);
+const ReadCursorSchema = z.string().trim().min(1).max(1_024).optional();
+
+const AiSearchNotesInputSchema = z.object({
+  query: z.string().trim().max(500).default(""),
+  limit: ReadLimitSchema,
+  cursor: ReadCursorSchema,
+}).strict();
+const AiGetNoteInputSchema = z.object({ note_id: EntityIdSchema }).strict();
+const AiListRemindersInputSchema = z.object({
+  include_completed: z.boolean().default(false),
+  query: z.string().trim().max(160).optional(),
+  limit: ReadLimitSchema,
+  cursor: ReadCursorSchema,
+}).strict();
+const AiSearchDatabasesInputSchema = z.object({
+  query: z.string().trim().max(500).default(""),
+  limit: ReadLimitSchema,
+  cursor: ReadCursorSchema,
+}).strict();
+const AiGetDatabaseRecordInputSchema = z.object({
+  database_id: EntityIdSchema,
+  record_id: EntityIdSchema,
+}).strict();
+
+export const AiReadToolCallSchema = z.discriminatedUnion("tool", [
+  z.object({ tool: z.literal("search_notes"), input: AiSearchNotesInputSchema }).strict(),
+  z.object({ tool: z.literal("get_note"), input: AiGetNoteInputSchema }).strict(),
+  z.object({ tool: z.literal("list_reminders"), input: AiListRemindersInputSchema }).strict(),
+  z.object({ tool: z.literal("search_databases"), input: AiSearchDatabasesInputSchema }).strict(),
+  z.object({ tool: z.literal("get_database_record"), input: AiGetDatabaseRecordInputSchema }).strict(),
+]);
+export type AiReadToolCall = z.infer<typeof AiReadToolCallSchema>;
+
+export const AiReadSourceTypeSchema = z.enum(["note", "reminder", "database", "database_record"]);
+export type AiReadSourceType = z.infer<typeof AiReadSourceTypeSchema>;
+
+export const AiReadItemSchema = z.object({
+  source_type: AiReadSourceTypeSchema,
+  source_id: EntityIdSchema,
+  workspace_id: EntityIdSchema,
+  title: z.string().max(160),
+  excerpt: z.string().max(1_000).optional(),
+  content: z.string().max(20_000).optional(),
+  values: z.record(EntityIdSchema, z.unknown()).optional(),
+  hit_sources: z.array(z.enum(["title", "content", "tags", "properties", "attachment_name", "ocr"])).max(6).optional(),
+  remind_at: TimestampSchema.optional(),
+  status: z.string().trim().min(1).max(32).optional(),
+  revision: PositiveRevisionSchema,
+  updated_at: TimestampSchema,
+}).strict().superRefine((item, context) => {
+  try {
+    const serialized = JSON.stringify(item.values);
+    if (serialized && new TextEncoder().encode(serialized).byteLength > 16_000) {
+      context.addIssue({ code: "custom", path: ["values"], message: "AI read values exceed the bounded response size" });
+    }
+  } catch {
+    context.addIssue({ code: "custom", path: ["values"], message: "AI read values must be JSON serializable" });
+  }
+});
+export type AiReadItem = z.infer<typeof AiReadItemSchema>;
+
+export const AiReadResultSchema = z.object({
+  tool: AiReadToolNameSchema,
+  items: z.array(AiReadItemSchema).max(50),
+  next_cursor: z.string().trim().min(1).max(1_024).nullable(),
+  scope: z.object({ workspace_id: EntityIdSchema, selected_only: z.boolean() }).strict(),
+}).strict();
+export type AiReadResult = z.infer<typeof AiReadResultSchema>;
 
 export const AiToolRiskSchema = z.enum([
   "read",

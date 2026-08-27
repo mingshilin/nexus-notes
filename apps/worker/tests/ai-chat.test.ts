@@ -34,6 +34,27 @@ describe("AI chat proxy", () => {
     expect(result.data).toEqual({ message: "已完成", model: "beta-model" });
   });
 
+  it("passes the server workspace context and explicit read scope to the AI service", async () => {
+    const definitions: Array<{ path: string; handler: (context: any) => Promise<{ data: unknown }> }> = [];
+    const service = {
+      chat: vi.fn(async (input: unknown, signal: AbortSignal, userId?: string, workspace?: unknown) => ({
+        message: JSON.stringify({ input, aborted: signal.aborted, userId, workspace }),
+        model: "beta-model",
+      })),
+    };
+    registerAiRoutes({ register(definition: { path: string; handler: (context: any) => Promise<{ data: unknown }> }) { definitions.push(definition); } }, () => service);
+    const workspace = { workspaceId: "server-ws", userId: "server-user", role: "viewer" as const, capabilities: new Set<string>() };
+    const input = {
+      messages: [{ role: "user", content: "查找" }],
+      read_context: { selected_note_ids: ["note-1"], selected_database_ids: [], allow_workspace_search: false },
+    };
+    const signal = new AbortController().signal;
+    await definitions.find((definition) => definition.path === "/api/v2/ai/chat")!.handler({
+      env: {}, body: input, signal, principal: { userId: "server-user" }, workspace,
+    });
+    expect(service.chat).toHaveBeenCalledWith(input, signal, "server-user", workspace);
+  });
+
   it("sends the configured model and secret only from the Worker", async () => {
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       expect(init?.headers).toEqual(expect.objectContaining({ authorization: "Bearer server-only-key" }));

@@ -28,16 +28,18 @@ interface FieldPermissionRow {
 export class D1DatabaseAccess {
   constructor(private readonly db: D1Database) {}
 
-  async database(context: WorkspaceContext, databaseId: string) {
+  async database(context: WorkspaceContext, databaseId: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const row = await this.db.prepare(
       `SELECT ${DATABASE_COLUMNS} FROM databases WHERE workspace_id = ? AND id = ? LIMIT 1`,
     ).bind(context.workspaceId, databaseId).first<DatabaseRow>();
+    signal?.throwIfAborted();
     if (!row) throw new DatabaseRepositoryError("DATABASE_NOT_FOUND", "Database not found", 404);
     return toDatabase(row);
   }
 
-  async role(context: WorkspaceContext, databaseId: string): Promise<DatabasePermissionRole> {
-    const database = await this.database(context, databaseId);
+  async role(context: WorkspaceContext, databaseId: string, signal?: AbortSignal): Promise<DatabasePermissionRole> {
+    const database = await this.database(context, databaseId, signal);
     if (context.role === "owner" || database.created_by === context.userId) return "owner";
     const result = await this.db.prepare(
       `SELECT subject_type, subject_id, access_level
@@ -45,15 +47,16 @@ export class D1DatabaseAccess {
        WHERE workspace_id = ? AND database_id = ?
          AND ((subject_type = 'user' AND subject_id = ?) OR (subject_type = 'role' AND subject_id = ?))`,
     ).bind(context.workspaceId, databaseId, context.userId, context.role).all<PermissionRow>();
+    signal?.throwIfAborted();
     const rows = result.results ?? [];
     const direct = rows.find((row) => row.subject_type === "user" && row.subject_id === context.userId);
     const inherited = rows.find((row) => row.subject_type === "role" && row.subject_id === context.role);
     return direct?.access_level ?? inherited?.access_level ?? context.role;
   }
 
-  async assert(context: WorkspaceContext, databaseId: string, action: DatabaseAction) {
-    const database = await this.database(context, databaseId);
-    const role = await this.role(context, databaseId);
+  async assert(context: WorkspaceContext, databaseId: string, action: DatabaseAction, signal?: AbortSignal) {
+    const database = await this.database(context, databaseId, signal);
+    const role = await this.role(context, databaseId, signal);
     if (!canUseDatabase(role, action)) {
       const code = action === "read" ? "DATABASE_READ_DENIED" : action === "write" ? "DATABASE_WRITE_DENIED" : "DATABASE_MANAGE_DENIED";
       throw new DatabaseRepositoryError(code, "Database permission denied", 403);
@@ -61,12 +64,13 @@ export class D1DatabaseAccess {
     return { database, role };
   }
 
-  async fields(context: WorkspaceContext, databaseId: string, action: DatabaseAction = "read") {
-    const access = await this.assert(context, databaseId, action);
+  async fields(context: WorkspaceContext, databaseId: string, action: DatabaseAction = "read", signal?: AbortSignal) {
+    const access = await this.assert(context, databaseId, action, signal);
     const propertyResult = await this.db.prepare(
       `SELECT ${PROPERTY_COLUMNS} FROM database_properties
        WHERE workspace_id = ? AND database_id = ? ORDER BY position, id`,
     ).bind(context.workspaceId, databaseId).all<PropertyRow>();
+    signal?.throwIfAborted();
     const properties = (propertyResult.results ?? []).map(toProperty);
     const permissionResult = await this.db.prepare(
       `SELECT property_id, subject_type, subject_id, can_read, can_write
@@ -74,6 +78,7 @@ export class D1DatabaseAccess {
        WHERE workspace_id = ? AND database_id = ?
          AND ((subject_type = 'user' AND subject_id = ?) OR (subject_type = 'role' AND subject_id = ?))`,
     ).bind(context.workspaceId, databaseId, context.userId, context.role).all<FieldPermissionRow>();
+    signal?.throwIfAborted();
     const permissionRows = permissionResult.results ?? [];
     const readable = new Set<string>();
     const writable = new Set<string>();

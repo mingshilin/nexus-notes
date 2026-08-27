@@ -19,10 +19,12 @@ import {
 } from "./database-model";
 
 export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
-  async listDatabases(context: WorkspaceContext) {
+  async listDatabases(context: WorkspaceContext, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const result = await this.db.prepare(
       `SELECT ${DATABASE_COLUMNS} FROM databases WHERE workspace_id = ? ORDER BY updated_at DESC, id DESC`,
     ).bind(context.workspaceId).all<DatabaseRow>();
+    signal?.throwIfAborted();
     return (result.results ?? []).map(toDatabase);
   }
 

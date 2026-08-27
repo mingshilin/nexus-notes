@@ -191,13 +191,15 @@ export class KnowledgeService {
     return this.repository.listReminders(context.workspaceId, context.userId, includeCompleted);
   }
 
-  async listReminderPage(context: KnowledgeActorContext, query: ReminderListQuery) {
+  async listReminderPage(context: KnowledgeActorContext, query: ReminderListQuery, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const result = await this.repository.listReminderPage(
       context.workspaceId,
       context.userId,
       query,
       this.clock().toISOString(),
     );
+    signal?.throwIfAborted();
     return { items: result.items, next_cursor: result.nextCursor };
   }
 

@@ -54,6 +54,7 @@ import { AiEmailOutboxDispatcher } from "./ai/ai-email-outbox-dispatcher";
 import { AiEmailConsumer } from "./ai/ai-email-consumer";
 import { AiToolOrchestrator } from "./ai/ai-tool-orchestrator";
 import { AiToolError } from "./ai/ai-tool-model";
+import { AiReadTools } from "./ai/ai-read-tools";
 import { registerAiRoutes } from "./routes/ai";
 import { registerAccountRoutes } from "./routes/account";
 import { D1AccountRepository } from "./account/d1-account-repository";
@@ -350,6 +351,12 @@ function createAiActionService(env: BetaWorkerEnv) {
   const repository = new D1AiToolRepository(env.DB);
   const noteService = createNoteService(env);
   const knowledgeService = createKnowledgeService(env);
+  const databaseRepository = createDatabaseRepository(env);
+  const readTools = new AiReadTools({
+    notes: noteService,
+    knowledge: knowledgeService,
+    databases: databaseRepository,
+  });
   const collaborationRepository = createCollaborationRepository(env);
   const emailOutboxRepository = new AiEmailOutboxRepository(env.DB);
   const queue = env.JOBS ? {
@@ -377,6 +384,18 @@ function createAiActionService(env: BetaWorkerEnv) {
           role: workspace.role,
           capabilities: workspace.capabilities,
         }, toolCalls),
+        ...(input.read_context ? {
+          readTools,
+          readContext: {
+            workspaceId: workspace.workspaceId,
+            userId,
+            selectedNoteIds: input.read_context.selected_note_ids,
+            selectedDatabaseIds: input.read_context.selected_database_ids,
+            allowWorkspaceSearch: input.read_context.allow_workspace_search,
+            role: workspace.role,
+            capabilities: workspace.capabilities,
+          },
+        } : {}),
       } : undefined);
     },
     async confirmAction(userId: string, workspace: WorkspaceContext, actionId: string, baseRevision: number, requestId: string) {

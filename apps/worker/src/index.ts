@@ -77,6 +77,8 @@ export { registerSyncRoutes } from "./routes/sync";
 export { D1SyncRepository } from "./sync/d1-sync-repository";
 export { SyncService } from "./sync/sync-service";
 export { AiChatService, AiChatServiceError } from "./ai/ai-chat-service";
+export { AiReadTools, AiReadToolError } from "./ai/ai-read-tools";
+export type { AiReadExecutionContext, AiReadToolsDependencies } from "./ai/ai-read-tools";
 export { AiEmailOutboxRepository } from "./ai/ai-email-outbox-repository";
 export { AiEmailConsumer } from "./ai/ai-email-consumer";
 export { AiEmailOutboxDispatcher } from "./ai/ai-email-outbox-dispatcher";

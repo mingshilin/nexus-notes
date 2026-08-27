@@ -34,8 +34,8 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
     super(db, options);
   }
 
-  async getDatabase(context: WorkspaceContext, databaseId: string) {
-    const fields = await this.access.fields(context, databaseId, "read");
+  async getDatabase(context: WorkspaceContext, databaseId: string, signal?: AbortSignal) {
+    const fields = await this.access.fields(context, databaseId, "read", signal);
     const [viewsResult, templatesResult] = await Promise.all([
       this.db.prepare(
         `SELECT ${VIEW_COLUMNS} FROM database_views WHERE workspace_id = ? AND database_id = ? ORDER BY position, id`,
@@ -44,6 +44,7 @@ export class D1DatabaseViewRepository extends DatabaseRepositoryBase {
         `SELECT ${TEMPLATE_COLUMNS} FROM database_templates WHERE workspace_id = ? AND database_id = ? ORDER BY updated_at DESC, id DESC`,
       ).bind(context.workspaceId, databaseId).all<TemplateRow>(),
     ]);
+    signal?.throwIfAborted();
     const visible = filterDatabaseFields({
       properties: fields.properties,
       readablePropertyIds: fields.readable,

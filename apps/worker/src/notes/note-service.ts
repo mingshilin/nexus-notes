@@ -268,7 +268,9 @@ export class NoteService {
   async list(
     context: NoteActorContext,
     options: { cursor?: string; limit: number; query?: string; status?: Note["status"]; folderId?: string | null; dailyDate?: string; favorite?: boolean; pinned?: boolean },
+    signal?: AbortSignal,
   ) {
+    signal?.throwIfAborted();
     const page = await this.repository.listNotes({
       workspaceId: context.workspaceId,
       cursor: options.cursor,
@@ -280,11 +282,14 @@ export class NoteService {
       ...(options.favorite !== undefined ? { favorite: options.favorite } : {}),
       ...(options.pinned !== undefined ? { pinned: options.pinned } : {}),
     });
+    signal?.throwIfAborted();
     return { items: page.items, next_cursor: page.nextCursor };
   }
 
-  async get(context: NoteActorContext, noteId: string) {
+  async get(context: NoteActorContext, noteId: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const note = await this.repository.getNote(context.workspaceId, noteId);
+    signal?.throwIfAborted();
     if (!note) {
       throw new NoteServiceError("NOTE_NOT_FOUND", "Note not found", 404);
     }

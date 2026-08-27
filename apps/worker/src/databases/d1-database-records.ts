@@ -116,11 +116,14 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     return record;
   }
 
-  async getRecord(context: WorkspaceContext, databaseId: string, recordId: string) {
-    const fields = await this.access.fields(context, databaseId, "read");
+  async getRecord(context: WorkspaceContext, databaseId: string, recordId: string, signal?: AbortSignal) {
+    const fields = await this.access.fields(context, databaseId, "read", signal);
     const rows = await this.recordRows(context.workspaceId, databaseId, [recordId]);
+    signal?.throwIfAborted();
     if (rows.length === 0) throw new DatabaseRepositoryError("RECORD_NOT_FOUND", "Database record not found", 404);
-    return (await this.materialize(rows, fields.readable))[0]!;
+    const records = await this.materialize(rows, fields.readable);
+    signal?.throwIfAborted();
+    return records[0]!;
   }
 
   async listRecords(context: WorkspaceContext, databaseId: string, options: { cursor?: string | null; limit: number; view_id?: string | null }) {
@@ -140,8 +143,8 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     });
   }
 
-  async searchRecords(context: WorkspaceContext, databaseId: string, options: { query: string; cursor?: string | null; limit: number }) {
-    const fields = await this.access.fields(context, databaseId, "read");
+  async searchRecords(context: WorkspaceContext, databaseId: string, options: { query: string; cursor?: string | null; limit: number; signal?: AbortSignal }) {
+    const fields = await this.access.fields(context, databaseId, "read", options.signal);
     if (fields.readable.size === 0 || !options.query.trim()) return { items: [], next_cursor: null };
     const propertyIds = [...fields.readable];
     const fingerprint = cursorFingerprint({ kind: "search", database_id: databaseId, query: options.query });
@@ -169,8 +172,10 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
        WHERE ${conditions.join(" AND ")}
        ORDER BY r.updated_at DESC, r.id DESC LIMIT ?`,
     ).bind(...bindings, limit + 1).all<RecordRow>();
+    options.signal?.throwIfAborted();
     const rows = result.results ?? [];
     const items = await this.materialize(rows.slice(0, limit), fields.readable);
+    options.signal?.throwIfAborted();
     return { items, next_cursor: rows.length > limit && items.length > 0 ? encodeRecordCursor(items[items.length - 1]!, undefined, fingerprint) : null };
   }
 

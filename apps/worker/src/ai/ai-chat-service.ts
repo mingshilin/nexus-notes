@@ -1,11 +1,16 @@
 import {
   AiChatResponseSchema,
   AiActionToolNameSchema,
+  AiReadResultSchema,
+  AiReadToolNameSchema,
   type AiActionProposal,
   type AiChatInput,
   type AiChatResponse,
+  type AiReadResult,
+  type AiReadToolName,
 } from "@nexus/contracts";
 import { AiToolError } from "./ai-tool-model";
+import { AiReadToolError, type AiReadExecutionContext } from "./ai-read-tools";
 
 export interface AiChatServiceOptions {
   apiUrl?: string;
@@ -18,6 +23,10 @@ export interface AiChatServiceOptions {
 
 export interface AiChatToolProposalOptions {
   proposeActions?(toolCalls: Array<{ name: string; arguments: unknown }>): Promise<AiActionProposal[]>;
+  readTools?: {
+    execute(tool: AiReadToolName, input: unknown, context: AiReadExecutionContext, signal?: AbortSignal): Promise<AiReadResult>;
+  };
+  readContext?: AiReadExecutionContext;
 }
 
 export class AiChatServiceError extends Error {
@@ -74,7 +83,7 @@ function toolParameters(properties: Record<string, unknown>, required: string[] 
   };
 }
 
-const PROVIDER_TOOL_DEFINITIONS = [
+const ACTION_TOOL_DEFINITIONS = [
   {
     type: "function",
     function: {
@@ -126,7 +135,75 @@ const PROVIDER_TOOL_DEFINITIONS = [
   },
 ] as const;
 
-function providerToolCalls(payload: unknown): Array<{ name: string; arguments: unknown }> | null {
+const MAX_CUMULATIVE_READ_RESULT_BYTES = 64 * 1024;
+const MAX_PROVIDER_REQUEST_BYTES = 256 * 1024;
+
+const READ_TOOL_DEFINITIONS = [
+  {
+    type: "function",
+    function: {
+      name: "search_notes",
+      description: "Search explicitly selected notes, or the workspace only when the user enabled workspace search. A cursor is valid only with the same query and selected-note scope.",
+      parameters: toolParameters({
+        query: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 50 },
+        cursor: { type: "string" },
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_note",
+      description: "Read one note that the user explicitly selected.",
+      parameters: toolParameters({ note_id: { type: "string" } }, ["note_id"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_reminders",
+      description: "List reminders owned by the current user in the active workspace.",
+      parameters: toolParameters({
+        include_completed: { type: "boolean" },
+        query: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 50 },
+        cursor: { type: "string" },
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_databases",
+      description: "Search selected databases, or the workspace only when the user enabled workspace search. Field permissions are enforced by the server.",
+      parameters: toolParameters({
+        query: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 50 },
+        cursor: { type: "string" },
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_database_record",
+      description: "Read one record from a database the user explicitly selected. Hidden or denied fields are removed by the server.",
+      parameters: toolParameters({
+        database_id: { type: "string" },
+        record_id: { type: "string" },
+      }, ["database_id", "record_id"]),
+    },
+  },
+] as const;
+
+interface ProviderToolCall {
+  id: string;
+  name: string;
+  arguments: unknown;
+}
+
+function providerToolCalls(payload: unknown, allowedTools: ReadonlySet<string>): ProviderToolCall[] | null {
   if (!payload || typeof payload !== "object") return null;
   const choice = (payload as { choices?: unknown[] }).choices?.[0];
   if (!choice || typeof choice !== "object") return null;
@@ -137,29 +214,35 @@ function providerToolCalls(payload: unknown): Array<{ name: string; arguments: u
   if (rawToolCalls == null) return [];
   if (!Array.isArray(rawToolCalls)) return null;
 
-  const toolCalls: Array<{ name: string; arguments: unknown }> = [];
-  for (const rawCall of rawToolCalls) {
+  const toolCalls: ProviderToolCall[] = [];
+  const seenIds = new Set<string>();
+  for (const [index, rawCall] of rawToolCalls.entries()) {
     if (!isPlainObject(rawCall)) return null;
     const toolType = rawCall.type;
     const functionCall = rawCall.function;
     if (toolType !== "function" || !isPlainObject(functionCall)) return null;
     const name = functionCall.name;
-    if (typeof name !== "string" || !AiActionToolNameSchema.safeParse(name).success) return null;
+    const id = typeof rawCall.id === "string" && rawCall.id.trim() && rawCall.id.length <= 256
+      ? rawCall.id
+      : `tool-call-${index + 1}`;
+    if (typeof name !== "string" || !allowedTools.has(name)) return null;
+    if (seenIds.has(id)) return null;
+    seenIds.add(id);
     const rawArguments = functionCall.arguments;
     if (typeof rawArguments === "string") {
       try {
-        toolCalls.push({ name, arguments: rawArguments.trim() ? JSON.parse(rawArguments) : {} });
+        toolCalls.push({ id, name, arguments: rawArguments.trim() ? JSON.parse(rawArguments) : {} });
         continue;
       } catch {
         return null;
       }
     }
     if (isPlainObject(rawArguments)) {
-      toolCalls.push({ name, arguments: rawArguments });
+      toolCalls.push({ id, name, arguments: rawArguments });
       continue;
     }
     if (rawArguments === undefined || rawArguments === null) {
-      toolCalls.push({ name, arguments: {} });
+      toolCalls.push({ id, name, arguments: {} });
       continue;
     }
     return null;
@@ -208,80 +291,161 @@ export class AiChatService {
     }, this.timeoutMs);
 
     try {
-      const response = await this.fetchImpl(apiUrl, {
-        method: "POST",
-        redirect: "error",
-        headers: {
-          accept: "application/json",
-          authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
+      const readEnabled = Boolean(options.readTools && options.readContext);
+      const toolDefinitions = readEnabled
+        ? [...READ_TOOL_DEFINITIONS, ...ACTION_TOOL_DEFINITIONS]
+        : [...ACTION_TOOL_DEFINITIONS];
+      const allowedTools = new Set(toolDefinitions.map((tool) => tool.function.name));
+      const providerMessages: Array<Record<string, unknown>> = input.messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
+      const readResults: AiReadResult[] = [];
+      let cumulativeReadResultBytes = 0;
+      const maximumReadCalls = 5;
+      const maximumProviderRounds = 3;
+
+      for (let round = 0; round < maximumProviderRounds; round += 1) {
+        const providerPayload = {
           model,
-          messages: input.messages,
+          messages: providerMessages,
           stream: false,
-          tools: PROVIDER_TOOL_DEFINITIONS,
+          tools: toolDefinitions,
           tool_choice: "auto",
-        }),
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new AiChatServiceError(
-          "AI_PROVIDER_UNAVAILABLE",
-          "AI provider is unavailable",
-          response.status === 429 || response.status >= 500 ? 503 : 502,
-          response.status === 429 || response.status >= 500,
-        );
-      }
-
-      const responseText = await readResponseText(response, this.maxResponseBytes, controller.signal);
-
-      let payload: unknown;
-      try {
-        payload = JSON.parse(responseText);
-      } catch {
-        throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned invalid JSON", 502, false);
-      }
-      const toolCalls = providerToolCalls(payload);
-      if (toolCalls === null) {
-        throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned invalid tool calls", 502, false);
-      }
-
-      let proposals: AiActionProposal[] = [];
-      if (toolCalls.length > 0) {
-        if (!options.proposeActions) {
-          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned tool calls without a proposal handler", 502, false);
+        };
+        const serializedProviderPayload = JSON.stringify(providerPayload);
+        if (new TextEncoder().encode(serializedProviderPayload).byteLength > MAX_PROVIDER_REQUEST_BYTES) {
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider request exceeded the bounded size", 502, false);
         }
+        const response = await this.fetchImpl(apiUrl, {
+          method: "POST",
+          redirect: "error",
+          headers: {
+            accept: "application/json",
+            authorization: `Bearer ${apiKey}`,
+            "content-type": "application/json",
+          },
+          body: serializedProviderPayload,
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new AiChatServiceError(
+            "AI_PROVIDER_UNAVAILABLE",
+            "AI provider is unavailable",
+            response.status === 429 || response.status >= 500 ? 503 : 502,
+            response.status === 429 || response.status >= 500,
+          );
+        }
+
+        const responseText = await readResponseText(response, this.maxResponseBytes, controller.signal);
+
+        let payload: unknown;
         try {
-          proposals = await options.proposeActions(toolCalls);
-        } catch (error) {
-          if (error instanceof AiToolError) {
+          payload = JSON.parse(responseText);
+        } catch {
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned invalid JSON", 502, false);
+        }
+        const toolCalls = providerToolCalls(payload, allowedTools);
+        if (toolCalls === null) {
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned invalid tool calls", 502, false);
+        }
+
+        const readCalls = toolCalls.filter((call) => AiReadToolNameSchema.safeParse(call.name).success);
+        const actionCalls = toolCalls.filter((call) => AiActionToolNameSchema.safeParse(call.name).success);
+        if (readCalls.length > 0 && actionCalls.length > 0) {
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider mixed read and write tool calls", 502, false);
+        }
+        if (readCalls.length > 0) {
+          if (!readEnabled || !options.readTools || !options.readContext) {
+            throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned read calls without a scoped read handler", 502, false);
+          }
+          if (readResults.length + readCalls.length > maximumReadCalls) {
+            throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider exceeded the read tool limit", 502, false);
+          }
+          const roundResults: Array<{ call: ProviderToolCall; result: AiReadResult }> = [];
+          for (const call of readCalls) {
+            try {
+              const readResult = await options.readTools.execute(
+                AiReadToolNameSchema.parse(call.name),
+                call.arguments,
+                options.readContext,
+                controller.signal,
+              );
+              const validatedReadResult = AiReadResultSchema.safeParse(readResult);
+              if (!validatedReadResult.success || validatedReadResult.data.tool !== call.name) {
+                throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI read tool returned invalid data", 502, false);
+              }
+              const readResultBytes = new TextEncoder().encode(JSON.stringify(validatedReadResult.data)).byteLength;
+              if (cumulativeReadResultBytes + readResultBytes > MAX_CUMULATIVE_READ_RESULT_BYTES) {
+                throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider exceeded the cumulative read result limit", 502, false);
+              }
+              cumulativeReadResultBytes += readResultBytes;
+              roundResults.push({ call, result: validatedReadResult.data });
+              readResults.push(validatedReadResult.data);
+            } catch (error) {
+              if (error instanceof AiReadToolError) throw error;
+              throw error;
+            }
+          }
+          providerMessages.push({
+            role: "assistant",
+            content: providerMessage(payload) ?? "",
+            tool_calls: readCalls.map((call) => ({
+              id: call.id,
+              type: "function",
+              function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+            })),
+          });
+          for (const item of roundResults) {
+            providerMessages.push({
+              role: "tool",
+              tool_call_id: item.call.id,
+              name: item.call.name,
+              content: JSON.stringify(item.result),
+            });
+          }
+          continue;
+        }
+
+        let proposals: AiActionProposal[] = [];
+        if (actionCalls.length > 0) {
+          if (!options.proposeActions) {
+            throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned tool calls without a proposal handler", 502, false);
+          }
+          try {
+            proposals = await options.proposeActions(actionCalls.map(({ name, arguments: toolArguments }) => ({ name, arguments: toolArguments })));
+          } catch (error) {
+            if (error instanceof AiToolError) {
+              throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned an invalid tool call", 502, false);
+            }
+            throw error;
+          }
+          if (!Array.isArray(proposals) || proposals.length !== actionCalls.length) {
             throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned an invalid tool call", 502, false);
           }
-          throw error;
         }
-        if (!Array.isArray(proposals) || proposals.length !== toolCalls.length) {
-          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned an invalid tool call", 502, false);
-        }
-      }
 
-      const message = providerMessage(payload) ?? (toolCalls.length > 0 ? toolFallbackMessage(toolCalls.length) : null);
-      if (!message || message.length > 8_000) {
-        throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned no usable message", 502, false);
+        const message = providerMessage(payload) ?? (actionCalls.length > 0 ? toolFallbackMessage(actionCalls.length) : null);
+        if (!message || message.length > 8_000) {
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned no usable message", 502, false);
+        }
+        const result = AiChatResponseSchema.safeParse({
+          message,
+          model,
+          ...(proposals.length ? { action_proposals: proposals } : {}),
+          ...(readResults.length ? { read_results: readResults } : {}),
+        });
+        if (!result.success) {
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider response failed validation", 502, false);
+        }
+        return result.data;
       }
-      const result = AiChatResponseSchema.safeParse({
-        message,
-        model,
-        ...(proposals.length ? { action_proposals: proposals } : {}),
-      });
-      if (!result.success) {
-        throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider response failed validation", 502, false);
-      }
-      return result.data;
+      throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider exceeded the read tool round limit", 502, false);
     } catch (error) {
       if (signal.aborted) throw error;
       if (timedOut) throw new AiChatServiceError("AI_PROVIDER_TIMEOUT", "AI provider timed out", 504, true);
       if (error instanceof AiChatServiceError) throw error;
+      if (error instanceof AiReadToolError) throw error;
       throw new AiChatServiceError("AI_PROVIDER_UNAVAILABLE", "AI provider is unavailable", 502, true);
     } finally {
       clearTimeout(timeout);
