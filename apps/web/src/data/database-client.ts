@@ -71,7 +71,9 @@ export class DatabaseClient {
   private readonly createId: () => string;
   private readonly now: () => number;
   private readonly cache = new Map<string, DatabaseCacheEntry<unknown>>();
+  private readonly latestCacheCommit = new Map<string, number>();
   private cacheGeneration = 0;
+  private cacheRequestSequence = 0;
 
   constructor(
     private readonly client: Pick<ApiClient, "request">,
@@ -112,17 +114,17 @@ export class DatabaseClient {
     const key = `bootstrap:${options.databaseId ?? "first"}:${options.limit ?? 50}`;
     const generation = this.cacheGeneration;
     return this.cached(key, async () => {
-      const value = await this.query<DatabaseBootstrap>(
+      return this.query<DatabaseBootstrap>(
         `/api/v2/databases/bootstrap?${params}`,
         `database-bootstrap:${this.workspaceId}:${key}`,
         options.signal,
       );
-      if (generation === this.cacheGeneration && !options.signal?.aborted) {
-        this.writeCache("databases", value.items);
-        if (value.bundle) this.writeCache(`database:${value.bundle.database.id}`, value.bundle);
+    }, options.signal, generation, (value, requestToken) => {
+      this.commitCache("databases", value.items, requestToken, generation, options.signal);
+      if (value.bundle) {
+        this.commitCache(`database:${value.bundle.database.id}`, value.bundle, requestToken, generation, options.signal);
       }
-      return value;
-    }, options.signal, generation);
+    });
   }
 
   createDatabase(input: CreateDatabaseInput) {
@@ -351,20 +353,27 @@ export class DatabaseClient {
     }).then((value) => {
       this.cacheGeneration += 1;
       this.cache.clear();
+      this.latestCacheCommit.clear();
       return value;
     });
   }
 
-  private cached<T>(key: string, load: () => Promise<T>, signal?: AbortSignal, generation = this.cacheGeneration): Promise<T> {
+  private cached<T>(
+    key: string,
+    load: () => Promise<T>,
+    signal?: AbortSignal,
+    generation = this.cacheGeneration,
+    onCommit?: (value: T, requestToken: number) => void,
+  ): Promise<T> {
     const current = this.cache.get(key) as DatabaseCacheEntry<T> | undefined;
     if (current && current.expiresAt > this.now()) return Promise.resolve(current.value);
     if (current) {
       if (!current.refreshPromise) {
+        const requestToken = this.beginCacheRequest(key);
         const refreshPromise = load().then((value) => {
           const active = this.cache.get(key) as DatabaseCacheEntry<T> | undefined;
-          if (active === current && generation === this.cacheGeneration && !signal?.aborted) {
-            current.value = value;
-            current.expiresAt = this.now() + DATABASE_CACHE_TTL_MS;
+          if (active === current && this.commitCache(key, value, requestToken, generation, signal, current)) {
+            onCommit?.(value, requestToken);
           }
         }).catch(() => undefined).finally(() => {
           if ((this.cache.get(key) as DatabaseCacheEntry<T> | undefined) === current) {
@@ -375,10 +384,42 @@ export class DatabaseClient {
       }
       return Promise.resolve(current.value);
     }
+    const requestToken = this.beginCacheRequest(key);
     return load().then((value) => {
-      if (generation === this.cacheGeneration && !signal?.aborted) this.writeCache(key, value);
+      if (this.commitCache(key, value, requestToken, generation, signal)) {
+        onCommit?.(value, requestToken);
+      }
       return value;
     });
+  }
+
+  private beginCacheRequest(_key: string) {
+    return ++this.cacheRequestSequence;
+  }
+
+  private canCommitCacheRequest(key: string, token: number, generation: number, signal?: AbortSignal) {
+    return (this.latestCacheCommit.get(key) ?? 0) <= token
+      && generation === this.cacheGeneration
+      && !signal?.aborted;
+  }
+
+  private commitCache<T>(
+    key: string,
+    value: T,
+    token: number,
+    generation: number,
+    signal?: AbortSignal,
+    current?: DatabaseCacheEntry<T>,
+  ) {
+    if (!this.canCommitCacheRequest(key, token, generation, signal)) return false;
+    if (current) {
+      current.value = value;
+      current.expiresAt = this.now() + DATABASE_CACHE_TTL_MS;
+    } else {
+      this.writeCache(key, value);
+    }
+    this.latestCacheCommit.set(key, token);
+    return true;
   }
 
   private writeCache<T>(key: string, value: T) {

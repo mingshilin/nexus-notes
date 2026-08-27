@@ -1178,7 +1178,7 @@ function AuthenticatedWorkspace({
     focusInstalledNoteRef.current = false;
   }, [activeDraftId, creatingNote, selectedNoteId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if ((!event.ctrlKey && !event.metaKey) || event.repeat || permanentDeleteOpen) return;
       const key = event.key.toLowerCase();

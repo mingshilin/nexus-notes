@@ -61,6 +61,22 @@ export class ApiClientError extends Error {
   }
 }
 
+function canonicalizeHeaders(headers: Record<string, string> | undefined) {
+  const canonical = Object.create(null) as Record<string, string>;
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    const key = name.toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(canonical, key) && canonical[key] !== value) {
+      throw new ApiClientError({
+        code: "INVALID_REQUEST",
+        message: `Conflicting ${key} headers`,
+        retryable: false,
+      });
+    }
+    canonical[key] = value;
+  }
+  return canonical;
+}
+
 const retryableStatuses = new Set([408, 429]);
 
 function isRetryableStatus(status: number) {
@@ -98,8 +114,20 @@ async function readResponse<T>(response: Response): Promise<ApiResponse<T>> {
   }
 }
 
+function assertDataProperties(value: object) {
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    if (descriptor.enumerable && !("value" in descriptor)) {
+      throw new TypeError("Cannot safely canonicalize accessor-backed JSON value");
+    }
+  }
+}
+
 function normalizeJsonValue(value: unknown, seen = new WeakSet<object>()): unknown {
   if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype || Object.prototype.hasOwnProperty.call(value, "toJSON")) {
+      throw new TypeError("Cannot safely canonicalize custom array JSON value");
+    }
+    assertDataProperties(value);
     if (seen.has(value)) throw new TypeError("Cannot normalize cyclic JSON value");
     seen.add(value);
     const normalized = value.map((item) => item === undefined ? null : normalizeJsonValue(item, seen));
@@ -107,7 +135,20 @@ function normalizeJsonValue(value: unknown, seen = new WeakSet<object>()): unkno
     return normalized;
   }
   if (!value || typeof value !== "object") return value;
-  if (value instanceof Date) return value.toJSON();
+  if (value instanceof Date) {
+    if (Object.getPrototypeOf(value) !== Date.prototype || Object.prototype.hasOwnProperty.call(value, "toJSON")) {
+      throw new TypeError("Cannot safely canonicalize custom date JSON value");
+    }
+    return value.toJSON();
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError("Cannot safely canonicalize custom JSON object");
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "toJSON") || typeof (Object.prototype as { toJSON?: unknown }).toJSON === "function") {
+    throw new TypeError("Cannot safely canonicalize custom JSON serialization");
+  }
+  assertDataProperties(value);
   if (seen.has(value)) throw new TypeError("Cannot normalize cyclic JSON value");
 
   seen.add(value);
@@ -125,13 +166,26 @@ function stableJson(value: unknown) {
   return JSON.stringify(normalizeJsonValue(value));
 }
 
-function hashString(value: string) {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(36);
+interface PreparedApiRequest {
+  path: string;
+  method: NonNullable<ApiRequestOptions["method"]>;
+  headers: Record<string, string>;
+  requestBody?: BodyInit;
+  requestClass: RequestClass;
+  canRetry: boolean;
+  timeoutMs: number;
+  retry: RequestPolicy["retry"];
+  signal?: AbortSignal;
+  activeQueryKey?: string;
+}
+
+function preparationError(error: unknown) {
+  if (error instanceof ApiClientError) return error;
+  return new ApiClientError({
+    code: "NETWORK_ERROR",
+    message: "Network request failed",
+    retryable: true,
+  });
 }
 
 export class ApiClient {
@@ -149,19 +203,25 @@ export class ApiClient {
   }
 
   request<T>(options: ApiRequestOptions): Promise<T> {
-    const dedupeKey = options.requestClass === "query" ? this.createActiveQueryKey(options) : undefined;
+    let prepared: PreparedApiRequest;
+    try {
+      prepared = this.prepareRequest(options);
+    } catch (error) {
+      return Promise.reject(preparationError(error));
+    }
+    const dedupeKey = prepared.activeQueryKey;
     if (dedupeKey) {
       const activeQueries = this.activeQueries.get(dedupeKey)?.filter((active) => !active.signal?.aborted) ?? [];
-      const active = activeQueries.find((query) => query.signal === options.policy.signal);
+      const active = activeQueries.find((query) => query.signal === prepared.signal);
       if (active) return active.promise as Promise<T>;
       if (activeQueries.length > 0) this.activeQueries.set(dedupeKey, activeQueries);
       else this.activeQueries.delete(dedupeKey);
     }
 
-    const promise = this.execute<T>(options);
+    const promise = this.execute<T>(prepared);
     if (!dedupeKey) return promise;
 
-    const active = { promise, signal: options.policy.signal };
+    const active = { promise, signal: prepared.signal };
     const activeQueries = this.activeQueries.get(dedupeKey) ?? [];
     activeQueries.push(active);
     this.activeQueries.set(dedupeKey, activeQueries);
@@ -200,16 +260,64 @@ export class ApiClient {
     });
   }
 
-  private createActiveQueryKey(options: ApiRequestOptions) {
-    const bodyKey = this.normalizeBody(options.body, options.bodyMode);
-    if (bodyKey === undefined) return undefined;
-    const workspaceId = options.headers?.["x-workspace-id"] ?? "";
-    return [
-      workspaceId,
-      options.method ?? "GET",
-      this.normalizePath(options.path),
-      bodyKey,
-    ].join("\n");
+  private prepareRequest(options: ApiRequestOptions): PreparedApiRequest {
+    const path = options.path;
+    const method = options.method ?? "GET";
+    const requestClass = options.requestClass;
+    const body = options.body;
+    const bodyMode = options.bodyMode ?? "json";
+    const policy = options.policy;
+    const { timeoutMs, retry, dedupeKey, idempotencyKey, signal } = policy;
+    const canonicalHeaders = canonicalizeHeaders(options.headers);
+    const headers: Record<string, string> = { accept: "application/json", ...canonicalHeaders };
+    if (body !== undefined && bodyMode === "json") headers["content-type"] = "application/json";
+    if (idempotencyKey) headers["idempotency-key"] = idempotencyKey;
+
+    let requestBody: BodyInit | undefined;
+    let bodyKey = body === undefined ? "" : undefined;
+    if (body !== undefined && bodyMode === "raw") {
+      requestBody = body as BodyInit;
+    } else if (body !== undefined) {
+      if (requestClass === "query" && dedupeKey) {
+        try {
+          const canonicalBody = stableJson(body);
+          if (typeof canonicalBody === "string") {
+            bodyKey = canonicalBody;
+            requestBody = canonicalBody;
+          }
+        } catch {
+          // Custom serializers and accessors use their normal wire form without active dedupe.
+        }
+      }
+      if (requestBody === undefined) requestBody = JSON.stringify(body);
+    }
+
+    let activeQueryKey: string | undefined;
+    if (requestClass === "query" && dedupeKey && bodyKey !== undefined) {
+      try {
+        activeQueryKey = JSON.stringify([
+          canonicalHeaders["x-workspace-id"] ?? "",
+          method,
+          this.normalizePath(path),
+          bodyKey,
+        ]);
+      } catch {
+        // Invalid paths remain on the normal asynchronous request error path.
+      }
+    }
+
+    return {
+      path,
+      method,
+      headers: Object.freeze(headers),
+      requestBody,
+      requestClass,
+      canRetry: requestClass === "query" || Boolean(idempotencyKey),
+      timeoutMs,
+      retry,
+      signal,
+      activeQueryKey,
+    };
   }
 
   private normalizePath(path: string) {
@@ -219,42 +327,16 @@ export class ApiClient {
     return query ? `${url.pathname}?${query}` : url.pathname;
   }
 
-  private normalizeBody(body: unknown, bodyMode: ApiRequestOptions["bodyMode"]) {
-    if (body === undefined) return "";
-    if (bodyMode === "raw") return undefined;
-    try {
-      const serialized = stableJson(body);
-      return `${serialized.length}:${hashString(serialized)}`;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private async execute<T>(options: ApiRequestOptions): Promise<T> {
-    const method = options.method ?? "GET";
-    const canRetry = options.requestClass === "query" || Boolean(options.policy.idempotencyKey);
-    const retryCount = canRetry ? options.policy.retry : 0;
+  private async execute<T>(request: PreparedApiRequest): Promise<T> {
+    const retryCount = request.canRetry ? request.retry : 0;
 
     for (let attempt = 0; attempt <= retryCount; attempt += 1) {
-      const attemptSignal = createAttemptSignal(options.policy.timeoutMs, options.policy.signal);
+      const attemptSignal = createAttemptSignal(request.timeoutMs, request.signal);
       try {
-        const bodyMode = options.bodyMode ?? "json";
-        const headers: Record<string, string> = {
-          accept: "application/json",
-          ...options.headers,
-        };
-        if (options.body !== undefined && bodyMode === "json") headers["content-type"] = "application/json";
-        if (options.policy.idempotencyKey) headers["idempotency-key"] = options.policy.idempotencyKey;
-        const requestBody = options.body === undefined
-          ? undefined
-          : bodyMode === "raw"
-            ? options.body as BodyInit
-            : JSON.stringify(options.body);
-
-        const response = await this.fetchImpl(`${this.baseUrl}${options.path}`, {
-          method,
-          headers,
-          body: requestBody,
+        const response = await this.fetchImpl(`${this.baseUrl}${request.path}`, {
+          method: request.method,
+          headers: request.headers,
+          body: request.requestBody,
           signal: attemptSignal.signal,
           credentials: "include",
         });
@@ -271,7 +353,7 @@ export class ApiClient {
         throw new ApiClientError(payload, response.status);
       } catch (error) {
         if (error instanceof ApiClientError) throw error;
-        if (options.policy.signal?.aborted) throw error;
+        if (request.signal?.aborted) throw error;
         if (attempt < retryCount) {
           await this.waitBeforeRetry(attempt);
           continue;
@@ -290,13 +372,15 @@ export class ApiClient {
   }
 
   private async executeDownload(options: ApiDownloadOptions): Promise<Blob> {
-    const retryCount = options.policy.retry;
+    const path = options.path;
+    const { retry: retryCount, timeoutMs, signal } = options.policy;
+    const headers = Object.freeze({ accept: "application/octet-stream", ...canonicalizeHeaders(options.headers) });
     for (let attempt = 0; attempt <= retryCount; attempt += 1) {
-      const attemptSignal = createAttemptSignal(options.policy.timeoutMs, options.policy.signal);
+      const attemptSignal = createAttemptSignal(timeoutMs, signal);
       try {
-        const response = await this.fetchImpl(`${this.baseUrl}${options.path}`, {
+        const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
           method: "GET",
-          headers: { accept: "application/octet-stream", ...options.headers },
+          headers,
           signal: attemptSignal.signal,
           credentials: "include",
         });
@@ -312,7 +396,7 @@ export class ApiClient {
         throw new ApiClientError(payload, response.status);
       } catch (error) {
         if (error instanceof ApiClientError) throw error;
-        if (options.policy.signal?.aborted) throw error;
+        if (signal?.aborted) throw error;
         if (attempt < retryCount) {
           await this.waitBeforeRetry(attempt);
           continue;

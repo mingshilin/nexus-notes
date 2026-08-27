@@ -51,6 +51,29 @@ describe("ApiClient", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
+  it("keeps query dedupe opt-in when no dedupe key is provided", async () => {
+    const web = await loadWeb();
+    const pending: Array<{ resolve(response: Response): void }> = [];
+    const fetchImpl = vi.fn(() => new Promise<Response>((resolve) => { pending.push({ resolve }); }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    const request = {
+      path: "/api/v2/notes",
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0 },
+    };
+
+    const first = client.request<{ request: string }>(request);
+    const second = client.request<{ request: string }>(request);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    pending[0]!.resolve(success({ request: "first" }));
+    pending[1]!.resolve(success({ request: "second" }));
+    await expect(first).resolves.toEqual({ request: "first" });
+    await expect(second).resolves.toEqual({ request: "second" });
+  });
+
   it("builds active query dedupe from workspace, path, normalized query, and normalized body", async () => {
     const web = await loadWeb();
     const pending: Array<{ resolve(response: Response): void }> = [];
@@ -115,6 +138,261 @@ describe("ApiClient", () => {
     await expect(preview).resolves.toEqual({ preview: "alpha" });
     await expect(samePreviewDifferentBodyOrder).resolves.toEqual({ preview: "alpha" });
     await expect(differentPreviewBody).resolves.toEqual({ preview: "beta" });
+  });
+
+  it("does not deduplicate distinct JSON bodies that collide under a short hash", async () => {
+    const web = await loadWeb();
+    const pending: Array<{ resolve(response: Response): void }> = [];
+    const fetchImpl = vi.fn(() => new Promise<Response>((resolve) => { pending.push({ resolve }); }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+
+    const first = client.request<{ value: string }>({
+      path: "/api/v2/search/preview",
+      method: "POST",
+      body: { value: "MuxFK7bW" },
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "preview" },
+    });
+    const second = client.request<{ value: string }>({
+      path: "/api/v2/search/preview",
+      method: "POST",
+      body: { value: "t98BxdeG" },
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "preview" },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    pending[0]!.resolve(success({ value: "first" }));
+    pending[1]!.resolve(success({ value: "second" }));
+    await expect(first).resolves.toEqual({ value: "first" });
+    await expect(second).resolves.toEqual({ value: "second" });
+  });
+
+  it("treats workspace header names case-insensitively when scoping active queries", async () => {
+    const web = await loadWeb();
+    const pending: Array<{ resolve(response: Response): void }> = [];
+    const fetchImpl = vi.fn(() => new Promise<Response>((resolve) => { pending.push({ resolve }); }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+
+    const first = client.request<{ workspace: string }>({
+      path: "/api/v2/databases",
+      headers: { "X-Workspace-Id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "databases" },
+    });
+    const second = client.request<{ workspace: string }>({
+      path: "/api/v2/databases",
+      headers: { "X-WORKSPACE-ID": "ws-2" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "databases" },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    pending[0]!.resolve(success({ workspace: "ws-1" }));
+    pending[1]!.resolve(success({ workspace: "ws-2" }));
+    await expect(first).resolves.toEqual({ workspace: "ws-1" });
+    await expect(second).resolves.toEqual({ workspace: "ws-2" });
+  });
+
+  it("uses one workspace header snapshot for both the dedupe key and wire request", async () => {
+    const web = await loadWeb();
+    let headerReads = 0;
+    const headers = {} as Record<string, string>;
+    Object.defineProperty(headers, "X-Workspace-Id", {
+      enumerable: true,
+      get() {
+        headerReads += 1;
+        return headerReads === 1 ? "ws-1" : "ws-2";
+      },
+    });
+    let resolveFetch!: (response: Response) => void;
+    const fetchImpl = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((resolve) => {
+      expect(init.headers).toMatchObject({ "x-workspace-id": "ws-1" });
+      resolveFetch = resolve;
+    }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    const first = client.request<{ workspace: string }>({
+      path: "/api/v2/databases",
+      headers,
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "databases" },
+    });
+    const second = client.request<{ workspace: string }>({
+      path: "/api/v2/databases",
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "databases" },
+    });
+
+    expect(headerReads).toBe(1);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    resolveFetch(success({ workspace: "ws-1" }));
+    await expect(first).resolves.toEqual({ workspace: "ws-1" });
+    await expect(second).resolves.toEqual({ workspace: "ws-1" });
+  });
+
+  it("reuses the initial workspace header snapshot across retries", async () => {
+    const web = await loadWeb();
+    const headers = { "x-workspace-id": "ws-1" };
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(unavailable())
+      .mockResolvedValueOnce(success({ workspace: "ws-1" }));
+    const sleep = vi.fn(async () => {
+      headers["x-workspace-id"] = "ws-2";
+    });
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep, random: () => 0 });
+
+    await expect(client.request({
+      path: "/api/v2/databases",
+      headers,
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 1, dedupeKey: "databases" },
+    })).resolves.toEqual({ workspace: "ws-1" });
+    expect(fetchImpl.mock.calls.map(([, init]) => (init as RequestInit).headers)).toEqual([
+      expect.objectContaining({ "x-workspace-id": "ws-1" }),
+      expect.objectContaining({ "x-workspace-id": "ws-1" }),
+    ]);
+  });
+
+  it("rejects conflicting case-insensitive workspace headers without sending an ambiguous request", async () => {
+    const web = await loadWeb();
+    const fetchImpl = vi.fn(async () => success({ ok: true }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+
+    await expect(client.request({
+      path: "/api/v2/databases",
+      headers: { "X-Workspace-Id": "ws-1", "x-workspace-id": "ws-2" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "databases" },
+    })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("skips dedupe when custom JSON serialization is not safely canonicalizable", async () => {
+    const web = await loadWeb();
+    const pending: Array<{ resolve(response: Response): void }> = [];
+    const fetchImpl = vi.fn(() => new Promise<Response>((resolve) => { pending.push({ resolve }); }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    const customBody = (wireValue: string) => Object.assign(Object.create({
+      toJSON() {
+        return { wire_value: wireValue };
+      },
+    }), { same_enumerable_value: true });
+
+    const first = client.request<{ value: string }>({
+      path: "/api/v2/search/preview",
+      method: "POST",
+      body: customBody("first"),
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "preview" },
+    });
+    const second = client.request<{ value: string }>({
+      path: "/api/v2/search/preview",
+      method: "POST",
+      body: customBody("second"),
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "preview" },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect((fetchImpl.mock.calls[0]?.[1] as RequestInit).body).toBe(JSON.stringify({ wire_value: "first" }));
+    expect((fetchImpl.mock.calls[1]?.[1] as RequestInit).body).toBe(JSON.stringify({ wire_value: "second" }));
+    pending[0]!.resolve(success({ value: "first" }));
+    pending[1]!.resolve(success({ value: "second" }));
+    await expect(first).resolves.toEqual({ value: "first" });
+    await expect(second).resolves.toEqual({ value: "second" });
+  });
+
+  it("skips dedupe for accessor-backed JSON values instead of reading them twice", async () => {
+    const web = await loadWeb();
+    const pending: Array<{ resolve(response: Response): void }> = [];
+    const fetchImpl = vi.fn(() => new Promise<Response>((resolve) => { pending.push({ resolve }); }));
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    const accessorBody = (laterValue: string) => {
+      let reads = 0;
+      const body = {} as Record<string, unknown>;
+      Object.defineProperty(body, "value", {
+        enumerable: true,
+        get() {
+          reads += 1;
+          return reads === 1 ? "shared" : laterValue;
+        },
+      });
+      return { body, reads: () => reads };
+    };
+    const firstBody = accessorBody("first");
+    const secondBody = accessorBody("second");
+
+    const first = client.request<{ value: string }>({
+      path: "/api/v2/search/preview",
+      method: "POST",
+      body: firstBody.body,
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "preview" },
+    });
+    const second = client.request<{ value: string }>({
+      path: "/api/v2/search/preview",
+      method: "POST",
+      body: secondBody.body,
+      headers: { "x-workspace-id": "ws-1" },
+      requestClass: "query",
+      policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "preview" },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(firstBody.reads()).toBe(1);
+    expect(secondBody.reads()).toBe(1);
+    pending[0]!.resolve(success({ value: "first" }));
+    pending[1]!.resolve(success({ value: "second" }));
+    await expect(first).resolves.toEqual({ value: "first" });
+    await expect(second).resolves.toEqual({ value: "second" });
+  });
+
+  it("keeps malformed query paths on the asynchronous ApiClient error path", async () => {
+    const web = await loadWeb();
+    const fetchImpl = vi.fn(async () => {
+      throw new TypeError("Invalid URL");
+    });
+    const ApiClient = web.ApiClient as new (options: Record<string, unknown>) => {
+      request<T>(options: Record<string, unknown>): Promise<T>;
+    };
+    const client = new ApiClient({ baseUrl: "https://beta.test", fetchImpl, sleep: vi.fn() });
+    let request: Promise<unknown> | undefined;
+
+    expect(() => {
+      request = client.request({
+        path: "http://[invalid",
+        requestClass: "query",
+        policy: { timeoutMs: 1_000, retry: 0, dedupeKey: "malformed-path" },
+      });
+    }).not.toThrow();
+    await expect(request).rejects.toMatchObject({ code: "NETWORK_ERROR" });
   });
 
   it("does not deduplicate raw query bodies that may contain different bytes", async () => {
@@ -394,6 +672,18 @@ describe("ApiClient", () => {
     expect((safeFetch.mock.calls[0]?.[1] as RequestInit).headers).toMatchObject({
       "idempotency-key": "create-note-1",
     });
+
+    const headerOnlyFetch = vi.fn(async () => unavailable());
+    const headerOnly = new ApiClient({ baseUrl: "https://beta.test", fetchImpl: headerOnlyFetch, sleep: vi.fn() });
+    await expect(headerOnly.request({
+      path: "/api/v2/notes",
+      method: "POST",
+      headers: { "idempotency-key": "manual-header-only" },
+      body: { title: "Draft" },
+      requestClass: "command",
+      policy: { timeoutMs: 1_000, retry: 2 },
+    })).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    expect(headerOnlyFetch).toHaveBeenCalledOnce();
   });
 
   it("keeps the native global receiver when using the default fetch", async () => {
