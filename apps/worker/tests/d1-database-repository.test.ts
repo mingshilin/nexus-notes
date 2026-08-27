@@ -37,6 +37,25 @@ afterEach(async () => {
 });
 
 describe("D1 structured database repository", () => {
+  it("lists bounded database pages with workspace-bound cursors", async () => {
+    const repository = await createRepository();
+    const owner = context("user-1");
+    const databases = [];
+    for (const name of ["One", "Two", "Three"]) {
+      databases.push(await repository.createDatabase(owner, { name, description: "" }));
+    }
+
+    const first = await repository.listDatabasePage(owner, { limit: 2 });
+    const second = await repository.listDatabasePage(owner, { limit: 2, cursor: first.next_cursor });
+
+    expect(first.items).toHaveLength(2);
+    expect(first.next_cursor).toEqual(expect.any(String));
+    expect(second.items).toHaveLength(1);
+    expect(new Set([...first.items, ...second.items].map((database: any) => database.id))).toEqual(new Set(databases.map((database: any) => database.id)));
+    await expect(repository.listDatabasePage({ ...owner, workspaceId: "ws-2" }, { limit: 2, cursor: first.next_cursor }))
+      .rejects.toMatchObject({ code: "INVALID_CURSOR", status: 400 });
+  });
+
   it("performs tenant CRUD with stable keyset pages and server-side field filtering", async () => {
     const repository = await createRepository();
     const owner = context("user-1");

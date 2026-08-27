@@ -164,6 +164,58 @@ describe("AI chat tool protocol", () => {
     )).rejects.toMatchObject({ code: "AI_PROVIDER_INVALID_RESPONSE" });
   });
 
+  it("rejects a provider read call that omits its protocol ID", async () => {
+    const execute = vi.fn();
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "key",
+      model: "model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: null,
+        tool_calls: [{ type: "function", function: { name: "get_note", arguments: "{\"note_id\":\"note-1\"}" } }],
+      } }] })),
+    });
+
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "查找" }] },
+      new AbortController().signal,
+      {
+        readTools: { execute },
+        readContext: {
+          workspaceId: "ws-1", userId: "user-1", selectedNoteIds: ["note-1"], selectedDatabaseIds: [],
+          allowWorkspaceSearch: false, role: "viewer", capabilities: new Set<string>(),
+        },
+      },
+    )).rejects.toMatchObject({ code: "AI_PROVIDER_INVALID_RESPONSE" });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects a provider read call with an invalid protocol ID", async () => {
+    const execute = vi.fn();
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "key",
+      model: "model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: null,
+        tool_calls: [{ id: "   ", type: "function", function: { name: "get_note", arguments: "{\"note_id\":\"note-1\"}" } }],
+      } }] })),
+    });
+
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "查找" }] },
+      new AbortController().signal,
+      {
+        readTools: { execute },
+        readContext: {
+          workspaceId: "ws-1", userId: "user-1", selectedNoteIds: ["note-1"], selectedDatabaseIds: [],
+          allowWorkspaceSearch: false, role: "viewer", capabilities: new Set<string>(),
+        },
+      },
+    )).rejects.toMatchObject({ code: "AI_PROVIDER_INVALID_RESPONSE" });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("sends only the fixed tool declarations and no internal credentials to the provider", async () => {
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));

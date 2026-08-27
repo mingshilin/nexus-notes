@@ -17,12 +17,16 @@ import {
 } from "@nexus/contracts";
 
 import type { D1DatabaseRepository } from "../databases/d1-database-repository";
+import { cursorFingerprint, decodeRecordCursor, encodeDatabasePageCursor } from "../databases/database-model";
 import type { KnowledgeService } from "../knowledge/knowledge-service";
 import type { NoteService } from "../notes/note-service";
 
 const DEFAULT_MAX_RESULTS = 20;
 const MAX_RESULTS = 50;
 const MAX_SELECTED_ENTITIES = 50;
+const MAX_DATABASES_PER_READ = 50;
+const MAX_DATABASE_PAGE_REQUESTS = 50;
+const MAX_RECORD_PAGE_REQUESTS = 50;
 const DEFAULT_DEADLINE_MS = 8_000;
 const MAX_RESULT_BYTES = 64 * 1024;
 
@@ -35,7 +39,7 @@ export interface AiReadExecutionContext extends AiReadContext {
 export interface AiReadToolsDependencies {
   notes: Pick<NoteService, "get" | "list">;
   knowledge: Pick<KnowledgeService, "listReminderPage">;
-  databases: Pick<D1DatabaseRepository, "listDatabases" | "getDatabase" | "searchRecords" | "getRecord">;
+  databases: Pick<D1DatabaseRepository, "listDatabasePage" | "getDatabase" | "searchRecords" | "getRecord">;
   deadlineMs?: number;
   maxResults?: number;
 }
@@ -167,6 +171,30 @@ function noteHit(note: Note, fullContent: boolean, query = ""): AiReadItem {
   });
 }
 
+function noteRepositoryCursor(note: Pick<Note, "updated_at" | "id">) {
+  return encodeURIComponent(`${note.updated_at}\n${note.id}`);
+}
+
+function compactNoteHit(note: Note, query = ""): AiReadItem {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const hitSources = normalizedQuery
+    ? ([
+        ["title", note.title],
+        ["content", note.content],
+      ] as const).filter(([, value]) => value.toLocaleLowerCase().includes(normalizedQuery)).map(([source]) => source)
+    : undefined;
+  return AiReadItemSchema.parse({
+    source_type: "note",
+    source_id: note.id,
+    workspace_id: note.workspace_id,
+    title: note.title.trim().slice(0, 160),
+    ...(hitSources?.length ? { hit_sources: hitSources } : {}),
+    status: note.status,
+    revision: note.revision,
+    updated_at: note.updated_at,
+  });
+}
+
 function reminderHit(reminder: Reminder): AiReadItem {
   return AiReadItemSchema.parse({
     source_type: "reminder",
@@ -178,6 +206,10 @@ function reminderHit(reminder: Reminder): AiReadItem {
     revision: reminder.revision,
     updated_at: reminder.updated_at,
   });
+}
+
+function reminderRepositoryCursor(reminder: Pick<Reminder, "remind_at" | "id">) {
+  return encodeURIComponent(`${reminder.remind_at}|${reminder.id}`);
 }
 
 function databaseHit(database: Database): AiReadItem {
@@ -201,9 +233,12 @@ function recordTitle(record: DatabaseRecord, properties: readonly DatabaseProper
 
 function recordHit(record: DatabaseRecord, properties: readonly DatabaseProperty[]): AiReadItem {
   const readablePropertyIds = new Set(properties.map((property) => property.id));
-  const readableValues = Object.fromEntries(
+  let readableValues = Object.fromEntries(
     Object.entries(record.values).filter(([propertyId]) => readablePropertyIds.has(propertyId)),
   );
+  if (new TextEncoder().encode(JSON.stringify(readableValues)).byteLength > 16_000) {
+    readableValues = {};
+  }
   return AiReadItemSchema.parse({
     source_type: "database_record",
     source_id: record.id,
@@ -223,13 +258,29 @@ function result(
   selectedOnly = !context.allowWorkspaceSearch,
 ): AiReadResult {
   const scope = { workspace_id: context.workspaceId, selected_only: selectedOnly };
-  const bounded: AiReadItem[] = [];
-  for (const item of items.slice(0, MAX_RESULTS)) {
-    const candidate = { tool, items: [...bounded, item], next_cursor: nextCursor, scope };
-    if (new TextEncoder().encode(JSON.stringify(candidate)).byteLength > MAX_RESULT_BYTES) break;
-    bounded.push(item);
+  const candidate = { tool, items, next_cursor: nextCursor, scope };
+  if (items.length > MAX_RESULTS || new TextEncoder().encode(JSON.stringify(candidate)).byteLength > MAX_RESULT_BYTES) {
+    throw new AiReadToolError("AI_READ_RESULT_TOO_LARGE", "AI read result exceeded the bounded size", 413);
   }
-  return AiReadResultSchema.parse({ tool, items: bounded, next_cursor: nextCursor, scope });
+  return AiReadResultSchema.parse(candidate);
+}
+
+function canAppendResult(
+  tool: AiReadToolName,
+  items: readonly AiReadItem[],
+  item: AiReadItem,
+  context: AiReadExecutionContext,
+  nextCursor: string | null,
+  selectedOnly = !context.allowWorkspaceSearch,
+) {
+  if (items.length >= MAX_RESULTS) return false;
+  const candidate = {
+    tool,
+    items: [...items, item],
+    next_cursor: nextCursor,
+    scope: { workspace_id: context.workspaceId, selected_only: selectedOnly },
+  };
+  return new TextEncoder().encode(JSON.stringify(candidate)).byteLength <= MAX_RESULT_BYTES;
 }
 
 function matchesNote(note: Note, query: string) {
@@ -250,28 +301,43 @@ function selectedNoteScopeFingerprint(noteIds: readonly string[]) {
   return fingerprint(noteIds.join("\u001f"));
 }
 
-function encodeSelectedNoteCursor(offset: number, query: string, noteIds: readonly string[]) {
+type SelectedNoteCursor = {
+  scope: "selected_notes";
+  workspace_id: string;
+  user_id: string;
+  offset: number;
+  query_hash: string;
+  selection_hash: string;
+};
+
+function encodeSelectedNoteCursor(context: AiReadExecutionContext, offset: number, query: string, noteIds: readonly string[]) {
   return encodeURIComponent(JSON.stringify({
     scope: "selected_notes",
+    workspace_id: context.workspaceId,
+    user_id: context.userId,
     offset,
     query_hash: fingerprint(query.trim().toLocaleLowerCase()),
     selection_hash: selectedNoteScopeFingerprint(noteIds),
-  }));
+  } satisfies SelectedNoteCursor));
 }
 
-function decodeSelectedNoteCursor(value: unknown, query: string, noteIds: readonly string[]) {
+function decodeSelectedNoteCursor(value: unknown, context: AiReadExecutionContext, query: string, noteIds: readonly string[]) {
   if (typeof value !== "string" || !value) {
     throw new AiReadToolError("AI_READ_CURSOR_INVALID", "The selected-note cursor is invalid", 400);
   }
   try {
     const decoded = JSON.parse(decodeURIComponent(value)) as {
       scope?: unknown;
+      workspace_id?: unknown;
+      user_id?: unknown;
       offset?: unknown;
       query_hash?: unknown;
       selection_hash?: unknown;
     };
     if (
       decoded.scope !== "selected_notes"
+      || decoded.workspace_id !== context.workspaceId
+      || decoded.user_id !== context.userId
       || typeof decoded.offset !== "number"
       || !Number.isInteger(decoded.offset)
       || decoded.offset < 0
@@ -287,8 +353,121 @@ function decodeSelectedNoteCursor(value: unknown, query: string, noteIds: readon
   }
 }
 
-function encodeDatabaseCursor(databaseId: string, cursor: string) {
-  return encodeURIComponent(JSON.stringify({ database_id: databaseId, cursor }));
+type WorkspaceDatabaseCursor = {
+  scope: "workspace_databases";
+  workspace_id: string;
+  user_id: string;
+  query_hash: string;
+  database_cursor: string | null;
+  database_id: string | null;
+  database_emitted: boolean;
+  record_cursor: string | null;
+  legacy_database_position?: boolean;
+};
+
+type WorkspaceNoteCursor = {
+  scope: "workspace_notes";
+  workspace_id: string;
+  user_id: string;
+  query_hash: string;
+  note_cursor: string;
+};
+
+type WorkspaceReminderCursor = {
+  scope: "workspace_reminders";
+  workspace_id: string;
+  user_id: string;
+  status: "all" | "pending";
+  query_hash: string;
+  reminder_cursor: string;
+};
+
+type SelectedDatabaseCursor = {
+  scope: "selected_databases";
+  workspace_id: string;
+  user_id: string;
+  query_hash: string;
+  selection_hash: string;
+  database_index: number;
+  database_emitted: boolean;
+  record_cursor: string | null;
+};
+
+function encodeWorkspaceDatabaseCursor(cursor: WorkspaceDatabaseCursor) {
+  return encodeURIComponent(JSON.stringify(cursor));
+}
+
+function encodeSelectedDatabaseCursor(cursor: SelectedDatabaseCursor) {
+  return encodeURIComponent(JSON.stringify(cursor));
+}
+
+function encodeWorkspaceNoteCursor(context: AiReadExecutionContext, query: string, noteCursor: string) {
+  return encodeURIComponent(JSON.stringify({
+    scope: "workspace_notes",
+    workspace_id: context.workspaceId,
+    user_id: context.userId,
+    query_hash: fingerprint(query.trim().toLocaleLowerCase()),
+    note_cursor: noteCursor,
+  } satisfies WorkspaceNoteCursor));
+}
+
+function decodeWorkspaceNoteCursor(value: unknown, context: AiReadExecutionContext, query: string) {
+  if (value === undefined || value === null) return null;
+  const queryHash = fingerprint(query.trim().toLocaleLowerCase());
+  try {
+    const decoded = JSON.parse(decodeURIComponent(String(value))) as Partial<WorkspaceNoteCursor>;
+    if (
+      decoded.scope === "workspace_notes"
+      && decoded.workspace_id === context.workspaceId
+      && decoded.user_id === context.userId
+      && decoded.query_hash === queryHash
+      && typeof decoded.note_cursor === "string"
+      && decoded.note_cursor.length > 0
+    ) {
+      return { cursor: decoded.note_cursor, legacy: false };
+    }
+  } catch {
+    // Fall through to the legacy cursor compatibility path below.
+  }
+  throw new AiReadToolError("AI_READ_CURSOR_INVALID", "The workspace note cursor is invalid for this query", 400);
+}
+
+function encodeWorkspaceReminderCursor(context: AiReadExecutionContext, status: "all" | "pending", query: string, reminderCursor: string) {
+  return encodeURIComponent(JSON.stringify({
+    scope: "workspace_reminders",
+    workspace_id: context.workspaceId,
+    user_id: context.userId,
+    status,
+    query_hash: fingerprint(query.trim().toLocaleLowerCase()),
+    reminder_cursor: reminderCursor,
+  } satisfies WorkspaceReminderCursor));
+}
+
+function decodeWorkspaceReminderCursor(
+  value: unknown,
+  context: AiReadExecutionContext,
+  status: "all" | "pending",
+  query: string,
+) {
+  if (value === undefined || value === null) return null;
+  const queryHash = fingerprint(query.trim().toLocaleLowerCase());
+  try {
+    const decoded = JSON.parse(decodeURIComponent(String(value))) as Partial<WorkspaceReminderCursor>;
+    if (
+      decoded.scope === "workspace_reminders"
+      && decoded.workspace_id === context.workspaceId
+      && decoded.user_id === context.userId
+      && decoded.status === status
+      && decoded.query_hash === queryHash
+      && typeof decoded.reminder_cursor === "string"
+      && decoded.reminder_cursor.length > 0
+    ) {
+      return { cursor: decoded.reminder_cursor, legacy: false };
+    }
+  } catch {
+    // Fall through to the legacy cursor compatibility path below.
+  }
+  throw new AiReadToolError("AI_READ_CURSOR_INVALID", "The reminder cursor is invalid for this query", 400);
 }
 
 function decodeDatabaseCursor(value: unknown) {
@@ -301,6 +480,120 @@ function decodeDatabaseCursor(value: unknown) {
     return { databaseId: decoded.database_id, cursor: decoded.cursor };
   } catch {
     throw new AiReadToolError("AI_READ_CURSOR_INVALID", "The AI database cursor is invalid", 400);
+  }
+}
+
+function validateLegacyRecordCursor(databaseId: string, recordCursor: string, query: string) {
+  try {
+    const decoded = decodeRecordCursor(recordCursor);
+    const expected = cursorFingerprint({ kind: "search", database_id: databaseId, query });
+    if (decoded.fingerprint !== expected) throw new Error("legacy cursor query mismatch");
+  } catch {
+    throw new AiReadToolError("AI_READ_CURSOR_INVALID", "The legacy AI database cursor is invalid for this query", 400);
+  }
+}
+
+function selectedDatabaseScopeFingerprint(databaseIds: readonly string[]) {
+  return fingerprint(databaseIds.join("\u001f"));
+}
+
+function decodeSelectedDatabaseCursor(
+  value: unknown,
+  context: AiReadExecutionContext,
+  query: string,
+  databaseIds: readonly string[],
+): SelectedDatabaseCursor | null {
+  if (value === undefined || value === null) return null;
+  const expectedQueryHash = fingerprint(query.trim().toLocaleLowerCase());
+  const expectedSelectionHash = selectedDatabaseScopeFingerprint(databaseIds);
+  try {
+    const decoded = JSON.parse(decodeURIComponent(String(value))) as Record<string, unknown>;
+    if (decoded.scope === "selected_databases") {
+      if (
+        decoded.workspace_id !== context.workspaceId
+        || decoded.user_id !== context.userId
+        || decoded.query_hash !== expectedQueryHash
+        || decoded.selection_hash !== expectedSelectionHash
+        || typeof decoded.database_index !== "number"
+        || !Number.isInteger(decoded.database_index)
+        || decoded.database_index < 0
+        || decoded.database_index >= databaseIds.length
+        || typeof decoded.database_emitted !== "boolean"
+        || (decoded.record_cursor !== null && typeof decoded.record_cursor !== "string")
+        || (typeof decoded.record_cursor === "string" && !decoded.record_cursor)
+      ) {
+        throw new Error("invalid selected database cursor");
+      }
+      return decoded as SelectedDatabaseCursor;
+    }
+
+    // Accept the earlier Task 5 cursor shape without weakening selected scope checks.
+    const legacy = decodeDatabaseCursor(value);
+    if (!legacy) throw new Error("invalid selected database cursor");
+    const databaseIndex = databaseIds.indexOf(legacy.databaseId);
+    if (databaseIndex < 0) {
+      throw new AiReadToolError("AI_READ_TARGET_NOT_SELECTED", "The cursor database must be explicitly selected", 403);
+    }
+    validateLegacyRecordCursor(legacy.databaseId, legacy.cursor, query.trim().toLocaleLowerCase());
+    return {
+      scope: "selected_databases",
+      workspace_id: context.workspaceId,
+      user_id: context.userId,
+      query_hash: expectedQueryHash,
+      selection_hash: expectedSelectionHash,
+      database_index: databaseIndex,
+      database_emitted: true,
+      record_cursor: legacy.cursor,
+    };
+  } catch (error) {
+    if (error instanceof AiReadToolError) throw error;
+    throw new AiReadToolError("AI_READ_CURSOR_INVALID", "The AI database cursor is invalid for this selected scope", 400);
+  }
+}
+
+function decodeWorkspaceDatabaseCursor(value: unknown, context: AiReadExecutionContext, query: string): WorkspaceDatabaseCursor | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !value) {
+    throw new AiReadToolError("AI_READ_CURSOR_INVALID", "The AI database cursor is invalid", 400);
+  }
+  try {
+    const decoded = JSON.parse(decodeURIComponent(value)) as Partial<WorkspaceDatabaseCursor> & { database_id?: unknown; cursor?: unknown };
+    if (decoded.scope === undefined) {
+      const legacy = decodeDatabaseCursor(value);
+      if (!legacy) throw new Error("invalid legacy workspace database cursor");
+      validateLegacyRecordCursor(legacy.databaseId, legacy.cursor, query.trim().toLocaleLowerCase());
+      return {
+        scope: "workspace_databases",
+        workspace_id: context.workspaceId,
+        user_id: context.userId,
+        query_hash: fingerprint(query.trim().toLocaleLowerCase()),
+        database_cursor: null,
+        database_id: legacy.databaseId,
+        database_emitted: true,
+        record_cursor: legacy.cursor,
+        legacy_database_position: true,
+      };
+    }
+    if (
+      decoded.scope !== "workspace_databases"
+      || decoded.workspace_id !== context.workspaceId
+      || decoded.user_id !== context.userId
+      || decoded.query_hash !== fingerprint(query.trim().toLocaleLowerCase())
+      || (decoded.database_cursor !== null && typeof decoded.database_cursor !== "string")
+      || (typeof decoded.database_cursor === "string" && !decoded.database_cursor)
+      || (decoded.database_id !== null && typeof decoded.database_id !== "string")
+      || (typeof decoded.database_id === "string" && !decoded.database_id)
+      || typeof decoded.database_emitted !== "boolean"
+      || (decoded.record_cursor !== null && typeof decoded.record_cursor !== "string")
+      || (typeof decoded.record_cursor === "string" && !decoded.record_cursor)
+      || (decoded.database_id === null && (decoded.database_emitted || decoded.record_cursor !== null))
+      || (decoded.legacy_database_position !== undefined && typeof decoded.legacy_database_position !== "boolean")
+    ) {
+      throw new Error("invalid workspace database cursor");
+    }
+    return decoded as WorkspaceDatabaseCursor;
+  } catch {
+    throw new AiReadToolError("AI_READ_CURSOR_INVALID", "The AI database cursor is invalid for this query", 400);
   }
 }
 
@@ -355,45 +648,86 @@ export class AiReadTools {
       throw new AiReadToolError("AI_READ_SCOPE_REQUIRED", "Select notes or explicitly enable workspace search", 400);
     }
     if (context.allowWorkspaceSearch) {
-      try {
-        const page = await this.dependencies.notes.list(
-          { workspaceId: context.workspaceId, userId: context.userId },
-          { query, status: "active", limit, ...(typeof input.cursor === "string" ? { cursor: input.cursor } : {}) },
-          signal,
-        );
-        const items = page.items.map((note) => {
-          assertWorkspace(note, context);
-          return noteHit(note, false, query);
-        });
-        return result("search_notes", items, context, page.next_cursor);
-      } catch (error) {
-        throw safeError(error, "AI_READ_NOTES_DENIED", "Workspace note search is unavailable");
-      }
+      return this.searchWorkspaceNotes(query, limit, input.cursor, context, signal);
     }
 
     const items: AiReadItem[] = [];
     const selectedNoteIds = context.selectedNoteIds.slice(0, MAX_SELECTED_ENTITIES);
-    const offset = input.cursor === undefined ? 0 : decodeSelectedNoteCursor(input.cursor, query, selectedNoteIds);
+    const offset = input.cursor === undefined ? 0 : decodeSelectedNoteCursor(input.cursor, context, query, selectedNoteIds);
     for (let index = offset; index < selectedNoteIds.length; index += 1) {
       signal.throwIfAborted();
       const noteId = selectedNoteIds[index];
       try {
         const note = await this.dependencies.notes.get({ workspaceId: context.workspaceId, userId: context.userId }, noteId, signal);
         assertWorkspace(note, context);
-        if (matchesNote(note, query)) items.push(noteHit(note, false, query));
+        if (matchesNote(note, query)) {
+          const item = noteHit(note, false, query);
+          const nextOffset = index + 1;
+          const nextCursor = nextOffset < selectedNoteIds.length
+            ? encodeSelectedNoteCursor(context, nextOffset, query, selectedNoteIds)
+            : null;
+          if (!canAppendResult("search_notes", items, item, context, nextCursor)) {
+            const retryCursor = encodeSelectedNoteCursor(context, index, query, selectedNoteIds);
+            if (items.length === 0) return result("search_notes", [item], context, nextCursor);
+            return result("search_notes", items, context, retryCursor);
+          }
+          items.push(item);
+          if (items.length >= limit) return result("search_notes", items, context, nextCursor);
+        }
       } catch (error) {
         if (isPermissionError(error)) throw safeError(error, "AI_READ_NOTES_DENIED", "Selected note cannot be read");
         if (!isNotFoundError(error)) throw safeError(error, "AI_READ_NOTES_UNAVAILABLE", "Selected note cannot be read");
       }
-      if (items.length >= limit) {
-        const nextOffset = index + 1;
-        const nextCursor = nextOffset < selectedNoteIds.length
-          ? encodeSelectedNoteCursor(nextOffset, query, selectedNoteIds)
-          : null;
-        return result("search_notes", items, context, nextCursor);
-      }
     }
     return result("search_notes", items, context);
+  }
+
+  private async searchWorkspaceNotes(
+    query: string,
+    limit: number,
+    rawCursor: unknown,
+    context: AiReadExecutionContext,
+    signal: AbortSignal,
+  ) {
+    const scopedCursor = decodeWorkspaceNoteCursor(rawCursor, context, query);
+    try {
+      const page = await this.dependencies.notes.list(
+        { workspaceId: context.workspaceId, userId: context.userId },
+        { query, status: "active", limit, ...(scopedCursor ? { cursor: scopedCursor.cursor } : {}) },
+        signal,
+      );
+      if (scopedCursor && page.next_cursor === scopedCursor.cursor) {
+        throw new AiReadToolError("AI_READ_PAGING_STALLED", "Workspace note pagination did not advance", 503, true);
+      }
+      const items: AiReadItem[] = [];
+      for (let index = 0; index < page.items.length && items.length < limit; index += 1) {
+        signal.throwIfAborted();
+        const note = page.items[index]!;
+        assertWorkspace(note, context);
+        const rawNextCursor = index + 1 < page.items.length
+          ? noteRepositoryCursor(note)
+          : page.next_cursor;
+        const nextCursor = rawNextCursor ? encodeWorkspaceNoteCursor(context, query, rawNextCursor) : null;
+        const item = noteHit(note, false, query);
+        if (!canAppendResult("search_notes", items, item, context, nextCursor)) {
+          if (items.length === 0) {
+            const compact = compactNoteHit(note, query);
+            if (!canAppendResult("search_notes", [], compact, context, nextCursor)) {
+              throw new AiReadToolError("AI_READ_RESULT_TOO_LARGE", "AI note result exceeded the bounded size", 413);
+            }
+            return result("search_notes", [compact], context, nextCursor);
+          }
+          const lastNote = page.items[index - 1]!;
+          return result("search_notes", items, context, encodeWorkspaceNoteCursor(context, query, noteRepositoryCursor(lastNote)));
+        }
+        items.push(item);
+        if (items.length >= limit) return result("search_notes", items, context, nextCursor);
+      }
+      const nextCursor = page.next_cursor ? encodeWorkspaceNoteCursor(context, query, page.next_cursor) : null;
+      return result("search_notes", items, context, nextCursor);
+    } catch (error) {
+      throw safeError(error, "AI_READ_NOTES_DENIED", "Workspace note search is unavailable");
+    }
   }
 
   private async getNote(input: ReadInput, context: AiReadExecutionContext, signal: AbortSignal) {
@@ -413,22 +747,68 @@ export class AiReadTools {
   private async listReminders(input: ReadInput, context: AiReadExecutionContext, signal: AbortSignal) {
     const includeCompleted = input.include_completed === true;
     const limit = Math.min(limitValue(input.limit, this.maxResults), this.maxResults);
+    const status = includeCompleted ? "all" as const : "pending" as const;
+    const query = typeof input.query === "string" ? input.query : "";
+    return this.listReminderPage(status, query, limit, input.cursor, context, signal);
+  }
+
+  private async listReminderPage(
+    status: "all" | "pending",
+    query: string,
+    limit: number,
+    rawCursor: unknown,
+    context: AiReadExecutionContext,
+    signal: AbortSignal,
+  ) {
+    const scopedCursor = decodeWorkspaceReminderCursor(rawCursor, context, status, query);
     try {
       const page = await this.dependencies.knowledge.listReminderPage(
         { workspaceId: context.workspaceId, userId: context.userId },
         {
-          status: includeCompleted ? "all" : "pending",
+          status,
           limit,
-          ...(typeof input.query === "string" && input.query ? { query: input.query } : {}),
-          ...(typeof input.cursor === "string" ? { cursor: input.cursor } : {}),
+          ...(query ? { query } : {}),
+          ...(scopedCursor ? { cursor: scopedCursor.cursor } : {}),
         },
         signal,
       );
-      const items = page.items.map((reminder) => {
+      if (scopedCursor && page.next_cursor === scopedCursor.cursor) {
+        throw new AiReadToolError("AI_READ_PAGING_STALLED", "Reminder pagination did not advance", 503, true);
+      }
+      const items: AiReadItem[] = [];
+      for (let index = 0; index < page.items.length && items.length < limit; index += 1) {
+        signal.throwIfAborted();
+        const reminder = page.items[index]!;
         assertWorkspace(reminder, context);
-        return reminderHit(reminder);
-      });
-      return result("list_reminders", items, context, page.next_cursor);
+        const rawNextCursor = index + 1 < page.items.length
+          ? reminderRepositoryCursor(reminder)
+          : page.next_cursor;
+        const nextCursor = rawNextCursor ? encodeWorkspaceReminderCursor(context, status, query, rawNextCursor) : null;
+        const item = reminderHit(reminder);
+        if (!canAppendResult("list_reminders", items, item, context, nextCursor)) {
+          if (items.length === 0) {
+            const compact = AiReadItemSchema.parse({
+              source_type: "reminder",
+              source_id: reminder.id,
+              workspace_id: reminder.workspace_id,
+              title: reminder.title.trim().slice(0, 160),
+              status: reminder.status,
+              revision: reminder.revision,
+              updated_at: reminder.updated_at,
+            });
+            if (!canAppendResult("list_reminders", [], compact, context, nextCursor)) {
+              throw new AiReadToolError("AI_READ_RESULT_TOO_LARGE", "AI reminder result exceeded the bounded size", 413);
+            }
+            return result("list_reminders", [compact], context, nextCursor, false);
+          }
+          const lastReminder = page.items[index - 1]!;
+          return result("list_reminders", items, context, encodeWorkspaceReminderCursor(context, status, query, reminderRepositoryCursor(lastReminder)), false);
+        }
+        items.push(item);
+        if (items.length >= limit) return result("list_reminders", items, context, nextCursor, false);
+      }
+      const nextCursor = page.next_cursor ? encodeWorkspaceReminderCursor(context, status, query, page.next_cursor) : null;
+      return result("list_reminders", items, context, nextCursor, false);
     } catch (error) {
       throw safeError(error, "AI_READ_REMINDERS_UNAVAILABLE", "Reminders cannot be read right now");
     }
@@ -450,57 +830,302 @@ export class AiReadTools {
   private async searchDatabases(input: ReadInput, context: AiReadExecutionContext, signal: AbortSignal) {
     const query = typeof input.query === "string" ? input.query.trim().toLocaleLowerCase() : "";
     const limit = Math.min(limitValue(input.limit, this.maxResults), this.maxResults);
-    const cursor = decodeDatabaseCursor(input.cursor);
-    if (cursor && !context.allowWorkspaceSearch && !context.selectedDatabaseIds.includes(cursor.databaseId)) {
-      throw new AiReadToolError("AI_READ_TARGET_NOT_SELECTED", "The cursor database must be explicitly selected", 403);
+    if (context.allowWorkspaceSearch) {
+      return this.searchWorkspaceDatabases(query, limit, input.cursor, context, signal);
     }
-    if (!context.allowWorkspaceSearch && context.selectedDatabaseIds.length === 0) {
+    if (context.selectedDatabaseIds.length === 0) {
       throw new AiReadToolError("AI_READ_SCOPE_REQUIRED", "Select databases or explicitly enable workspace search", 400);
     }
-    let candidates: Database[];
-    try {
-      candidates = context.allowWorkspaceSearch
-        ? await this.dependencies.databases.listDatabases(workspaceActor(context), signal)
-        : context.selectedDatabaseIds.slice(0, MAX_SELECTED_ENTITIES).map((id) => ({ id } as Database));
-    } catch (error) {
-      throw safeError(error, "AI_READ_DATABASES_UNAVAILABLE", "Databases cannot be read right now");
-    }
+    return this.searchSelectedDatabases(query, limit, input.cursor, context, signal);
+  }
 
+  private async searchSelectedDatabases(
+    query: string,
+    limit: number,
+    rawCursor: unknown,
+    context: AiReadExecutionContext,
+    signal: AbortSignal,
+  ) {
+    const databaseIds = context.selectedDatabaseIds.slice(0, MAX_SELECTED_ENTITIES);
+    let state = decodeSelectedDatabaseCursor(rawCursor, context, query, databaseIds) ?? {
+      scope: "selected_databases" as const,
+      workspace_id: context.workspaceId,
+      user_id: context.userId,
+      query_hash: fingerprint(query.trim().toLocaleLowerCase()),
+      selection_hash: selectedDatabaseScopeFingerprint(databaseIds),
+      database_index: 0,
+      database_emitted: false,
+      record_cursor: null,
+    };
     const items: AiReadItem[] = [];
-    let nextCursor: string | null = null;
-    for (const candidate of candidates.slice(0, MAX_SELECTED_ENTITIES)) {
+    let recordPageRequests = 0;
+    const seenRecordCursors = new Set<string>();
+
+    while (state.database_index < databaseIds.length) {
       signal.throwIfAborted();
-      if (cursor && candidate.id !== cursor.databaseId) continue;
-      let bundle: ReadDatabaseBundle;
-      try {
-        bundle = await this.accessibleDatabase(context, candidate.id, !context.allowWorkspaceSearch, signal);
-      } catch (error) {
-        if (context.allowWorkspaceSearch && isPermissionError(error)) continue;
-        throw error;
+      const databaseId = databaseIds[state.database_index]!;
+      const checkpoint = state;
+      const bundle = await this.accessibleDatabase(context, databaseId, true, signal);
+
+      if (!state.database_emitted) {
+        const databaseText = `${bundle.database.name}\n${bundle.database.description}`.toLocaleLowerCase();
+        const emittedState = { ...state, database_emitted: true } satisfies SelectedDatabaseCursor;
+        if (!query || databaseText.includes(query)) {
+          const item = databaseHit(bundle.database);
+          const continuation = query || state.database_index + 1 < databaseIds.length
+            ? encodeSelectedDatabaseCursor(emittedState)
+            : null;
+          if (!canAppendResult("search_databases", items, item, context, continuation, true)) {
+            if (items.length === 0) throw new AiReadToolError("AI_READ_RESULT_TOO_LARGE", "AI database result exceeded the bounded size", 413);
+            return result("search_databases", items, context, encodeSelectedDatabaseCursor(checkpoint), true);
+          }
+          items.push(item);
+          state = emittedState;
+          if (items.length >= limit) return result("search_databases", items, context, continuation, true);
+        } else {
+          state = emittedState;
+        }
       }
-      const databaseText = `${bundle.database.name}\n${bundle.database.description}`.toLocaleLowerCase();
-      if (!query || databaseText.includes(query)) items.push(databaseHit(bundle.database));
+
       if (query && items.length < limit) {
         try {
-          const page = await this.dependencies.databases.searchRecords(workspaceActor(context), bundle.database.id, {
+          const currentRecordCursor = state.record_cursor;
+          const recordCursorKey = `${databaseId}\u001f${currentRecordCursor ?? "<initial>"}`;
+          if (recordPageRequests >= MAX_RECORD_PAGE_REQUESTS || seenRecordCursors.has(recordCursorKey)) {
+            throw new AiReadToolError("AI_READ_PAGING_STALLED", "Database record pagination did not advance", 503, true);
+          }
+          recordPageRequests += 1;
+          seenRecordCursors.add(recordCursorKey);
+          const page = await this.dependencies.databases.searchRecords(workspaceActor(context), databaseId, {
             query,
-            limit: limit - items.length,
-            ...(cursor ? { cursor: cursor.cursor } : {}),
+            limit: 1,
+            ...(currentRecordCursor ? { cursor: currentRecordCursor } : {}),
             signal,
           });
-          for (const record of page.items) {
-            assertWorkspace(record, context);
-            items.push(recordHit(record, bundle.properties));
-            if (items.length >= limit) break;
+          if (page.next_cursor !== null && (!page.next_cursor || page.next_cursor === currentRecordCursor)) {
+            throw new AiReadToolError("AI_READ_PAGING_STALLED", "Database record pagination did not advance", 503, true);
           }
-          if (page.next_cursor) nextCursor = encodeDatabaseCursor(bundle.database.id, page.next_cursor);
+          const record = page.items[0];
+          if (record) {
+            assertWorkspace(record, context);
+            const nextState: SelectedDatabaseCursor = page.next_cursor
+              ? { ...state, database_emitted: true, record_cursor: page.next_cursor }
+              : { ...state, database_index: state.database_index + 1, database_emitted: false, record_cursor: null };
+            const continuation = nextState.database_index < databaseIds.length
+              ? encodeSelectedDatabaseCursor(nextState)
+              : null;
+            let item = recordHit(record, bundle.properties);
+            if (!canAppendResult("search_databases", items, item, context, continuation, true) && items.length === 0) {
+              item = AiReadItemSchema.parse({ ...item, values: {} });
+            }
+            if (!canAppendResult("search_databases", items, item, context, continuation, true)) {
+              return result("search_databases", items, context, encodeSelectedDatabaseCursor(state), true);
+            }
+            items.push(item);
+            state = nextState;
+            if (items.length >= limit) return result("search_databases", items, context, continuation, true);
+            continue;
+          }
+          if (page.next_cursor) {
+            state = { ...state, database_emitted: true, record_cursor: page.next_cursor };
+            continue;
+          }
+        } catch (error) {
+          if (!isPermissionError(error) && !isNotFoundError(error)) {
+            throw safeError(error, "AI_READ_DATABASES_UNAVAILABLE", "Database records cannot be searched");
+          }
+        }
+      }
+      state = { ...state, database_index: state.database_index + 1, database_emitted: false, record_cursor: null };
+    }
+    return result("search_databases", items, context, null, true);
+  }
+
+  private async searchWorkspaceDatabases(
+    query: string,
+    limit: number,
+    rawCursor: unknown,
+    context: AiReadExecutionContext,
+    signal: AbortSignal,
+  ) {
+    const cursor = decodeWorkspaceDatabaseCursor(rawCursor, context, query);
+    let state: WorkspaceDatabaseCursor = cursor ?? {
+      scope: "workspace_databases",
+      workspace_id: context.workspaceId,
+      user_id: context.userId,
+      query_hash: fingerprint(query.trim().toLocaleLowerCase()),
+      database_cursor: null,
+      database_id: null,
+      database_emitted: false,
+      record_cursor: null,
+    };
+    const items: AiReadItem[] = [];
+    let databasesVisited = 0;
+    let activeDatabaseId: string | null = null;
+    let databasePageRequests = 0;
+    const seenDatabaseCursors = new Set<string>();
+    let recordPageRequests = 0;
+    const seenRecordCursors = new Set<string>();
+
+    while (true) {
+      signal.throwIfAborted();
+      if (state.database_id === null && databasesVisited >= MAX_DATABASES_PER_READ) {
+        return result("search_databases", items, context, encodeWorkspaceDatabaseCursor(state));
+      }
+      let database: Database | undefined;
+      let databaseCursor: string | null = state.database_cursor;
+      let recordCursor: string | null = state.record_cursor;
+      let databaseEmitted = state.database_emitted;
+      if (state.database_id) {
+        database = { id: state.database_id } as Database;
+      } else {
+        const cursorKey = state.database_cursor ?? "<initial>";
+        if (databasePageRequests >= MAX_DATABASE_PAGE_REQUESTS || seenDatabaseCursors.has(cursorKey)) {
+          throw new AiReadToolError("AI_READ_PAGING_STALLED", "Database pagination did not advance", 503, true);
+        }
+        seenDatabaseCursors.add(cursorKey);
+        databasePageRequests += 1;
+        let page: { items: Database[]; next_cursor: string | null };
+        try {
+          page = await this.dependencies.databases.listDatabasePage(
+            workspaceActor(context),
+            { cursor: state.database_cursor, limit: 1 },
+            signal,
+          );
+        } catch (error) {
+          throw safeError(error, "AI_READ_DATABASES_UNAVAILABLE", "Databases cannot be read right now");
+        }
+        if (page.next_cursor !== null && page.next_cursor === state.database_cursor) {
+          throw new AiReadToolError("AI_READ_PAGING_STALLED", "Database pagination did not advance", 503, true);
+        }
+        database = page.items[0];
+        if (!database) {
+          if (!page.next_cursor) break;
+          state = { ...state, database_cursor: page.next_cursor };
+          continue;
+        }
+        databaseCursor = page.next_cursor;
+        recordCursor = null;
+        databaseEmitted = false;
+      }
+
+      if (database.id !== activeDatabaseId) {
+        databasesVisited += 1;
+        activeDatabaseId = database.id;
+      }
+
+      const provisionalDatabase = {
+        ...state,
+        database_id: database.id,
+        database_cursor: databaseCursor,
+        database_emitted: databaseEmitted,
+        record_cursor: recordCursor,
+      } satisfies WorkspaceDatabaseCursor;
+      let bundle: ReadDatabaseBundle;
+      try {
+        bundle = await this.accessibleDatabase(context, database.id, false, signal);
+      } catch (error) {
+        if (isPermissionError(error) || isNotFoundError(error)) {
+          if (state.legacy_database_position) {
+            throw new AiReadToolError("AI_READ_CURSOR_INVALID", "The legacy database cursor target is no longer readable", 400);
+          }
+          if (databaseCursor === null) break;
+          state = { ...provisionalDatabase, database_id: null, database_emitted: false, record_cursor: null };
+          continue;
+        }
+        throw error;
+      }
+
+      if (state.legacy_database_position) {
+        databaseCursor = encodeDatabasePageCursor(bundle.database);
+      }
+      const beforeDatabase = {
+        ...provisionalDatabase,
+        database_cursor: databaseCursor,
+        legacy_database_position: undefined,
+      } satisfies WorkspaceDatabaseCursor;
+      let checkpoint = beforeDatabase;
+
+      if (!databaseEmitted) {
+        const databaseText = `${bundle.database.name}\n${bundle.database.description}`.toLocaleLowerCase();
+        if (!query || databaseText.includes(query)) {
+          const item = databaseHit(bundle.database);
+          const emittedState = { ...beforeDatabase, database_emitted: true } satisfies WorkspaceDatabaseCursor;
+          const continuation = encodeWorkspaceDatabaseCursor(emittedState);
+          if (!canAppendResult("search_databases", items, item, context, continuation)) {
+            if (items.length === 0) throw new AiReadToolError("AI_READ_RESULT_TOO_LARGE", "AI database result exceeded the bounded size", 413);
+            return result("search_databases", items, context, encodeWorkspaceDatabaseCursor(beforeDatabase));
+          }
+          items.push(item);
+          checkpoint = emittedState;
+          databaseEmitted = true;
+          if (items.length >= limit) {
+            const nextCursor = query || databaseCursor !== null ? encodeWorkspaceDatabaseCursor(emittedState) : null;
+            return result("search_databases", items, context, nextCursor);
+          }
+        } else {
+          databaseEmitted = true;
+          checkpoint = { ...beforeDatabase, database_emitted: true };
+        }
+      }
+
+      if (query && items.length < limit) {
+        try {
+          const currentRecordCursor = recordCursor;
+          const recordCursorKey = `${database.id}\u001f${currentRecordCursor ?? "<initial>"}`;
+          if (recordPageRequests >= MAX_RECORD_PAGE_REQUESTS || seenRecordCursors.has(recordCursorKey)) {
+            throw new AiReadToolError("AI_READ_PAGING_STALLED", "Database record pagination did not advance", 503, true);
+          }
+          recordPageRequests += 1;
+          seenRecordCursors.add(recordCursorKey);
+          const page = await this.dependencies.databases.searchRecords(workspaceActor(context), database.id, {
+            query,
+            limit: 1,
+            ...(currentRecordCursor ? { cursor: currentRecordCursor } : {}),
+            signal,
+          });
+          if (page.next_cursor !== null && (!page.next_cursor || page.next_cursor === currentRecordCursor)) {
+            throw new AiReadToolError("AI_READ_PAGING_STALLED", "Database record pagination did not advance", 503, true);
+          }
+          const record = page.items[0];
+          if (record) {
+            assertWorkspace(record, context);
+            const item = recordHit(record, bundle.properties);
+            const afterRecord = page.next_cursor
+              ? { ...beforeDatabase, database_emitted: true, record_cursor: page.next_cursor }
+              : { ...beforeDatabase, database_id: null, database_emitted: false, record_cursor: null };
+            const nextCursor = page.next_cursor || databaseCursor !== null
+              ? encodeWorkspaceDatabaseCursor(afterRecord)
+              : null;
+            let boundedItem = item;
+            if (!canAppendResult("search_databases", items, boundedItem, context, nextCursor) && items.length === 0) {
+              boundedItem = AiReadItemSchema.parse({ ...item, values: {} });
+            }
+            if (!canAppendResult("search_databases", items, boundedItem, context, nextCursor)) {
+              return result("search_databases", items, context, encodeWorkspaceDatabaseCursor(checkpoint));
+            }
+            items.push(boundedItem);
+            if (items.length >= limit) return result("search_databases", items, context, nextCursor);
+            if (!page.next_cursor) {
+              if (databaseCursor === null) break;
+              state = afterRecord;
+              continue;
+            }
+            state = afterRecord;
+            continue;
+          }
+          if (page.next_cursor) {
+            state = { ...beforeDatabase, database_emitted: true, record_cursor: page.next_cursor };
+            continue;
+          }
         } catch (error) {
           if (!isPermissionError(error) && !isNotFoundError(error)) throw safeError(error, "AI_READ_DATABASES_UNAVAILABLE", "Database records cannot be searched");
         }
       }
-      if (items.length >= limit) break;
+      if (databaseCursor === null) break;
+      state = { ...beforeDatabase, database_id: null, database_emitted: false, record_cursor: null };
     }
-    return result("search_databases", items, context, nextCursor);
+    return result("search_databases", items, context);
   }
 
   private async getDatabaseRecord(input: ReadInput, context: AiReadExecutionContext, signal: AbortSignal) {

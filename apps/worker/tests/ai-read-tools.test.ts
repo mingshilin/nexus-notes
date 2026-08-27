@@ -3,6 +3,7 @@ import type { WorkspaceContext } from "@nexus/contracts";
 
 import { AiReadToolError, AiReadTools, type AiReadExecutionContext } from "../src/ai/ai-read-tools";
 import { D1DatabaseRepository } from "../src/databases/d1-database-repository";
+import { cursorFingerprint, encodeRecordCursor } from "../src/databases/database-model";
 import { D1ReminderRepository } from "../src/knowledge/d1-reminder-repository";
 import { createTestD1, seedTenants } from "./helpers/d1";
 
@@ -76,6 +77,7 @@ function createTools(overrides: Record<string, unknown> = {}) {
     },
     databases: {
       listDatabases: vi.fn(async () => [{ id: "db-1", workspace_id: "ws-1", name: "Projects", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now }]),
+      listDatabasePage: vi.fn(async () => ({ items: [{ id: "db-1", workspace_id: "ws-1", name: "Projects", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now }], next_cursor: null })),
       getDatabase: vi.fn(async () => ({
         database: { id: "db-1", workspace_id: "ws-1", name: "Projects", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now },
         role: "viewer" as const,
@@ -99,7 +101,7 @@ describe("AI read tools", () => {
 
   it("reads selected notes only and returns source metadata without internal fields", async () => {
     const tools = createTools();
-    const result = await tools.execute("search_notes", { query: "plan", limit: 100 }, context(), new AbortController().signal);
+    const result = await tools.execute("search_notes", { query: "plan", limit: 50 }, context(), new AbortController().signal);
 
     expect(result.items).toEqual([expect.objectContaining({
       source_type: "note",
@@ -124,10 +126,51 @@ describe("AI read tools", () => {
       }),
     };
     const tools = createTools({ notes });
-    const result = await tools.execute("search_notes", { query: "plan", limit: 500 }, context({ selectedNoteIds: [], allowWorkspaceSearch: true }), new AbortController().signal);
+    const result = await tools.execute("search_notes", { query: "plan", limit: 50 }, context({ selectedNoteIds: [], allowWorkspaceSearch: true }), new AbortController().signal);
     expect(notes.list).toHaveBeenCalledOnce();
-    expect(result.next_cursor).toBe("next");
+    expect(result.next_cursor).toEqual(expect.any(String));
+    expect(result.next_cursor).not.toBe("next");
     expect(result.scope).toEqual(expect.objectContaining({ selected_only: false }));
+  });
+
+  it("binds workspace note cursors to the query before forwarding them", async () => {
+    const list = vi.fn(async (_actor: unknown, options: { cursor?: string }) => ({
+      items: [note()],
+      next_cursor: options.cursor ? null : "raw-note-cursor",
+    }));
+    const tools = createTools({ notes: { get: vi.fn(), list } });
+    const readContext = context({ selectedNoteIds: [], allowWorkspaceSearch: true });
+
+    const first = await tools.execute("search_notes", { query: "plan", limit: 1 }, readContext, new AbortController().signal);
+    expect(first.next_cursor).toEqual(expect.any(String));
+    await expect(tools.execute("search_notes", { query: "other", limit: 1, cursor: first.next_cursor! }, readContext, new AbortController().signal))
+      .rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400 });
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a bounded continuation for a large workspace note page", async () => {
+    const notes = Array.from({ length: 50 }, (_, index) => note({
+      id: `note-${index + 1}-${"i".repeat(108)}`,
+      title: `Plan ${index + 1} ${"t".repeat(150)}`,
+      content: "x".repeat(1_000),
+      updated_at: `2026-08-28T00:${String(index).padStart(2, "0")}:00.000Z`,
+    }));
+    const list = vi.fn(async (_actor: unknown, options: { cursor?: string }) => {
+      const start = options.cursor
+        ? notes.findIndex((candidate) => decodeURIComponent(options.cursor!).split("\n").at(-1) === candidate.id)
+        : -1;
+      return { items: notes.slice(start + 1), next_cursor: null };
+    });
+    const tools = createTools({ maxResults: 50, notes: { get: vi.fn(), list } });
+    const readContext = context({ selectedNoteIds: [], allowWorkspaceSearch: true });
+
+    const first = await tools.execute("search_notes", { query: "plan", limit: 50 }, readContext, new AbortController().signal);
+    expect(first.items.length).toBeGreaterThan(0);
+    expect(first.items.length).toBeLessThan(notes.length);
+    expect(first.next_cursor).toEqual(expect.any(String));
+    const second = await tools.execute("search_notes", { query: "plan", limit: 50, cursor: first.next_cursor! }, readContext, new AbortController().signal);
+    expect(second.items.length).toBeGreaterThan(0);
+    expect(new Set([...first.items, ...second.items].map((item) => item.source_id)).size).toBeGreaterThan(first.items.length);
   });
 
   it("paginates selected-note search with a scope-bound cursor", async () => {
@@ -147,6 +190,49 @@ describe("AI read tools", () => {
     );
     expect(secondPage.items.map((item) => item.source_id)).toEqual(["note-2"]);
     expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a selected-note cursor reused by another user or workspace", async () => {
+    const tools = createTools({ notes: {
+      get: vi.fn(async (_actor: unknown, id: string) => note({ id })),
+      list: vi.fn(),
+    } });
+    const selected = context({ selectedNoteIds: ["note-1", "note-2"] });
+    const first = await tools.execute("search_notes", { query: "plan", limit: 1 }, selected, new AbortController().signal);
+
+    await expect(tools.execute(
+      "search_notes",
+      { query: "plan", limit: 1, cursor: first.next_cursor! },
+      { ...selected, userId: "user-2" },
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400 });
+    await expect(tools.execute(
+      "search_notes",
+      { query: "plan", limit: 1, cursor: first.next_cursor! },
+      { ...selected, workspaceId: "ws-2" },
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400 });
+  });
+
+  it("keeps a continuation when selected-note results reach the byte budget", async () => {
+    const selectedNoteIds = Array.from({ length: 50 }, (_, index) => `note-${index + 1}-${"i".repeat(108)}`);
+    const get = vi.fn(async (_actor: unknown, id: string) => note({ id, title: `${id}-${"t".repeat(160)}`, content: "x".repeat(1_000) }));
+    const tools = createTools({ maxResults: 50, notes: { get, list: vi.fn() } });
+    const readContext = context({ selectedNoteIds });
+    const seen = new Set<string>();
+    let cursor: string | null | undefined;
+    let pageCount = 0;
+
+    for (let page = 0; page < 4; page += 1) {
+      const result = await tools.execute("search_notes", { query: "", limit: 50, ...(cursor ? { cursor } : {}) }, readContext, new AbortController().signal);
+      pageCount += 1;
+      result.items.forEach((item) => seen.add(item.source_id));
+      cursor = result.next_cursor;
+      if (!cursor) break;
+    }
+
+    expect(seen).toEqual(new Set(selectedNoteIds));
+    expect(pageCount).toBeGreaterThan(1);
   });
 
   it("rejects a direct note read outside the selected scope and rejects cross-workspace context", async () => {
@@ -201,7 +287,7 @@ describe("AI read tools", () => {
       notes: { get: vi.fn(), list: vi.fn() },
       knowledge: { listReminderPage: vi.fn() },
       databases: {
-        listDatabases: vi.fn(async () => []),
+        listDatabasePage: vi.fn(async () => ({ items: [], next_cursor: null })),
         getDatabase,
         searchRecords: vi.fn(async () => ({ items: [], next_cursor: null })),
         getRecord: vi.fn(),
@@ -256,9 +342,63 @@ describe("AI read tools", () => {
 
   it("lists reminders through the user-scoped knowledge service and returns a bounded source", async () => {
     const tools = createTools();
-    const result = await tools.execute("list_reminders", { include_completed: true, limit: 500 }, context({ selectedNoteIds: [], selectedDatabaseIds: [] }), new AbortController().signal);
+    const result = await tools.execute("list_reminders", { include_completed: true, limit: 50 }, context({ selectedNoteIds: [], selectedDatabaseIds: [] }), new AbortController().signal);
     expect(result.items[0]).toEqual(expect.objectContaining({ source_type: "reminder", source_id: "reminder-1", workspace_id: "ws-1", title: "Follow up" }));
     expect(result.items[0]).not.toHaveProperty("user_id");
+  });
+
+  it("binds reminder cursors to the workspace, user, status, and query", async () => {
+    const listReminderPage = vi.fn(async (_actor: unknown, query: { cursor?: string }) => ({
+      items: [reminder()],
+      next_cursor: query.cursor ? null : "raw-reminder-cursor",
+    }));
+    const tools = createTools({ knowledge: { listReminderPage } });
+    const readContext = context({ selectedNoteIds: [], selectedDatabaseIds: [] });
+
+    const first = await tools.execute("list_reminders", { query: "follow", limit: 1 }, readContext, new AbortController().signal);
+    expect(first.next_cursor).toEqual(expect.any(String));
+    await expect(tools.execute("list_reminders", { query: "different", limit: 1, cursor: first.next_cursor! }, readContext, new AbortController().signal))
+      .rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400 });
+    expect(listReminderPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a reminder cursor reused by another user or workspace", async () => {
+    const listReminderPage = vi.fn(async () => ({ items: [reminder()], next_cursor: "raw-reminder-cursor" }));
+    const tools = createTools({ knowledge: { listReminderPage } });
+    const readContext = context({ selectedNoteIds: [], selectedDatabaseIds: [] });
+    const first = await tools.execute("list_reminders", { limit: 1 }, readContext, new AbortController().signal);
+
+    await expect(tools.execute(
+      "list_reminders",
+      { limit: 1, cursor: first.next_cursor! },
+      { ...readContext, userId: "user-2" },
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400 });
+    await expect(tools.execute(
+      "list_reminders",
+      { limit: 1, cursor: first.next_cursor! },
+      { ...readContext, workspaceId: "ws-2" },
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400 });
+  });
+
+  it("keeps a maximum workspace reminder page within the byte budget", async () => {
+    const reminders = Array.from({ length: 50 }, (_, index) => reminder({
+      id: `reminder-${index + 1}`,
+      title: `Reminder ${index + 1} ${"x".repeat(1_200)}`,
+      remind_at: `2026-08-${String((index % 28) + 1).padStart(2, "0")}T09:00:00.000Z`,
+    }));
+    const listReminderPage = vi.fn(async (_actor: unknown, query: { cursor?: string }) => ({
+      items: reminders,
+      next_cursor: query.cursor ? null : "repository-reminder-next",
+    }));
+    const tools = createTools({ maxResults: 50, knowledge: { listReminderPage } });
+    const readContext = context({ selectedNoteIds: [], selectedDatabaseIds: [] });
+
+    const first = await tools.execute("list_reminders", { limit: 50 }, readContext, new AbortController().signal);
+    expect(first.items).toHaveLength(reminders.length);
+    expect(new TextEncoder().encode(JSON.stringify(first)).byteLength).toBeLessThanOrEqual(64 * 1024);
+    expect(first.next_cursor).toEqual(expect.any(String));
   });
 
   it("maps malformed reminder cursors to a stable AI read error", async () => {
@@ -281,6 +421,367 @@ describe("AI read tools", () => {
       context({ selectedNoteIds: [], selectedDatabaseIds: [] }),
       new AbortController().signal,
     )).rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400, retryable: false });
+  });
+
+  it("continues workspace database search across bounded database pages", async () => {
+    const databases = [
+      { id: "db-1", workspace_id: "ws-1", name: "First", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: "2026-08-28T00:02:00.000Z" },
+      { id: "db-2", workspace_id: "ws-1", name: "Second", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: "2026-08-28T00:01:00.000Z" },
+    ];
+    const property = (databaseId: string) => ({ id: `${databaseId}-title`, workspace_id: "ws-1", database_id: databaseId, name: "Title", type: "text" as const, config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now });
+    const listDatabasePage = vi.fn(async (_actor: unknown, options: { cursor?: string | null; limit: number }) => {
+      expect(options.limit).toBe(1);
+      return options.cursor ? { items: [databases[1]], next_cursor: null } : { items: [databases[0]], next_cursor: "after-db-1" };
+    });
+    const getDatabase = vi.fn(async (_actor: unknown, databaseId: string) => ({
+      database: databases.find((database) => database.id === databaseId)!, role: "viewer" as const,
+      properties: [property(databaseId)], views: [], templates: [],
+    }));
+    const searchRecords = vi.fn(async (_actor: unknown, databaseId: string, options: { limit: number; cursor?: string | null }) => {
+      expect(options.limit).toBe(1);
+      return { items: [{ id: `${databaseId}-record`, workspace_id: "ws-1", database_id: databaseId, note_id: null, values: { [`${databaseId}-title`]: "launch" }, created_by: "user-1", updated_by: "user-1", revision: 1, created_at: now, updated_at: now }], next_cursor: null };
+    });
+    const tools = createTools({ databases: {
+      listDatabases: vi.fn(async () => { throw new Error("unbounded discovery must not be used"); }),
+      listDatabasePage, getDatabase, searchRecords, getRecord: vi.fn(),
+    } });
+    const readContext = context({ selectedNoteIds: [], selectedDatabaseIds: [], allowWorkspaceSearch: true });
+
+    const first = await tools.execute("search_databases", { query: "launch", limit: 1 }, readContext, new AbortController().signal);
+    const second = await tools.execute("search_databases", { query: "launch", limit: 1, cursor: first.next_cursor }, readContext, new AbortController().signal);
+
+    expect(first.items[0]?.source_id).toBe("db-1-record");
+    expect(second.items[0]?.source_id).toBe("db-2-record");
+    expect(listDatabasePage).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects workspace database cursors reused by another user", async () => {
+    const databases = [{ id: "db-1", workspace_id: "ws-1", name: "First", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now }];
+    const tools = createTools({ databases: {
+      listDatabasePage: vi.fn(async () => ({ items: databases, next_cursor: "next-database" })),
+      getDatabase: vi.fn(async () => ({ database: databases[0], role: "viewer" as const, properties: [], views: [], templates: [] })),
+      searchRecords: vi.fn(async () => ({ items: [], next_cursor: null })),
+      getRecord: vi.fn(),
+    } });
+    const selected = context({ selectedNoteIds: [], selectedDatabaseIds: [], allowWorkspaceSearch: true });
+    const first = await tools.execute("search_databases", { query: "", limit: 1 }, selected, new AbortController().signal);
+    expect(first.next_cursor).toEqual(expect.any(String));
+    await expect(tools.execute(
+      "search_databases",
+      { query: "", limit: 1, cursor: first.next_cursor! },
+      { ...selected, userId: "user-2" },
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400 });
+  });
+
+  it("migrates the earlier workspace database cursor without losing its record position", async () => {
+    const databases = [
+      { id: "db-1", workspace_id: "ws-1", name: "First", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: "2026-08-28T00:02:00.000Z" },
+      { id: "db-2", workspace_id: "ws-1", name: "Second", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: "2026-08-28T00:01:00.000Z" },
+    ];
+    const listDatabasePage = vi.fn(async () => ({ items: [databases[1]], next_cursor: null }));
+    const legacyRecordCursor = encodeRecordCursor(
+      { updated_at: now, id: "record-1" },
+      undefined,
+      cursorFingerprint({ kind: "search", database_id: "db-1", query: "launch" }),
+    );
+    const searchRecords = vi.fn(async (_actor: unknown, databaseId: string, options: { cursor?: string | null }) => {
+      if (databaseId === "db-1") expect(options.cursor).toBe(legacyRecordCursor);
+      return { items: [{ id: `${databaseId}-record`, workspace_id: "ws-1", database_id: databaseId, note_id: null, values: { title: "launch" }, created_by: "user-1", updated_by: "user-1", revision: 1, created_at: now, updated_at: now }], next_cursor: null };
+    });
+    const tools = createTools({ databases: {
+      listDatabasePage,
+      getDatabase: vi.fn(async (_actor: unknown, databaseId: string) => ({
+        database: databases.find((database) => database.id === databaseId)!, role: "viewer" as const,
+        properties: [{ id: "title", workspace_id: "ws-1", database_id: databaseId, name: "Title", type: "text" as const, config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now }],
+        views: [], templates: [],
+      })),
+      searchRecords,
+      getRecord: vi.fn(),
+    } });
+    const readContext = context({ selectedNoteIds: [], selectedDatabaseIds: [], allowWorkspaceSearch: true });
+    const legacyCursor = encodeURIComponent(JSON.stringify({ database_id: "db-1", cursor: legacyRecordCursor }));
+
+    const first = await tools.execute("search_databases", { query: "launch", limit: 1, cursor: legacyCursor }, readContext, new AbortController().signal);
+    expect(first.items[0]?.source_id).toBe("db-1-record");
+    expect(first.next_cursor).toEqual(expect.any(String));
+    const second = await tools.execute("search_databases", { query: "launch", limit: 1, cursor: first.next_cursor! }, readContext, new AbortController().signal);
+    expect(second.items[0]?.source_id).toBe("db-2-record");
+    expect(listDatabasePage).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when a legacy workspace cursor targets an inaccessible database", async () => {
+    const legacyRecordCursor = encodeRecordCursor(
+      { updated_at: now, id: "record-1" },
+      undefined,
+      cursorFingerprint({ kind: "search", database_id: "db-1", query: "launch" }),
+    );
+    const tools = createTools({ databases: {
+      listDatabasePage: vi.fn(),
+      getDatabase: vi.fn(async () => { throw Object.assign(new Error("DATABASE_NOT_FOUND"), { code: "DATABASE_NOT_FOUND", status: 404 }); }),
+      searchRecords: vi.fn(),
+      getRecord: vi.fn(),
+    } });
+    const legacyCursor = encodeURIComponent(JSON.stringify({ database_id: "db-1", cursor: legacyRecordCursor }));
+
+    await expect(tools.execute(
+      "search_databases",
+      { query: "launch", limit: 1, cursor: legacyCursor },
+      context({ selectedNoteIds: [], selectedDatabaseIds: [], allowWorkspaceSearch: true }),
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400 });
+  });
+
+  it("keeps a compound workspace cursor within the shared contract limit", async () => {
+    const databaseId = `db-${"d".repeat(125)}`;
+    const recordId = `record-${"r".repeat(121)}`;
+    const tools = createTools({ databases: {
+      listDatabasePage: vi.fn(async () => ({ items: [{ id: databaseId, workspace_id: "ws-1", name: "Records", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now }], next_cursor: "d".repeat(900) })),
+      getDatabase: vi.fn(async () => ({
+        database: { id: databaseId, workspace_id: "ws-1", name: "Records", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now },
+        role: "viewer" as const,
+        properties: [{ id: "title", workspace_id: "ws-1", database_id: databaseId, name: "Title", type: "text" as const, config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now }],
+        views: [], templates: [],
+      })),
+      searchRecords: vi.fn(async () => ({ items: [{ id: recordId, workspace_id: "ws-1", database_id: databaseId, note_id: null, values: { title: "launch" }, created_by: "user-1", updated_by: "user-1", revision: 1, created_at: now, updated_at: now }], next_cursor: "r".repeat(900) })),
+      getRecord: vi.fn(),
+    } });
+
+    const read = await tools.execute(
+      "search_databases",
+      { query: "launch", limit: 1 },
+      context({ selectedNoteIds: [], selectedDatabaseIds: [], allowWorkspaceSearch: true }),
+      new AbortController().signal,
+    );
+
+    expect(read.next_cursor?.length).toBeGreaterThan(1_024);
+    expect(read.next_cursor?.length).toBeLessThanOrEqual(4_096);
+  });
+
+  it("bounds workspace database discovery when a query has no matches", async () => {
+    const databases = Array.from({ length: 55 }, (_, index) => ({
+      id: `db-${index + 1}`, workspace_id: "ws-1", name: `Database ${index + 1}`, description: "",
+      created_by: "user-1", revision: 1, created_at: now, updated_at: now,
+    }));
+    const listDatabasePage = vi.fn(async (_actor: unknown, options: { cursor?: string | null }) => {
+      const index = options.cursor ? Number(options.cursor) : 0;
+      return { items: [databases[index]], next_cursor: index + 1 < databases.length ? String(index + 1) : null };
+    });
+    const tools = createTools({ databases: {
+      listDatabasePage,
+      getDatabase: vi.fn(async (_actor: unknown, databaseId: string) => ({
+        database: databases.find((database) => database.id === databaseId)!, role: "viewer" as const,
+        properties: [{ id: "title", workspace_id: "ws-1", database_id: databaseId, name: "Title", type: "text" as const, config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now }],
+        views: [], templates: [],
+      })),
+      searchRecords: vi.fn(async () => ({ items: [], next_cursor: null })),
+      getRecord: vi.fn(),
+    } });
+
+    const result = await tools.execute(
+      "search_databases",
+      { query: "missing", limit: 20 },
+      context({ selectedNoteIds: [], selectedDatabaseIds: [], allowWorkspaceSearch: true }),
+      new AbortController().signal,
+    );
+
+    expect(result.items).toEqual([]);
+    expect(result.next_cursor).toEqual(expect.any(String));
+    expect(listDatabasePage.mock.calls.length).toBeLessThanOrEqual(50);
+  });
+
+  it("fails closed when workspace database pagination does not advance", async () => {
+    const listDatabasePage = vi.fn(async () => ({ items: [], next_cursor: "stuck" }));
+    const tools = createTools({ deadlineMs: 500, databases: {
+      listDatabasePage,
+      getDatabase: vi.fn(),
+      searchRecords: vi.fn(),
+      getRecord: vi.fn(),
+    } });
+    const startedAt = Date.now();
+
+    await expect(tools.execute(
+      "search_databases",
+      { query: "missing", limit: 20 },
+      context({ selectedNoteIds: [], selectedDatabaseIds: [], allowWorkspaceSearch: true }),
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: "AI_READ_PAGING_STALLED", status: 503, retryable: true });
+
+    expect(Date.now() - startedAt).toBeLessThan(400);
+    expect(listDatabasePage).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a legacy database cursor when its record query fingerprint differs", async () => {
+    const recordCursor = encodeRecordCursor(
+      { updated_at: now, id: "record-1" },
+      undefined,
+      cursorFingerprint({ kind: "search", database_id: "db-1", query: "launch" }),
+    );
+    const searchRecords = vi.fn(async () => ({ items: [], next_cursor: null }));
+    const tools = createTools({ databases: {
+      listDatabasePage: vi.fn(),
+      getDatabase: vi.fn(async () => ({
+        database: { id: "db-1", workspace_id: "ws-1", name: "Records", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now },
+        role: "viewer" as const,
+        properties: [{ id: "title", workspace_id: "ws-1", database_id: "db-1", name: "Title", type: "text" as const, config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now }],
+        views: [], templates: [],
+      })),
+      searchRecords,
+      getRecord: vi.fn(),
+    } });
+    const legacyCursor = encodeURIComponent(JSON.stringify({ database_id: "db-1", cursor: recordCursor }));
+
+    await expect(tools.execute(
+      "search_databases",
+      { query: "different", limit: 1, cursor: legacyCursor },
+      context({ selectedNoteIds: [], selectedDatabaseIds: [], allowWorkspaceSearch: true }),
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400, retryable: false });
+    expect(searchRecords).not.toHaveBeenCalled();
+  });
+
+  it("continues selected database search without losing later databases", async () => {
+    const databases = [
+      { id: "db-1", workspace_id: "ws-1", name: "First", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now },
+      { id: "db-2", workspace_id: "ws-1", name: "Second", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now },
+    ];
+    const getDatabase = vi.fn(async (_actor: unknown, databaseId: string) => ({
+      database: databases.find((database) => database.id === databaseId)!, role: "viewer" as const,
+      properties: [{ id: "title", workspace_id: "ws-1", database_id: databaseId, name: "Title", type: "text" as const, config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now }],
+      views: [], templates: [],
+    }));
+    const searchRecords = vi.fn(async (_actor: unknown, databaseId: string) => ({
+      items: [{ id: `${databaseId}-record`, workspace_id: "ws-1", database_id: databaseId, note_id: null, values: { title: "launch" }, created_by: "user-1", updated_by: "user-1", revision: 1, created_at: now, updated_at: now }],
+      next_cursor: null,
+    }));
+    const tools = createTools({ databases: { listDatabasePage: vi.fn(), getDatabase, searchRecords, getRecord: vi.fn() } });
+    const readContext = context({ selectedDatabaseIds: ["db-1", "db-2"] });
+
+    const first = await tools.execute("search_databases", { query: "launch", limit: 1 }, readContext, new AbortController().signal);
+    expect(first.items[0]?.source_id).toBe("db-1-record");
+    expect(first.next_cursor).toEqual(expect.any(String));
+    const second = await tools.execute("search_databases", { query: "launch", limit: 1, cursor: first.next_cursor! }, readContext, new AbortController().signal);
+    expect(second.items[0]?.source_id).toBe("db-2-record");
+  });
+
+  it("rejects selected database cursors reused by another user", async () => {
+    const databases = [
+      { id: "db-1", workspace_id: "ws-1", name: "First", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now },
+      { id: "db-2", workspace_id: "ws-1", name: "Second", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now },
+    ];
+    const tools = createTools({ databases: {
+      listDatabasePage: vi.fn(),
+      getDatabase: vi.fn(async (_actor: unknown, databaseId: string) => ({
+        database: databases.find((database) => database.id === databaseId)!,
+        role: "viewer" as const,
+        properties: [{ id: "title", workspace_id: "ws-1", database_id: databaseId, name: "Title", type: "text" as const, config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now }],
+        views: [], templates: [],
+      })),
+      searchRecords: vi.fn(async (_actor: unknown, databaseId: string) => ({ items: [{ id: `${databaseId}-record`, workspace_id: "ws-1", database_id: databaseId, note_id: null, values: { title: "launch" }, created_by: "user-1", updated_by: "user-1", revision: 1, created_at: now, updated_at: now }], next_cursor: null })),
+      getRecord: vi.fn(),
+    } });
+    const selected = context({ selectedDatabaseIds: ["db-1", "db-2"] });
+    const first = await tools.execute("search_databases", { query: "launch", limit: 1 }, selected, new AbortController().signal);
+    expect(first.next_cursor).toEqual(expect.any(String));
+    await expect(tools.execute(
+      "search_databases",
+      { query: "launch", limit: 1, cursor: first.next_cursor! },
+      { ...selected, userId: "user-2" },
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: "AI_READ_CURSOR_INVALID", status: 400 });
+  });
+
+  it("does not skip oversized records when returning a bounded continuation", async () => {
+    const records = Array.from({ length: 8 }, (_, index) => ({
+      id: `record-${index + 1}`, workspace_id: "ws-1", database_id: "db-1", note_id: null,
+      values: { title: `${String(index + 1)}-${"x".repeat(15_000)}` }, created_by: "user-1", updated_by: "user-1",
+      revision: 1, created_at: now, updated_at: now,
+    }));
+    const searchRecords = vi.fn(async (_actor: unknown, _databaseId: string, options: { limit: number; cursor?: string | null }) => {
+      const start = options.cursor ? Number(String(options.cursor).replace("cursor-", "")) : 0;
+      const page = records.slice(start, start + options.limit);
+      return { items: page, next_cursor: start + page.length < records.length ? `cursor-${start + page.length}` : null };
+    });
+    const tools = createTools({ databases: {
+      listDatabases: vi.fn(),
+      listDatabasePage: vi.fn(async () => ({ items: [{ id: "db-1", workspace_id: "ws-1", name: "Records", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now }], next_cursor: null })),
+      getDatabase: vi.fn(async () => ({
+        database: { id: "db-1", workspace_id: "ws-1", name: "Records", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now },
+        role: "viewer" as const,
+        properties: [{ id: "title", workspace_id: "ws-1", database_id: "db-1", name: "Title", type: "text" as const, config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now }],
+        views: [], templates: [],
+      })),
+      searchRecords, getRecord: vi.fn(),
+    } });
+    const readContext = context({ selectedNoteIds: [], selectedDatabaseIds: [], allowWorkspaceSearch: true });
+    const seen = new Set<string>();
+    let cursor: string | null | undefined;
+    let pageCount = 0;
+    for (let page = 0; page < 8; page += 1) {
+      const result = await tools.execute("search_databases", { query: "x", limit: 50, ...(cursor ? { cursor } : {}) }, readContext, new AbortController().signal);
+      pageCount += 1;
+      result.items.forEach((item) => seen.add(item.source_id));
+      cursor = result.next_cursor;
+      if (!cursor) break;
+    }
+    expect(seen).toEqual(new Set(records.map((record) => record.id)));
+    expect(pageCount).toBeGreaterThan(1);
+    expect(searchRecords.mock.calls.every((call) => call[2].limit === 1)).toBe(true);
+  });
+
+  it("returns oversized individual record values as a source-only item", async () => {
+    const tools = createTools({ databases: {
+      listDatabasePage: vi.fn(async () => ({ items: [{ id: "db-1", workspace_id: "ws-1", name: "Records", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now }], next_cursor: null })),
+      getDatabase: vi.fn(async () => ({
+        database: { id: "db-1", workspace_id: "ws-1", name: "Records", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now },
+        role: "viewer" as const,
+        properties: [{ id: "title", workspace_id: "ws-1", database_id: "db-1", name: "Title", type: "text" as const, config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now }],
+        views: [], templates: [],
+      })),
+      searchRecords: vi.fn(async () => ({ items: [{
+        id: "record-large", workspace_id: "ws-1", database_id: "db-1", note_id: null,
+        values: { title: "x".repeat(20_000) }, created_by: "user-1", updated_by: "user-1",
+        revision: 1, created_at: now, updated_at: now,
+      }], next_cursor: null })),
+      getRecord: vi.fn(),
+    } });
+
+    const read = await tools.execute(
+      "search_databases",
+      { query: "x", limit: 1 },
+      context({ selectedNoteIds: [], selectedDatabaseIds: [], allowWorkspaceSearch: true }),
+      new AbortController().signal,
+    );
+
+    expect(read.items[0]).toMatchObject({ source_type: "database_record", source_id: "record-large", values: {} });
+  });
+
+  it("fails closed when a database record cursor repeats", async () => {
+    let calls = 0;
+    const tools = createTools({ databases: {
+      listDatabasePage: vi.fn(async () => ({ items: [{ id: "db-1", workspace_id: "ws-1", name: "Records", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now }], next_cursor: null })),
+      getDatabase: vi.fn(async () => ({
+        database: { id: "db-1", workspace_id: "ws-1", name: "Records", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now },
+        role: "viewer" as const,
+        properties: [{ id: "title", workspace_id: "ws-1", database_id: "db-1", name: "Title", type: "text" as const, config: {}, position: 0, hidden: false, read_only: false, revision: 1, created_at: now, updated_at: now }],
+        views: [], templates: [],
+      })),
+      searchRecords: vi.fn(async () => {
+        calls += 1;
+        return calls === 1
+          ? { items: [{ id: "record-1", workspace_id: "ws-1", database_id: "db-1", note_id: null, values: { title: "launch" }, created_by: "user-1", updated_by: "user-1", revision: 1, created_at: now, updated_at: now }], next_cursor: "stuck" }
+          : { items: [], next_cursor: "stuck" };
+      }),
+      getRecord: vi.fn(),
+    } });
+
+    await expect(tools.execute(
+      "search_databases",
+      { query: "launch", limit: 2 },
+      context({ selectedNoteIds: [], selectedDatabaseIds: [], allowWorkspaceSearch: true }),
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: "AI_READ_PAGING_STALLED", status: 503, retryable: true });
+    expect(calls).toBe(2);
   });
 
   it("propagates the bounded cancellation signal to reminder reads", async () => {
@@ -347,7 +848,7 @@ describe("AI read tools", () => {
       notes: { get: vi.fn(), list: vi.fn() },
       knowledge: { listReminderPage: vi.fn() },
       databases: {
-        listDatabases: vi.fn(async () => []),
+        listDatabasePage: vi.fn(async () => ({ items: [], next_cursor: null })),
         getDatabase: vi.fn(async () => ({
           database: { id: "db-1", workspace_id: "ws-1", name: "Projects", description: "", created_by: "user-1", revision: 1, created_at: now, updated_at: now },
           role: "viewer" as const,

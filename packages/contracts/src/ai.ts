@@ -23,15 +23,15 @@ export type AiReadToolName = z.infer<typeof AiReadToolNameSchema>;
 export const AiReadContextSchema = z.object({
   workspaceId: EntityIdSchema,
   userId: EntityIdSchema,
-  selectedNoteIds: z.array(EntityIdSchema).max(100).transform((ids) => [...new Set(ids)]),
-  selectedDatabaseIds: z.array(EntityIdSchema).max(100).transform((ids) => [...new Set(ids)]),
+  selectedNoteIds: z.array(EntityIdSchema).max(50).transform((ids) => [...new Set(ids)]),
+  selectedDatabaseIds: z.array(EntityIdSchema).max(50).transform((ids) => [...new Set(ids)]),
   allowWorkspaceSearch: z.boolean(),
 }).strict();
 export type AiReadContext = z.infer<typeof AiReadContextSchema>;
 
 export const AiReadScopeInputSchema = z.object({
-  selected_note_ids: z.array(EntityIdSchema).max(100).default([]),
-  selected_database_ids: z.array(EntityIdSchema).max(100).default([]),
+  selected_note_ids: z.array(EntityIdSchema).max(50).default([]),
+  selected_database_ids: z.array(EntityIdSchema).max(50).default([]),
   allow_workspace_search: z.boolean().default(false),
 }).strict();
 export type AiReadScopeInput = z.infer<typeof AiReadScopeInputSchema>;
@@ -64,8 +64,9 @@ const PositiveRevisionSchema = z.number().int().positive();
 export const AI_ACTION_PROPOSAL_TTL_MS = 10 * 60 * 1000;
 export const AI_TRUSTED_MODE_TTL_MS = 24 * 60 * 60 * 1000;
 
-const ReadLimitSchema = z.coerce.number().int().min(1).max(1_000).default(20);
-const ReadCursorSchema = z.string().trim().min(1).max(1_024).optional();
+const ReadLimitSchema = z.coerce.number().int().min(1).max(50).default(20);
+const AiReadCursorValueSchema = z.string().trim().min(1).max(4_096);
+const ReadCursorSchema = AiReadCursorValueSchema.optional();
 
 const AiSearchNotesInputSchema = z.object({
   query: z.string().trim().max(500).default(""),
@@ -129,7 +130,7 @@ export type AiReadItem = z.infer<typeof AiReadItemSchema>;
 export const AiReadResultSchema = z.object({
   tool: AiReadToolNameSchema,
   items: z.array(AiReadItemSchema).max(50),
-  next_cursor: z.string().trim().min(1).max(1_024).nullable(),
+  next_cursor: AiReadCursorValueSchema.nullable(),
   scope: z.object({ workspace_id: EntityIdSchema, selected_only: z.boolean() }).strict(),
 }).strict();
 export type AiReadResult = z.infer<typeof AiReadResultSchema>;

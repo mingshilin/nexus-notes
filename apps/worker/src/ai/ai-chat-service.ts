@@ -147,7 +147,7 @@ const READ_TOOL_DEFINITIONS = [
       parameters: toolParameters({
         query: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: 50 },
-        cursor: { type: "string" },
+        cursor: { type: "string", maxLength: 4096 },
       }),
     },
   },
@@ -168,7 +168,7 @@ const READ_TOOL_DEFINITIONS = [
         include_completed: { type: "boolean" },
         query: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: 50 },
-        cursor: { type: "string" },
+        cursor: { type: "string", maxLength: 4096 },
       }),
     },
   },
@@ -180,7 +180,7 @@ const READ_TOOL_DEFINITIONS = [
       parameters: toolParameters({
         query: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: 50 },
-        cursor: { type: "string" },
+        cursor: { type: "string", maxLength: 4096 },
       }),
     },
   },
@@ -216,15 +216,14 @@ function providerToolCalls(payload: unknown, allowedTools: ReadonlySet<string>):
 
   const toolCalls: ProviderToolCall[] = [];
   const seenIds = new Set<string>();
-  for (const [index, rawCall] of rawToolCalls.entries()) {
+  for (const rawCall of rawToolCalls) {
     if (!isPlainObject(rawCall)) return null;
     const toolType = rawCall.type;
     const functionCall = rawCall.function;
     if (toolType !== "function" || !isPlainObject(functionCall)) return null;
     const name = functionCall.name;
-    const id = typeof rawCall.id === "string" && rawCall.id.trim() && rawCall.id.length <= 256
-      ? rawCall.id
-      : `tool-call-${index + 1}`;
+    const id = rawCall.id;
+    if (typeof id !== "string" || !id.trim() || id.length > 256) return null;
     if (typeof name !== "string" || !allowedTools.has(name)) return null;
     if (seenIds.has(id)) return null;
     seenIds.add(id);
