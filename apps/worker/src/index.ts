@@ -84,6 +84,7 @@ export {
   AI_ACTION_PROPOSAL_TTL_MS,
   type AiActionProposal,
   type AiActionStatus,
+  type AiActionToolName,
   type AiToolName,
 } from "@nexus/contracts";
 export { AiToolError } from "./ai/ai-tool-model";

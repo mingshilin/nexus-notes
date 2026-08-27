@@ -35,6 +35,86 @@ const AiKeySchema = z.string().trim().min(16).max(512);
 const PositiveRevisionSchema = z.number().int().positive();
 
 export const AI_ACTION_PROPOSAL_TTL_MS = 10 * 60 * 1000;
+export const AI_TRUSTED_MODE_TTL_MS = 24 * 60 * 60 * 1000;
+
+export const AiToolRiskSchema = z.enum([
+  "read",
+  "safe_write",
+  "confirmed_write",
+  "external_or_destructive",
+]);
+export type AiToolRisk = z.infer<typeof AiToolRiskSchema>;
+
+export const AiToolTargetSchema = z.enum(["current", "selected", "workspace"]);
+export type AiToolTarget = z.infer<typeof AiToolTargetSchema>;
+
+export const AI_TOOL_CATALOG = [
+  { name: "search_notes", risk: "read" },
+  { name: "get_note", risk: "read" },
+  { name: "list_reminders", risk: "read" },
+  { name: "search_databases", risk: "read" },
+  { name: "get_database_record", risk: "read" },
+  { name: "create_note", risk: "safe_write" },
+  { name: "create_reminder", risk: "safe_write" },
+  { name: "create_notification", risk: "safe_write" },
+  { name: "create_folder", risk: "confirmed_write" },
+  { name: "update_note", risk: "confirmed_write" },
+  { name: "move_note", risk: "confirmed_write" },
+  { name: "archive_note", risk: "confirmed_write" },
+  { name: "restore_note", risk: "confirmed_write" },
+  { name: "delete_note", risk: "confirmed_write" },
+  { name: "apply_tag", risk: "confirmed_write" },
+  { name: "create_database_record", risk: "confirmed_write" },
+  { name: "update_database_record", risk: "confirmed_write" },
+  { name: "apply_template", risk: "confirmed_write" },
+  { name: "complete_reminder", risk: "confirmed_write" },
+  { name: "send_email", risk: "external_or_destructive" },
+  { name: "change_permissions", risk: "external_or_destructive" },
+  { name: "delete_database", risk: "external_or_destructive" },
+] as const satisfies readonly { name: string; risk: AiToolRisk }[];
+
+type AiCatalogToolName = typeof AI_TOOL_CATALOG[number]["name"];
+const AiToolNames = AI_TOOL_CATALOG.map((entry) => entry.name) as [AiCatalogToolName, ...AiCatalogToolName[]];
+
+export const AiToolNameSchema = z.enum(AiToolNames);
+export type AiToolName = z.infer<typeof AiToolNameSchema>;
+
+export const AiActionToolNameSchema = z.enum([
+  "create_note",
+  "create_reminder",
+  "create_notification",
+  "send_email",
+]);
+export type AiActionToolName = z.infer<typeof AiActionToolNameSchema>;
+
+export const AiTrustedModeSchema = z.object({
+  workspace_id: EntityIdSchema,
+  enabled: z.boolean(),
+  expires_at: TimestampSchema.nullable(),
+  revision: PositiveRevisionSchema,
+}).strict().superRefine((value, context) => {
+  if (value.enabled && value.expires_at === null) {
+    context.addIssue({ code: "custom", path: ["expires_at"], message: "Enabled trusted mode requires an expiry" });
+  }
+  if (!value.enabled && value.expires_at !== null) {
+    context.addIssue({ code: "custom", path: ["expires_at"], message: "Disabled trusted mode cannot have an expiry" });
+  }
+});
+export type AiTrustedMode = z.infer<typeof AiTrustedModeSchema>;
+
+export const UpdateAiTrustedModeInputSchema = z.object({
+  enabled: z.boolean(),
+  expires_at: TimestampSchema.nullable(),
+  base_revision: PositiveRevisionSchema,
+}).strict().superRefine((value, context) => {
+  if (value.enabled && value.expires_at === null) {
+    context.addIssue({ code: "custom", path: ["expires_at"], message: "Enabled trusted mode requires an expiry" });
+  }
+  if (!value.enabled && value.expires_at !== null) {
+    context.addIssue({ code: "custom", path: ["expires_at"], message: "Disabled trusted mode cannot have an expiry" });
+  }
+});
+export type UpdateAiTrustedModeInput = z.infer<typeof UpdateAiTrustedModeInputSchema>;
 
 export const AiUserConfigSummarySchema = z.object({
   configured: z.boolean(),
@@ -83,9 +163,6 @@ const AiActionSummarySchema = z.string().trim().min(1).max(280);
 const AiActionReasonSchema = z.string().trim().min(1).max(500);
 const NoteTitleSchema = z.string().trim().max(160);
 const NoteContentSchema = z.string().max(20_000);
-
-export const AiToolNameSchema = z.enum(["create_note", "create_reminder", "create_notification", "send_email"]);
-export type AiToolName = z.infer<typeof AiToolNameSchema>;
 
 export const AiActionStatusSchema = z.enum(["proposed", "confirmed", "rejected", "expired", "executed", "failed"]);
 export type AiActionStatus = z.infer<typeof AiActionStatusSchema>;

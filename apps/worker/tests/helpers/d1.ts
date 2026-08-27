@@ -24,6 +24,7 @@ export const migrationPaths = [
   "../../migrations/0018_ai_email_outbox.sql",
   "../../migrations/0019_ai_email_dispatch_leases.sql",
   "../../migrations/0020_ai_email_delivery_leases.sql",
+  "../../migrations/0021_ai_trusted_mode.sql",
 ];
 
 export function splitMigration(sql: string) {

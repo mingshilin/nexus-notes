@@ -5,3 +5,4 @@ export * from "./profile";
 export * from "./reminder-recurrence";
 export * from "./security-policy";
 export * from "./collaboration-policy";
+export * from "./ai-policy";

@@ -1,6 +1,6 @@
 import {
   AiChatResponseSchema,
-  AiToolNameSchema,
+  AiActionToolNameSchema,
   type AiActionProposal,
   type AiChatInput,
   type AiChatResponse,
@@ -144,7 +144,7 @@ function providerToolCalls(payload: unknown): Array<{ name: string; arguments: u
     const functionCall = rawCall.function;
     if (toolType !== "function" || !isPlainObject(functionCall)) return null;
     const name = functionCall.name;
-    if (typeof name !== "string" || !AiToolNameSchema.safeParse(name).success) return null;
+    if (typeof name !== "string" || !AiActionToolNameSchema.safeParse(name).success) return null;
     const rawArguments = functionCall.arguments;
     if (typeof rawArguments === "string") {
       try {

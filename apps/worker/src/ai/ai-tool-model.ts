@@ -1,9 +1,9 @@
 import {
   AiActionProposalSchema,
-  AiToolNameSchema,
+  AiActionToolNameSchema,
   type AiActionProposal,
   type AiActionStatus,
-  type AiToolName,
+  type AiActionToolName,
 } from "@nexus/contracts";
 
 export interface AiToolCall {
@@ -24,14 +24,14 @@ type StoredProposalBase = {
   updated_at: string;
 };
 
-type StoredProposalByTool<TTool extends AiToolName> = StoredProposalBase & {
+type StoredProposalByTool<TTool extends AiActionToolName> = StoredProposalBase & {
   tool: TTool;
   input: Extract<AiActionProposal, { tool: TTool }>["input"];
 };
 
 export type StoredAiActionProposal = {
-  [TTool in AiToolName]: StoredProposalByTool<TTool>;
-}[AiToolName];
+  [TTool in AiActionToolName]: StoredProposalByTool<TTool>;
+}[AiActionToolName];
 
 export interface ProposalMutationInput {
   userId: string;
@@ -45,7 +45,7 @@ export interface InsertProposalInput {
   actionId: string;
   userId: string;
   workspaceId: string;
-  tool: AiToolName;
+  tool: AiActionToolName;
   input: AiToolInput;
   expiresAt: string;
   now: string;
@@ -84,15 +84,15 @@ export class AiToolError extends Error {
   }
 }
 
-export function assertAiToolName(name: string): AiToolName {
-  const parsed = AiToolNameSchema.safeParse(name);
+export function assertAiToolName(name: string): AiActionToolName {
+  const parsed = AiActionToolNameSchema.safeParse(name);
   if (!parsed.success) {
     throw new AiToolError("AI_ACTION_TOOL_INVALID", "AI tool is not allowlisted", 400);
   }
   return parsed.data;
 }
 
-export function validateAiActionProposal(actionId: string, tool: AiToolName, input: unknown, expiresAt: string, summary: string) {
+export function validateAiActionProposal(actionId: string, tool: AiActionToolName, input: unknown, expiresAt: string, summary: string) {
   return AiActionProposalSchema.parse({
     action_id: actionId,
     tool,
