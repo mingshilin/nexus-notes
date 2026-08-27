@@ -13,7 +13,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useTransition, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { MAX_UPLOAD_BYTES, NoteSchema, SUPPORTED_ATTACHMENT_MIME_TYPES } from "@nexus/contracts";
 import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, NoteLink, NoteRevision, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
@@ -47,6 +47,7 @@ import { PublicSharePage } from "../collaboration/PublicSharePage";
 import { NotificationCenter, notificationButtonLabel } from "../collaboration/NotificationCenter";
 import type { CollaborationCommentTarget, CollaborationShareTarget, NotificationTarget } from "../collaboration/collaboration-types";
 import { useWorkspaceClients } from "./use-workspace-clients";
+import { useWorkspaceNavigation } from "./use-workspace-navigation";
 import { WorkspaceShell } from "./WorkspaceShell";
 import {
   loadAccountCenter,
@@ -319,9 +320,7 @@ function AuthenticatedWorkspace({
 }) {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
-  const [activeDomain, setActiveDomain] = useState<ProductDomain>("notes");
-  const [requestedDomain, setRequestedDomain] = useState<ProductDomain>("notes");
-  const [domainPending] = useTransition();
+  const { activeDomain, requestedDomain, domainPending, navigate: navigateWorkspaceDomain } = useWorkspaceNavigation("notes");
   const [accountSubsection, setAccountSubsection] = useState<AccountSubsection>("overview");
   const workspaceClients = useWorkspaceClients(apiClient, workspaceId ?? "");
   const collaborationClient = workspaceClients.collaboration;
@@ -331,11 +330,9 @@ function AuthenticatedWorkspace({
   const operationsClient = workspaceClients.operations;
   const profileClient = workspaceClients.profile;
   const transitionToDomain = useCallback((domain: ProductDomain) => {
-    setRequestedDomain(domain);
     setActivePane("canvas");
-    setActiveDomain(domain);
-    void preloadWorkspaceDomain(domain).catch(() => undefined);
-  }, []);
+    navigateWorkspaceDomain(domain);
+  }, [navigateWorkspaceDomain]);
   const [navigationUser, setNavigationUser] = useState(user);
   const [unreadCount, setUnreadCount] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);

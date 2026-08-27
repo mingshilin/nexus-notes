@@ -123,7 +123,7 @@ describe("workspace performance foundation", () => {
     expect(screen.getByRole("region", { name: "数据库页面" })).toBeVisible();
   });
 
-  it("commits navigation shell before a deferred lazy import resolves", async () => {
+  it("commits the requested shell immediately while the lazy module is unresolved", async () => {
     const authClient = {
       session: vi.fn(async () => ({
         user,
@@ -144,7 +144,9 @@ describe("workspace performance foundation", () => {
     await screen.findByRole("heading", { name: "Public Beta 重写计划" });
     fireEvent.click(screen.getByRole("button", { name: "提醒" }));
 
-    expect(document.querySelector('[data-domain="reminders"]')).toBeInTheDocument();
+    const shell = document.querySelector('[data-domain="reminders"]');
+    expect(shell).toBeInTheDocument();
+    expect(shell).toHaveAttribute("aria-busy", "true");
     expect(screen.getByText("正在加载提醒中心…")).toBeVisible();
     expect(lazyDomainModules.preloadWorkspaceDomain).toHaveBeenCalledWith("reminders");
 
