@@ -54,6 +54,24 @@ describe("product depth contracts", () => {
     expect(api.ReminderListQuerySchema.parse({ status: "overdue", limit: 25 })).toMatchObject({ status: "overdue", limit: 25 });
   });
 
+  it("describes bounded reminder delivery status without exposing delivery payloads", async () => {
+    const api = await contracts();
+    expect(api.ReminderDeliverySchema.parse({
+      id: "delivery-1",
+      workspace_id: "ws-1",
+      reminder_id: "reminder-1",
+      occurrence_at: "2026-08-25T01:00:00.000Z",
+      channel: "email",
+      status: "failed",
+      attempt_count: 2,
+      last_error_code: "EMAIL_RETRYABLE",
+      created_at: "2026-08-25T01:00:00.000Z",
+      updated_at: "2026-08-25T01:01:00.000Z",
+    })).toMatchObject({ status: "failed", attempt_count: 2 });
+    expect(api.ReminderDeliveryListResponseSchema.safeParse({ items: [], next_cursor: null }).success).toBe(true);
+    expect(api.RetryReminderDeliveryInputSchema.parse({})).toEqual({});
+  });
+
   it("exposes masked personal AI configuration and never accepts a key in summaries", async () => {
     const api = await contracts();
     const summary = {

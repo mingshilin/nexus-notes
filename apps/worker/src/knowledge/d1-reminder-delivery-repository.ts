@@ -1,4 +1,4 @@
-import type { QueueJob, ReminderChannel, ReminderRecurrence } from "@nexus/contracts";
+import type { QueueJob, ReminderChannel, ReminderDelivery, ReminderRecurrence } from "@nexus/contracts";
 import { nextReminderOccurrence } from "@nexus/domain";
 
 interface DueReminderRow {
@@ -15,6 +15,34 @@ interface DueReminderRow {
   in_app_reminders: number;
   email_reminders: number;
   push_reminders: number;
+}
+
+interface ReminderDeliveryRow {
+  id: string;
+  workspace_id: string;
+  reminder_id: string;
+  occurrence_at: string;
+  channel: ReminderChannel;
+  status: ReminderDelivery["status"];
+  attempt_count: number;
+  last_error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function toReminderDelivery(row: ReminderDeliveryRow): ReminderDelivery {
+  return {
+    id: row.id,
+    workspace_id: row.workspace_id,
+    reminder_id: row.reminder_id,
+    occurrence_at: row.occurrence_at,
+    channel: row.channel,
+    status: row.status,
+    attempt_count: row.attempt_count,
+    last_error_code: row.last_error_code,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
 }
 
 const preferenceColumn: Record<ReminderChannel, keyof Pick<
@@ -134,6 +162,74 @@ export class D1ReminderDeliveryRepository {
       show_push_title: number;
       email: string;
     }>();
+  }
+
+  async listDeliveries(workspaceId: string, userId: string, reminderId: string, limit = 100) {
+    const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 100);
+    const result = await this.db.prepare(
+      `SELECT d.id, d.workspace_id, d.reminder_id, d.occurrence_at, d.channel,
+              d.status, d.attempt_count, d.last_error_code, d.created_at, d.updated_at
+       FROM reminder_deliveries d
+       JOIN reminders r ON r.id = d.reminder_id AND r.workspace_id = d.workspace_id AND r.user_id = d.user_id
+       WHERE d.workspace_id = ? AND d.user_id = ? AND d.reminder_id = ?
+       ORDER BY d.occurrence_at DESC, d.created_at DESC, d.id DESC
+       LIMIT ?`,
+    ).bind(workspaceId, userId, reminderId, boundedLimit).all<ReminderDeliveryRow>();
+    return (result.results ?? []).map(toReminderDelivery);
+  }
+
+  async retryDelivery(input: {
+    workspaceId: string;
+    userId: string;
+    reminderId: string;
+    deliveryId: string;
+    now: string;
+  }) {
+    const update = this.db.prepare(
+      `UPDATE reminder_deliveries
+       SET status = 'queued', last_error_code = NULL, updated_at = ?
+       WHERE id = ? AND workspace_id = ? AND user_id = ? AND reminder_id = ? AND status = 'failed'
+         AND EXISTS (
+           SELECT 1 FROM reminders r
+           WHERE r.id = reminder_id AND r.workspace_id = workspace_id AND r.user_id = user_id AND r.deleted_at IS NULL
+         )`,
+    ).bind(input.now, input.deliveryId, input.workspaceId, input.userId, input.reminderId);
+    const outbox = this.db.prepare(
+      `INSERT INTO reminder_delivery_outbox (
+         id, delivery_id, payload_json, available_at, attempt_count, created_at, updated_at
+       )
+       SELECT 'outbox:' || d.id, d.id,
+              json_object(
+                'kind', 'reminder_delivery',
+                'delivery_id', d.id,
+                'workspace_id', d.workspace_id,
+                'reminder_id', d.reminder_id,
+                'user_id', d.user_id,
+                'occurrence_at', d.occurrence_at,
+                'channel', d.channel
+              ), ?, 0, ?, ?
+       FROM reminder_deliveries d
+       WHERE d.id = ? AND d.status = 'queued' AND d.updated_at = ?
+       ON CONFLICT(delivery_id) DO UPDATE SET
+         dispatched_at = NULL,
+         available_at = excluded.available_at,
+         updated_at = excluded.updated_at`,
+    ).bind(input.now, input.now, input.now, input.deliveryId, input.now);
+    const results = await this.db.batch([update, outbox]);
+    if ((results[0]?.meta.changes ?? 0) !== 1) return null;
+    return this.getOwnedDelivery(input.workspaceId, input.userId, input.reminderId, input.deliveryId);
+  }
+
+  private async getOwnedDelivery(workspaceId: string, userId: string, reminderId: string, deliveryId: string) {
+    const row = await this.db.prepare(
+      `SELECT d.id, d.workspace_id, d.reminder_id, d.occurrence_at, d.channel,
+              d.status, d.attempt_count, d.last_error_code, d.created_at, d.updated_at
+       FROM reminder_deliveries d
+       JOIN reminders r ON r.id = d.reminder_id AND r.workspace_id = d.workspace_id AND r.user_id = d.user_id
+       WHERE d.id = ? AND d.workspace_id = ? AND d.user_id = ? AND d.reminder_id = ?
+       LIMIT 1`,
+    ).bind(deliveryId, workspaceId, userId, reminderId).first<ReminderDeliveryRow>();
+    return row ? toReminderDelivery(row) : null;
   }
 
   async markDeliverySent(deliveryId: string, now: string) {

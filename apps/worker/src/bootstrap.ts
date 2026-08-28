@@ -304,6 +304,7 @@ function createKnowledgeService(env: BetaWorkerEnv) {
   const taxonomy = new D1TaxonomyRepository(env.DB);
   const graph = new D1GraphRepository(env.DB);
   const reminders = new D1ReminderRepository(env.DB);
+  const reminderDeliveries = new D1ReminderDeliveryRepository(env.DB);
   return new KnowledgeService({
     search: (...args) => search.search(...args),
     listSavedSearches: (...args) => search.listSavedSearches(...args),
@@ -328,7 +329,7 @@ function createKnowledgeService(env: BetaWorkerEnv) {
     snoozeReminder: (...args) => reminders.snoozeReminder(...args),
     deleteReminder: (...args) => reminders.deleteReminder(...args),
     getReminder: (...args) => reminders.getReminder(...args),
-  });
+  }, { deliveryRepository: reminderDeliveries });
 }
 
 function createAttachmentService(env: BetaWorkerEnv) {

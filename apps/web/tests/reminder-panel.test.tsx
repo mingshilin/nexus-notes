@@ -44,6 +44,21 @@ function createClient() {
   };
 }
 
+function delivery(id: string, status: "failed" | "queued" | "sent") {
+  return {
+    id,
+    workspace_id: "ws-1",
+    reminder_id: "future",
+    occurrence_at: "2026-08-27T10:00:00.000Z",
+    channel: "email" as const,
+    status,
+    attempt_count: status === "failed" ? 2 : 1,
+    last_error_code: status === "failed" ? "EMAIL_RETRYABLE" : null,
+    created_at: base.created_at,
+    updated_at: base.updated_at,
+  };
+}
+
 const notesClient = {
   list: vi.fn(async () => ({
     items: [{
@@ -122,5 +137,24 @@ describe("ReminderPanel", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("提醒状态更新失败");
     expect(screen.getByRole("listitem", { name: "未来计划" })).toBeInTheDocument();
+  });
+
+  it("loads delivery status on demand and retries a failed delivery", async () => {
+    const client = createClient() as ReturnType<typeof createClient> & {
+      listReminderDeliveries: ReturnType<typeof vi.fn>;
+      retryReminderDelivery: ReturnType<typeof vi.fn>;
+    };
+    client.listReminderDeliveries = vi.fn(async () => [delivery("delivery-1", "failed")]);
+    client.retryReminderDelivery = vi.fn(async () => delivery("delivery-1", "queued"));
+    render(<ReminderPanel client={client} notesClient={notesClient} defaultTimezone="Asia/Shanghai" now={() => new Date("2026-08-25T08:00:00.000Z")} />);
+
+    const item = await screen.findByRole("listitem", { name: "未来计划" });
+    fireEvent.click(within(item).getByRole("button", { name: "查看投递状态" }));
+    expect(await screen.findByRole("region", { name: "未来计划投递状态" })).toHaveTextContent("EMAIL_RETRYABLE");
+    expect(client.listReminderDeliveries).toHaveBeenCalledWith("future", expect.any(AbortSignal));
+
+    fireEvent.click(screen.getByRole("button", { name: "重试 Email 投递" }));
+    await waitFor(() => expect(client.retryReminderDelivery).toHaveBeenCalledWith("future", "delivery-1"));
+    expect(screen.getByRole("region", { name: "未来计划投递状态" })).toHaveTextContent("已排队");
   });
 });

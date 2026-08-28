@@ -1,9 +1,10 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type {
   CreateReminderInput,
   Note,
   RecurrenceEnd,
   Reminder,
+  ReminderDelivery,
   ReminderChannel,
   ReminderListQuery,
   ReminderRecurrence,
@@ -17,6 +18,8 @@ type ReminderPage = { items: Reminder[]; next_cursor: string | null };
 type ReminderClient = Pick<KnowledgeClient, "createReminder" | "updateReminder" | "snoozeReminder" | "deleteReminder"> & {
   listReminderPage?(input: ReminderListQuery, signal?: AbortSignal): Promise<ReminderPage>;
   listReminders?(includeCompleted?: boolean, signal?: AbortSignal): Promise<Reminder[]>;
+  listReminderDeliveries?(reminderId: string, signal?: AbortSignal): Promise<ReminderDelivery[]>;
+  retryReminderDelivery?(reminderId: string, deliveryId: string): Promise<ReminderDelivery>;
 };
 type NoteLookupClient = Pick<NotesClient, "list">;
 type RepeatMode = "none" | ReminderRecurrence["frequency"];
@@ -66,6 +69,14 @@ function defaultTimezone() {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
+function deliveryChannelLabel(channel: ReminderDelivery["channel"]) {
+  return channel === "in_app" ? "站内" : channel === "email" ? "Email" : "Push";
+}
+
+function deliveryStatusLabel(status: ReminderDelivery["status"]) {
+  return status === "queued" ? "已排队" : status === "sent" ? "已发送" : status === "failed" ? "失败" : "已取消";
+}
+
 export function ReminderPanel({
   client,
   notesClient,
@@ -90,6 +101,12 @@ export function ReminderPanel({
   const [feedback, setFeedback] = useState<string | null>(null);
   const [failedBulkIds, setFailedBulkIds] = useState<string[]>([]);
   const [retryRequest, setRetryRequest] = useState<{ reminder: Reminder; input: UpdateReminderInput; success: string } | null>(null);
+  const [deliveryOpenId, setDeliveryOpenId] = useState<string | null>(null);
+  const [deliveryItems, setDeliveryItems] = useState<Record<string, ReminderDelivery[]>>({});
+  const [deliveryLoadingId, setDeliveryLoadingId] = useState<string | null>(null);
+  const [deliveryErrors, setDeliveryErrors] = useState<Record<string, string>>({});
+  const [deliveryRetryId, setDeliveryRetryId] = useState<string | null>(null);
+  const deliveryControllerRef = useRef<AbortController | null>(null);
 
   const [editing, setEditing] = useState<Reminder | null>(null);
   const [title, setTitle] = useState("");
@@ -335,6 +352,50 @@ export function ReminderPanel({
       .finally(() => setRefreshing(false));
   };
 
+  const toggleDeliveryStatus = (reminderId: string) => {
+    if (!client.listReminderDeliveries) return;
+    if (deliveryOpenId === reminderId) {
+      deliveryControllerRef.current?.abort();
+      deliveryControllerRef.current = null;
+      setDeliveryOpenId(null);
+      return;
+    }
+    setDeliveryOpenId(reminderId);
+    if (deliveryItems[reminderId]) return;
+    const controller = new AbortController();
+    deliveryControllerRef.current?.abort();
+    deliveryControllerRef.current = controller;
+    setDeliveryLoadingId(reminderId);
+    setDeliveryErrors((current) => {
+      const next = { ...current };
+      delete next[reminderId];
+      return next;
+    });
+    void client.listReminderDeliveries(reminderId, controller.signal).then((items) => {
+      if (!controller.signal.aborted) setDeliveryItems((current) => ({ ...current, [reminderId]: items }));
+    }).catch(() => {
+      if (!controller.signal.aborted) setDeliveryErrors((current) => ({ ...current, [reminderId]: "投递状态暂时无法加载，请重试。" }));
+    }).finally(() => {
+      if (!controller.signal.aborted) setDeliveryLoadingId((current) => current === reminderId ? null : current);
+    });
+  };
+
+  const retryDelivery = (reminderId: string, deliveryId: string) => {
+    if (!client.retryReminderDelivery || deliveryRetryId !== null) return;
+    setDeliveryRetryId(`${reminderId}:${deliveryId}`);
+    void client.retryReminderDelivery(reminderId, deliveryId).then((updated) => {
+      setDeliveryItems((current) => ({
+        ...current,
+        [reminderId]: (current[reminderId] ?? []).map((item) => item.id === updated.id ? updated : item),
+      }));
+      setFeedback("投递已重新排队。请稍后查看发送结果。");
+    }).catch(() => {
+      setDeliveryErrors((current) => ({ ...current, [reminderId]: "投递重试失败，请稍后重试。" }));
+    }).finally(() => setDeliveryRetryId(null));
+  };
+
+  useEffect(() => () => deliveryControllerRef.current?.abort(), []);
+
   const grouped = reminders.reduce<Record<ReminderGroup, Reminder[]>>((result, reminder) => {
     result[reminderGroup(reminder, now())].push(reminder);
     return result;
@@ -405,9 +466,19 @@ export function ReminderPanel({
               <div className="reminder-summary"><strong>{reminder.title || "未命名提醒"}</strong><time dateTime={reminder.snoozed_until ?? reminder.remind_at}>{new Date(reminder.snoozed_until ?? reminder.remind_at).toLocaleString()}</time><small>{reminder.note_id ? `关联笔记：${reminder.note_id}` : "未关联笔记"} · {statusLabel(reminder.status)} · {reminder.timezone || "UTC"}</small></div>
               <div className="reminder-item-actions">
                 {reminder.status === "pending" ? <><button type="button" disabled={pending} aria-label="稍后 10 分钟" onClick={() => snooze(reminder, 10)}>稍后 10 分钟</button><button type="button" disabled={pending} onClick={() => { void updateOne(reminder, { base_revision: reminder.revision, status: "dismissed" }, "提醒已完成；重复系列已结束。"); }}>完成</button></> : null}
+                {client.listReminderDeliveries ? <button type="button" disabled={pending} aria-expanded={deliveryOpenId === reminder.id} aria-label="查看投递状态" onClick={() => toggleDeliveryStatus(reminder.id)}>投递状态</button> : null}
                 <button type="button" disabled={pending} aria-label="编辑" onClick={() => beginEdit(reminder)}>编辑</button>
                 <button type="button" disabled={pending} aria-label="删除" onClick={() => remove(reminder)}>删除</button>
               </div>
+              {deliveryOpenId === reminder.id ? <div className="reminder-delivery-status" role="region" aria-label={`${reminder.title || "未命名提醒"}投递状态`}>
+                {deliveryLoadingId === reminder.id ? <p className="reminder-state" role="status">正在加载投递状态…</p> : null}
+                {deliveryErrors[reminder.id] ? <p className="reminder-error" role="alert">{deliveryErrors[reminder.id]}</p> : null}
+                {!deliveryLoadingId && !deliveryErrors[reminder.id] && (deliveryItems[reminder.id] ?? []).length === 0 ? <p className="reminder-state">暂无投递记录。</p> : null}
+                {(deliveryItems[reminder.id] ?? []).map((item) => <div className="reminder-delivery-row" key={item.id}>
+                  <span><strong>{deliveryChannelLabel(item.channel)}</strong><small>{deliveryStatusLabel(item.status)} · 尝试 {item.attempt_count}{item.last_error_code ? ` · ${item.last_error_code}` : ""}</small></span>
+                  {item.status === "failed" && client.retryReminderDelivery ? <button type="button" disabled={deliveryRetryId !== null} aria-label={`重试 ${deliveryChannelLabel(item.channel)} 投递`} onClick={() => retryDelivery(reminder.id, item.id)}>{deliveryRetryId === `${reminder.id}:${item.id}` ? "重试中…" : "重试"}</button> : null}
+                </div>)}
+              </div> : null}
             </li>)}
           </ul>
         </section>)}

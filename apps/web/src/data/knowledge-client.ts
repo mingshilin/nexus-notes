@@ -14,6 +14,7 @@ import type {
   GraphResponse,
   NoteLink,
   Reminder,
+  ReminderDelivery,
   ReminderListQuery,
   SavedSearch,
   SavedSearchInput,
@@ -182,6 +183,22 @@ export class KnowledgeClient {
       );
     return this.sharedReminder(`page:${key}`, load, signal)
       ?? this.cachedReminder(key, () => load(signal));
+  }
+
+  listReminderDeliveries(reminderId: string, signal?: AbortSignal) {
+    return this.query<{ items: ReminderDelivery[] }>(
+      `/api/v2/reminders/${encodeURIComponent(reminderId)}/deliveries`,
+      `reminder-deliveries:${reminderId}`,
+      signal,
+    ).then(({ items }) => items);
+  }
+
+  retryReminderDelivery(reminderId: string, deliveryId: string) {
+    return this.command<{ delivery: ReminderDelivery }>(
+      `/api/v2/reminders/${encodeURIComponent(reminderId)}/deliveries/${encodeURIComponent(deliveryId)}/retry`,
+      "POST",
+      {},
+    ).then(({ delivery }) => delivery);
   }
 
   getCalendarFeed(input: CalendarFeedQuery, signal?: AbortSignal) {

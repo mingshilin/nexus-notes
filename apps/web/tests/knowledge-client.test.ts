@@ -93,6 +93,8 @@ describe("KnowledgeClient", () => {
     await client.getGraph();
     await client.getGraph("note-1");
     await client.listReminders(true);
+    await client.listReminderDeliveries("reminder-1");
+    await client.retryReminderDelivery("reminder-1", "delivery-1");
     await client.createReminder({ note_id: "note-1", remind_at: "2026-08-22T00:00:00.000Z" });
     await client.updateReminder("reminder-1", { base_revision: 1, status: "dismissed" });
 
@@ -103,7 +105,10 @@ describe("KnowledgeClient", () => {
       ["/api/v2/notes/note-1/links", "PUT"],
       ["/api/v2/notes/note-1/links", "GET"], ["/api/v2/notes/note-1/backlinks", "GET"],
       ["/api/v2/graph", "GET"], ["/api/v2/graph/local/note-1", "GET"],
-      ["/api/v2/reminders?include_completed=true", "GET"], ["/api/v2/reminders", "POST"],
+      ["/api/v2/reminders?include_completed=true", "GET"],
+      ["/api/v2/reminders/reminder-1/deliveries", "GET"],
+      ["/api/v2/reminders/reminder-1/deliveries/delivery-1/retry", "POST"],
+      ["/api/v2/reminders", "POST"],
       ["/api/v2/reminders/reminder-1", "PATCH"],
     ]);
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);

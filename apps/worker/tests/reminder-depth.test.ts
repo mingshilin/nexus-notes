@@ -74,4 +74,40 @@ describe("reminder depth", () => {
       await test.dispose();
     }
   });
+
+  it("lists delivery status only for the reminder owner and requeues one failed delivery", async () => {
+    const test = await createTestD1();
+    try {
+      await seed(test.db);
+      await test.db.prepare(
+        `INSERT INTO reminders (id,workspace_id,note_id,user_id,remind_at,status,revision,created_at,updated_at,title,timezone,channels_json,occurrence_count,delivery_enabled_at)
+         VALUES ('reminder-1','ws-1',NULL,'user-1',?,'sent',2,?,?, 'Review','UTC','["email"]',1,?)`,
+      ).bind(now, now, now, now).run();
+      await test.db.prepare(
+        `INSERT INTO reminder_deliveries (id,workspace_id,reminder_id,user_id,occurrence_at,channel,status,attempt_count,last_error_code,created_at,updated_at)
+         VALUES ('delivery-1','ws-1','reminder-1','user-1',?,'email','failed',2,'EMAIL_RETRYABLE',?,?)`,
+      ).bind(now, now, now).run();
+      await test.db.prepare(
+        `INSERT INTO reminder_delivery_outbox (id,delivery_id,payload_json,available_at,dispatched_at,attempt_count,created_at,updated_at)
+         VALUES ('outbox:delivery-1','delivery-1','{"kind":"reminder_delivery","delivery_id":"delivery-1"}',?,?,2,?,?)`,
+      ).bind(now, now, now, now).run();
+
+      const repository = new D1ReminderDeliveryRepository(test.db);
+      await expect(repository.listDeliveries("ws-1", "user-1", "reminder-1")).resolves.toMatchObject([
+        { id: "delivery-1", status: "failed", attempt_count: 2, last_error_code: "EMAIL_RETRYABLE" },
+      ]);
+      await expect(repository.listDeliveries("ws-1", "user-2", "reminder-1")).resolves.toEqual([]);
+
+      await expect(repository.retryDelivery({
+        workspaceId: "ws-1", userId: "user-1", reminderId: "reminder-1", deliveryId: "delivery-1", now,
+      })).resolves.toMatchObject({ id: "delivery-1", status: "queued", last_error_code: null });
+      expect(await test.db.prepare("SELECT status, dispatched_at, available_at FROM reminder_deliveries d JOIN reminder_delivery_outbox o ON o.delivery_id = d.id WHERE d.id = 'delivery-1'").first())
+        .toEqual({ status: "queued", dispatched_at: null, available_at: now });
+      await expect(repository.retryDelivery({
+        workspaceId: "ws-1", userId: "user-1", reminderId: "reminder-1", deliveryId: "delivery-1", now,
+      })).resolves.toBeNull();
+    } finally {
+      await test.dispose();
+    }
+  });
 });
