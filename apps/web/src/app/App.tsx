@@ -37,6 +37,7 @@ import { useWorkspaceClients } from "./use-workspace-clients";
 import { useWorkspaceNavigation } from "./use-workspace-navigation";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { clearWorkspaceQueryCache } from "../data/workspace-query-cache";
+import { localDateKey, noteMatchesListView, useNotesListData, type NoteListView } from "./use-notes-list-data";
 import { NotesDomain, type NotesDomainCallbacks, type NotesEditorState, type NotesOverviewState } from "./domains/NotesDomain";
 import { DatabaseDomain, type DatabaseDomainCallbacks, type DatabaseDomainSelection } from "./domains/DatabaseDomain";
 import { KnowledgeDomain } from "./domains/KnowledgeDomain";
@@ -63,7 +64,6 @@ type AppRoute =
   | { kind: "workspace"; workspaceId?: string }
   | { kind: "invite"; token: string }
   | { kind: "share"; token: string };
-type NoteListView = "all" | "inbox" | "today" | "favorites" | "pinned" | "archived" | "trash";
 type WorkspaceRouteAuthority = { userId: string; workspaceId: string };
 type WorkspaceModal = "create" | "quick-capture" | "web-clipper" | "import" | "permanent-delete";
 type UserScopedLocalStore = NoteDraftStore & { destroy(): Promise<void> };
@@ -97,21 +97,6 @@ function permanentDeleteErrorMessage(error: unknown) {
           : "永久删除失败，请重试。笔记仍保留在回收站中。";
   const safeRequestId = requestId && /^[A-Za-z0-9._:-]{1,128}$/u.test(requestId) ? requestId : undefined;
   return safeRequestId ? `${message} 请求 ID：${safeRequestId}` : message;
-}
-
-function localDateKey(date = new Date()) {
-  return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
-}
-
-function noteMatchesListView(note: Note, view: NoteListView, todayDate = localDateKey()) {
-  if (view === "trash") return note.status === "trashed";
-  if (view === "archived") return note.status === "archived";
-  if (note.status !== "active") return false;
-  if (view === "inbox") return note.folder_id === null;
-  if (view === "today") return note.daily_date === todayDate;
-  if (view === "favorites") return note.is_favorite;
-  if (view === "pinned") return note.is_pinned;
-  return true;
 }
 
 function clearUserScopedBrowserState() {
@@ -298,11 +283,6 @@ function AuthenticatedWorkspace({
   const [navigationUser, setNavigationUser] = useState(user);
   const [unreadCount, setUnreadCount] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);
-  const [notes, setNotes] = useState<Note[]>([]);
-  const [notesLoading, setNotesLoading] = useState(Boolean(workspaceId));
-  const [notesNextCursor, setNotesNextCursor] = useState<string | null>(null);
-  const [notesPageLoading, setNotesPageLoading] = useState(false);
-  const [notesError, setNotesError] = useState<string | null>(null);
   const [notesRefreshVersion, setNotesRefreshVersion] = useState(0);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderLoading, setFolderLoading] = useState(Boolean(workspaceId));
@@ -410,8 +390,6 @@ function AuthenticatedWorkspace({
   const [retryingIds, setRetryingIds] = useState<Set<string>>(new Set());
   const [refreshVersion, setRefreshVersion] = useState(0);
   const requestControllers = useRef(new Set<AbortController>());
-  const notesPageController = useRef<AbortController | null>(null);
-  const notesPageRequestVersion = useRef(0);
   const retryControllers = useRef(new Set<AbortController>());
   const databaseControllers = useRef(new Set<AbortController>());
   const databaseCache = useRef(new NormalizedCache());
@@ -450,6 +428,29 @@ function AuthenticatedWorkspace({
   const focusInstalledNoteRef = useRef(false);
   const installedNotesRef = useRef(new Map<string, Note>());
   const mountedRef = useRef(true);
+  const {
+    notes,
+    setNotes,
+    notesLoading,
+    notesError,
+    setNotesError,
+    notesNextCursor,
+    notesPageLoading,
+    loadMoreNotes,
+  } = useNotesListData({
+    notesClient,
+    workspaceId,
+    noteListView,
+    noteFolderFilter,
+    debouncedNoteSearchQuery,
+    refreshVersion: notesRefreshVersion,
+    installedNotesRef,
+    activeDraftIdRef,
+    activationInFlight,
+    userSelectedNote,
+    setSelectedNoteId,
+    setCreatingNote,
+  });
   const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
   const workbenchMode = useWorkbenchMode();
   permanentDeletePendingRef.current = permanentDeletePending;
@@ -1260,122 +1261,6 @@ function AuthenticatedWorkspace({
     window.addEventListener("nexus:service-worker-update", handleUpdate);
     return () => window.removeEventListener("nexus:service-worker-update", handleUpdate);
   }, []);
-
-  useEffect(() => {
-    notesPageController.current?.abort();
-    notesPageController.current = null;
-    notesPageRequestVersion.current += 1;
-    setNotesNextCursor(null);
-    setNotesPageLoading(false);
-    if (!workspaceId) {
-      setNotes([]);
-      setNotesNextCursor(null);
-      setNotesPageLoading(false);
-      setSelectedNoteId(null);
-      setCreatingNote(false);
-      setNotesLoading(false);
-      setNotesError(null);
-      setNoteSearchQuery("");
-      setDebouncedNoteSearchQuery("");
-      return undefined;
-    }
-    const controller = new AbortController();
-    const requestVersion = notesPageRequestVersion.current;
-    setNotesLoading(true);
-    setNotesError(null);
-    const todayDate = localDateKey();
-    const selectedFolderId = noteListView === "all" ? noteFolderFilter ?? undefined : undefined;
-    const listOptions = noteListView === "inbox"
-      ? { status: "active" as const, folderId: null, limit: 50, signal: controller.signal }
-      : noteListView === "today"
-        ? { status: "active" as const, dailyDate: todayDate, limit: 50, signal: controller.signal }
-        : noteListView === "favorites"
-          ? { status: "active" as const, favorite: true, limit: 50, signal: controller.signal }
-          : noteListView === "pinned"
-            ? { status: "active" as const, pinned: true, limit: 50, signal: controller.signal }
-            : noteListView === "archived"
-              ? { status: "archived" as const, limit: 50, signal: controller.signal }
-              : noteListView === "trash"
-                ? { status: "trashed" as const, limit: 50, signal: controller.signal }
-                : { status: "active" as const, folderId: selectedFolderId, limit: 50, signal: controller.signal };
-    const listOptionsWithSearch = debouncedNoteSearchQuery
-      ? { ...listOptions, query: debouncedNoteSearchQuery }
-      : listOptions;
-    void notesClient.list(listOptionsWithSearch).then((page) => {
-      if (controller.signal.aborted || notesPageRequestVersion.current !== requestVersion) return;
-      const activeNotes = page.items.filter((note) => noteMatchesListView(note, noteListView, todayDate));
-      const installedNotes = [...installedNotesRef.current.values()]
-        .filter((note) => note.workspace_id === workspaceId
-          && noteMatchesListView(note, noteListView, todayDate)
-          && (!debouncedNoteSearchQuery || [note.title, note.content].join("\n").toLocaleLowerCase().includes(debouncedNoteSearchQuery.toLocaleLowerCase()))
-          && (noteFolderFilter === null || note.folder_id === noteFolderFilter));
-      const byId = new Map([...activeNotes, ...installedNotes].map((note) => [note.id, note]));
-      setNotes([...byId.values()]);
-      setNotesNextCursor(page.next_cursor);
-      if (!activeDraftIdRef.current && !activationInFlight.current && !userSelectedNote.current) {
-        setSelectedNoteId((current) => userSelectedNote.current && current && byId.has(current)
-          ? current
-          : [...byId.values()][0]?.id ?? null);
-        setCreatingNote(false);
-      }
-    }).catch((error: unknown) => {
-      if (notesPageRequestVersion.current === requestVersion && !isAborted(error, controller.signal)) {
-        setNotesError("笔记列表暂时无法加载。你仍可以尝试新建笔记。");
-      }
-    }).finally(() => {
-      if (!controller.signal.aborted && notesPageRequestVersion.current === requestVersion) setNotesLoading(false);
-    });
-    return () => {
-      controller.abort();
-      if (notesPageController.current) notesPageController.current.abort();
-      notesPageController.current = null;
-      notesPageRequestVersion.current += 1;
-    };
-  }, [apiClient, debouncedNoteSearchQuery, noteFolderFilter, noteListView, notesRefreshVersion, workspaceId]);
-
-  const loadMoreNotes = () => {
-    if (!workspaceId || !notesNextCursor || notesLoading || notesPageLoading) return;
-    notesPageController.current?.abort();
-    const controller = new AbortController();
-    notesPageController.current = controller;
-    const requestVersion = ++notesPageRequestVersion.current;
-    setNotesPageLoading(true);
-    const todayDate = localDateKey();
-    const selectedFolderId = noteListView === "all" ? noteFolderFilter ?? undefined : undefined;
-    const options = noteListView === "inbox"
-      ? { status: "active" as const, folderId: null, limit: 50 }
-      : noteListView === "today"
-        ? { status: "active" as const, dailyDate: todayDate, limit: 50 }
-        : noteListView === "favorites"
-          ? { status: "active" as const, favorite: true, limit: 50 }
-          : noteListView === "pinned"
-            ? { status: "active" as const, pinned: true, limit: 50 }
-            : noteListView === "archived"
-              ? { status: "archived" as const, limit: 50 }
-              : noteListView === "trash"
-                ? { status: "trashed" as const, limit: 50 }
-                : { status: "active" as const, folderId: selectedFolderId, limit: 50 };
-    void notesClient.list({
-      ...options,
-      cursor: notesNextCursor,
-      signal: controller.signal,
-      ...(debouncedNoteSearchQuery ? { query: debouncedNoteSearchQuery } : {}),
-    }).then((page) => {
-      if (controller.signal.aborted || notesPageRequestVersion.current !== requestVersion) return;
-      setNotes((current) => {
-        const byId = new Map(current.map((note) => [note.id, note]));
-        page.items.forEach((note) => byId.set(note.id, note));
-        return [...byId.values()];
-      });
-      setNotesNextCursor(page.next_cursor);
-    }).catch((error: unknown) => {
-      if (notesPageRequestVersion.current === requestVersion && !isAborted(error, controller.signal)) setNotesError("更多笔记暂时无法加载，请重试。");
-    }).finally(() => {
-      if (notesPageRequestVersion.current !== requestVersion || controller.signal.aborted) return;
-      notesPageController.current = null;
-      setNotesPageLoading(false);
-    });
-  };
 
   useEffect(() => {
     if (logoutPending || !workspaceId || notesLoading || activeDraftIdRef.current || userSelectedNote.current) return undefined;
@@ -2395,7 +2280,7 @@ function AuthenticatedWorkspace({
   );
   const knowledgeDomainCanvas = (
     <KnowledgeDomain
-      client={knowledgeClient}
+      client={{ knowledge: knowledgeClient, databases: databaseClient, collaboration: collaborationClient }}
       workspaceId={workspaceId ?? ""}
       role={role}
       selectedEntity={{ recoveryContent: recoveryPanel }}

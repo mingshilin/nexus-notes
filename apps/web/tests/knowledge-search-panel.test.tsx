@@ -107,4 +107,19 @@ describe("KnowledgeSearchPanel", () => {
       filters: expect.objectContaining({ tag_ids: ["tag-1"], folder_ids: ["folder-1"] }),
     })));
   });
+
+  it("offers readable database and member filters while preserving tenant IDs", async () => {
+    const client = createClient();
+    const databasesClient = { listDatabases: vi.fn(async () => [{ id: "db-1", name: "项目库" }]) };
+    const collaborationClient = { listMembers: vi.fn(async () => [{ user_id: "user-1", display_name: "小明", email: "ming@example.test" }]) };
+    render(<KnowledgeSearchPanel client={client} databasesClient={databasesClient} collaborationClient={collaborationClient} />);
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: "数据库：项目库" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "成员：小明" }));
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+
+    await waitFor(() => expect(client.search).toHaveBeenCalledWith(expect.objectContaining({
+      filters: expect.objectContaining({ database_ids: ["db-1"], member_ids: ["user-1"] }),
+    })));
+  });
 });

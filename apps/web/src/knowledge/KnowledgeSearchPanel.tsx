@@ -10,6 +10,8 @@ import type {
 import { KnowledgeClient } from "../data/knowledge-client";
 
 type SearchClient = Pick<KnowledgeClient, "search" | "listSavedSearches" | "createSavedSearch" | "deleteSavedSearch" | "listFolders" | "listTags">;
+type DatabaseFilterClient = { listDatabases(signal?: AbortSignal): Promise<Array<{ id: string; name: string }>> };
+type CollaborationFilterClient = { listMembers(signal?: AbortSignal): Promise<Array<{ user_id: string; display_name: string; email?: string }>> };
 type SearchEntityType = SavedSearchFilters["source_types"][number];
 
 const emptyFilters: SavedSearchFilters = {
@@ -63,7 +65,11 @@ function filtersForRequest(filters: SavedSearchFilters): SavedSearchFilters {
   };
 }
 
-export function KnowledgeSearchPanel({ client }: { client: SearchClient }) {
+export function KnowledgeSearchPanel({ client, databasesClient, collaborationClient }: {
+  client: SearchClient;
+  databasesClient?: DatabaseFilterClient;
+  collaborationClient?: CollaborationFilterClient;
+}) {
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<SavedSearchFilters>(emptyFilters);
   const [results, setResults] = useState<SearchHit[]>([]);
@@ -71,9 +77,14 @@ export function KnowledgeSearchPanel({ client }: { client: SearchClient }) {
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
+  const [databases, setDatabases] = useState<Array<{ id: string; name: string }>>([]);
+  const [members, setMembers] = useState<Array<{ user_id: string; display_name: string; email?: string }>>([]);
   const [taxonomyLoading, setTaxonomyLoading] = useState(true);
   const [taxonomyError, setTaxonomyError] = useState<string | null>(null);
   const [taxonomyRetry, setTaxonomyRetry] = useState(0);
+  const [scopeLoading, setScopeLoading] = useState(Boolean(databasesClient || collaborationClient));
+  const [scopeError, setScopeError] = useState<string | null>(null);
+  const [scopeRetry, setScopeRetry] = useState(0);
   const taxonomyFailuresRef = useRef<Set<"folders" | "tags">>(new Set(["folders", "tags"]));
   const [saveName, setSaveName] = useState("");
   const [loading, setLoading] = useState(false);
@@ -133,6 +144,33 @@ export function KnowledgeSearchPanel({ client }: { client: SearchClient }) {
 
   useEffect(() => () => requestRef.current?.abort(), []);
 
+  useEffect(() => {
+    if (!databasesClient && !collaborationClient) {
+      setScopeLoading(false);
+      setScopeError(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setScopeLoading(true);
+    setScopeError(null);
+    void Promise.allSettled([
+      databasesClient ? databasesClient.listDatabases(controller.signal) : Promise.resolve([]),
+      collaborationClient ? collaborationClient.listMembers(controller.signal) : Promise.resolve([]),
+    ]).then(([databaseResult, memberResult]) => {
+      if (controller.signal.aborted) return;
+      if (databaseResult.status === "fulfilled") setDatabases(databaseResult.value);
+      if (memberResult.status === "fulfilled") setMembers(memberResult.value);
+      const failures = [
+        databaseResult.status === "rejected" ? "数据库" : "",
+        memberResult.status === "rejected" ? "成员" : "",
+      ].filter(Boolean);
+      if (failures.length) setScopeError(`${failures.join("和")}选项暂时无法加载，仍可使用 ID 过滤。`);
+    }).finally(() => {
+      if (!controller.signal.aborted) setScopeLoading(false);
+    });
+    return () => controller.abort();
+  }, [collaborationClient, databasesClient, scopeRetry]);
+
   const runSearch = (nextQuery: string, nextFilters: SavedSearchFilters, cursor?: string) => {
     requestRef.current?.abort();
     const controller = new AbortController();
@@ -165,7 +203,7 @@ export function KnowledgeSearchPanel({ client }: { client: SearchClient }) {
     setFilters((current) => ({ ...current, [key]: parseList(value) }));
   };
 
-  const toggleListValue = (key: "tag_ids" | "folder_ids", value: string) => {
+  const toggleListValue = (key: "tag_ids" | "folder_ids" | "database_ids" | "member_ids", value: string) => {
     setFilters((current) => ({
       ...current,
       [key]: current[key].includes(value)
@@ -275,6 +313,9 @@ export function KnowledgeSearchPanel({ client }: { client: SearchClient }) {
         {taxonomyLoading ? <p className="knowledge-search-state" role="status">正在加载文件夹和标签…</p> : null}
         {taxonomyError ? <div className="knowledge-search-error-row"><p className="knowledge-search-error" role="alert">{taxonomyError}</p><button type="button" onClick={() => setTaxonomyRetry((value) => value + 1)}>重试分类加载</button></div> : null}
         {!taxonomyLoading && (folders.length > 0 || tags.length > 0) ? <div className="knowledge-search-taxonomy"><span>可读分类</span>{tags.map((tag) => <label key={tag.id}><input type="checkbox" aria-label={`标签：${tag.name}`} checked={filters.tag_ids.includes(tag.id)} onChange={() => toggleListValue("tag_ids", tag.id)} />标签：{tag.name}</label>)}{folders.map((folder) => <label key={folder.id}><input type="checkbox" aria-label={`文件夹：${folder.name}`} checked={filters.folder_ids.includes(folder.id)} onChange={() => toggleListValue("folder_ids", folder.id)} />文件夹：{folder.name}</label>)}</div> : null}
+        {scopeLoading ? <p className="knowledge-search-state" role="status">正在加载数据库和成员…</p> : null}
+        {scopeError ? <div className="knowledge-search-error-row"><p className="knowledge-search-error" role="alert">{scopeError}</p><button type="button" onClick={() => setScopeRetry((value) => value + 1)}>重试选项加载</button></div> : null}
+        {!scopeLoading && (databases.length > 0 || members.length > 0) ? <div className="knowledge-search-taxonomy knowledge-search-scope-options"><span>可读范围</span>{databases.map((database) => <label key={database.id}><input type="checkbox" aria-label={`数据库：${database.name}`} checked={filters.database_ids.includes(database.id)} onChange={() => toggleListValue("database_ids", database.id)} />数据库：{database.name}</label>)}{members.map((member) => <label key={member.user_id}><input type="checkbox" aria-label={`成员：${member.display_name}`} checked={filters.member_ids.includes(member.user_id)} onChange={() => toggleListValue("member_ids", member.user_id)} />成员：{member.display_name}</label>)}</div> : null}
         <button type="button" className="knowledge-search-reset" onClick={resetFilters}>清除过滤</button>
       </fieldset>
       <form className="knowledge-search-save" onSubmit={saveCurrentSearch}>

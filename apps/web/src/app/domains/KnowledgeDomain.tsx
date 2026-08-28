@@ -3,6 +3,8 @@ import { lazy, Suspense } from "react";
 import type { WorkspaceRoleContract } from "@nexus/contracts";
 
 import type { KnowledgeClient } from "../../data/knowledge-client";
+import type { DatabaseClient } from "../../data/database-client";
+import type { CollaborationClient } from "../../data/collaboration-client";
 import { loadKnowledgeCalendarPanel, loadKnowledgeGraphPanel, loadKnowledgeSearchPanel } from "../workspace-domain-loader";
 import type { WorkspaceDomainProps } from "./NotesDomain";
 
@@ -23,18 +25,26 @@ export interface KnowledgeDomainSelection {
   recoveryContent: ReactNode;
 }
 
-export type KnowledgeDomainProps = WorkspaceDomainProps<KnowledgeClient, KnowledgeDomainSelection, Record<string, never>>;
+export type KnowledgeDomainClient = KnowledgeClient | {
+  knowledge: KnowledgeClient;
+  databases?: Pick<DatabaseClient, "listDatabases">;
+  collaboration?: Pick<CollaborationClient, "listMembers">;
+};
+export type KnowledgeDomainProps = WorkspaceDomainProps<KnowledgeDomainClient, KnowledgeDomainSelection, Record<string, never>>;
 
 export function KnowledgeDomain({ client, selectedEntity }: KnowledgeDomainProps) {
+  const knowledge = "knowledge" in client ? client.knowledge : client;
+  const databases = "knowledge" in client ? client.databases : undefined;
+  const collaboration = "knowledge" in client ? client.collaboration : undefined;
   return (
     <section className="product-domain-page knowledge-domain-page">
       <p className="eyebrow">KNOWLEDGE CENTER</p>
       <h1>知识恢复</h1>
       <p className="product-domain-lead">搜索、保存查询，并集中处理附件 OCR 状态与知识诊断。</p>
       <Suspense fallback={<p className="knowledge-search-state" role="status">正在加载知识工具…</p>}>
-        <LazyKnowledgeSearchPanel client={client} />
-        <LazyKnowledgeGraphPanel client={client} />
-        <LazyKnowledgeCalendarPanel client={client} />
+        <LazyKnowledgeSearchPanel client={knowledge} databasesClient={databases} collaborationClient={collaboration} />
+        <LazyKnowledgeGraphPanel client={knowledge} />
+        <LazyKnowledgeCalendarPanel client={knowledge} />
       </Suspense>
       {selectedEntity.recoveryContent}
     </section>
