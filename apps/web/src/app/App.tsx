@@ -7,11 +7,11 @@ import {
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { MAX_UPLOAD_BYTES, NoteSchema, SUPPORTED_ATTACHMENT_MIME_TYPES } from "@nexus/contracts";
-import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, NoteLink, NoteRevision, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
+import type { AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, NoteLink, NoteRevision, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient, ApiClientError } from "../data/api-client";
 import { CollaborationClient } from "../data/collaboration-client";
-import { KnowledgeRecoveryPanel, type RecoveryDiagnostic, type RecoveryFilters } from "../knowledge/KnowledgeRecoveryPanel";
+import { KnowledgeRecoveryPanel, type RecoveryDiagnostic } from "../knowledge/KnowledgeRecoveryPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { useWorkbenchMode } from "../layout/use-mobile-layout";
 import type { DatabaseClient } from "../data/database-client";
@@ -39,6 +39,7 @@ import { WorkspaceShell } from "./WorkspaceShell";
 import { clearWorkspaceQueryCache } from "../data/workspace-query-cache";
 import { localDateKey, noteMatchesListView, useNotesListData, type NoteListView } from "./use-notes-list-data";
 import { useDatabaseWorkspaceData } from "./use-database-workspace-data";
+import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
 import { NotesDomain, type NotesDomainCallbacks, type NotesEditorState, type NotesOverviewState } from "./domains/NotesDomain";
 import { DatabaseDomain, type DatabaseDomainCallbacks, type DatabaseDomainSelection } from "./domains/DatabaseDomain";
 import { KnowledgeDomain } from "./domains/KnowledgeDomain";
@@ -59,8 +60,6 @@ const LazyCollaborationCenter = lazy(async () => {
 });
 
 const defaultAuthClient = new AuthClient(new ApiClient());
-const initialRecoveryFilters: RecoveryFilters = { mimeType: "", ocrStatus: "" };
-type OcrStatus = NonNullable<Attachment["ocr_status"]>;
 type AppRoute =
   | { kind: "workspace"; workspaceId?: string }
   | { kind: "invite"; token: string }
@@ -132,14 +131,6 @@ function LogoutCleanupRecovery({ failed, deleted, onRetry }: { failed: boolean; 
 function resetTokenFromLocation() {
   if (typeof window === "undefined") return undefined;
   return new URLSearchParams(window.location.search).get("reset_token") ?? undefined;
-}
-
-function recoveryFeedback(result: { queued: string[]; ineligible: string[]; duplicate: string[] }) {
-  const feedback: string[] = [];
-  if (result.queued.length) feedback.push(`已加入 ${result.queued.length} 项 OCR 重试。`);
-  if (result.ineligible.length) feedback.push(`${result.ineligible.length} 项不符合重试条件。`);
-  if (result.duplicate.length) feedback.push(`${result.duplicate.length} 项已在处理中。`);
-  return feedback.join(" ") || "没有可重试的附件。";
 }
 
 function isSupportedAttachmentMime(value: string): value is typeof SUPPORTED_ATTACHMENT_MIME_TYPES[number] {
@@ -369,23 +360,8 @@ function AuthenticatedWorkspace({
   const [databaseCreateOpen, setDatabaseCreateOpen] = useState(false);
   const [creatingFirstDatabase, setCreatingFirstDatabase] = useState(false);
   const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState<ServiceWorkerUpdate | null>(null);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [diagnostics, setDiagnostics] = useState<KnowledgeDiagnostic[]>([]);
-  const [filters, setFilters] = useState<RecoveryFilters>(initialRecoveryFilters);
-  const [attachmentCursor, setAttachmentCursor] = useState<string | null>(null);
-  const [diagnosticCursor, setDiagnosticCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(Boolean(workspaceId));
-  const [refreshing, setRefreshing] = useState(false);
-  const [attachmentError, setAttachmentError] = useState<string | null>(workspaceId ? null : "未选择工作区，无法加载恢复数据。");
-  const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
-  const [retryFeedback, setRetryFeedback] = useState<string | null>(null);
-  const [retryingIds, setRetryingIds] = useState<Set<string>>(new Set());
-  const [refreshVersion, setRefreshVersion] = useState(0);
-  const requestControllers = useRef(new Set<AbortController>());
-  const retryControllers = useRef(new Set<AbortController>());
-  const attachmentQueryIdentity = useRef<string | null>(null);
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
   const notificationOpenerRef = useRef<HTMLElement | null>(null);
   const notificationTargetController = useRef<AbortController | null>(null);
@@ -465,6 +441,33 @@ function AuthenticatedWorkspace({
     webClipperOpen,
     refreshVersion: databaseRefreshVersion,
     resolvedNotificationRecord,
+  });
+  const {
+    attachments,
+    setAttachments,
+    diagnostics,
+    setDiagnostics,
+    filters,
+    setFilters,
+    attachmentCursor,
+    diagnosticCursor,
+    loading,
+    refreshing,
+    attachmentError,
+    diagnosticError,
+    setDiagnosticError,
+    retryFeedback,
+    setRetryFeedback,
+    retryingIds,
+    loadMoreAttachments,
+    loadMoreDiagnostics,
+    retryAttachments,
+    refresh: refreshRecovery,
+    abortRequests: abortRecoveryRequests,
+  } = useKnowledgeRecoveryData({
+    client: knowledgeClient,
+    workspaceId,
+    initialFilters: { mimeType: "", ocrStatus: "" },
   });
   const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
   const workbenchMode = useWorkbenchMode();
@@ -1236,28 +1239,6 @@ function AuthenticatedWorkspace({
     return () => { cancelled = true; };
   }, [apiClient, draftController, logoutPending, pendingReconcile, workspaceId]);
 
-  const abortRecoveryRequests = () => {
-    requestControllers.current.forEach((controller) => controller.abort());
-    requestControllers.current.clear();
-  };
-
-  const createRecoveryRequest = () => {
-    const controller = new AbortController();
-    requestControllers.current.add(controller);
-    return controller;
-  };
-
-  const abortRetryRequests = () => {
-    retryControllers.current.forEach((controller) => controller.abort());
-    retryControllers.current.clear();
-  };
-
-  const createRetryRequest = () => {
-    const controller = new AbortController();
-    retryControllers.current.add(controller);
-    return controller;
-  };
-
   useLayoutEffect(() => {
     const handleUpdate = (event: Event) => {
       setServiceWorkerUpdate((event as CustomEvent<ServiceWorkerUpdate>).detail);
@@ -1399,70 +1380,9 @@ function AuthenticatedWorkspace({
   }, [collaborationClient, collaborationEnabled, workspaceId]);
 
   useEffect(() => () => {
-    abortRecoveryRequests();
-    abortRetryRequests();
     notificationTargetController.current?.abort();
     historyController.current?.abort();
   }, []);
-
-  useEffect(() => {
-    abortRecoveryRequests();
-    const nextQueryIdentity = `${workspaceId ?? ""}\u0000${filters.mimeType}\u0000${filters.ocrStatus}`;
-    if (attachmentQueryIdentity.current !== null && attachmentQueryIdentity.current !== nextQueryIdentity) {
-      setAttachmentCursor(null);
-    }
-    attachmentQueryIdentity.current = nextQueryIdentity;
-    if (!workspaceId) {
-      setAttachments([]);
-      setDiagnostics([]);
-      setAttachmentCursor(null);
-      setDiagnosticCursor(null);
-      setLoading(false);
-      setRefreshing(false);
-      setAttachmentError("未选择工作区，无法加载恢复数据。");
-      setDiagnosticError(null);
-      return undefined;
-    }
-
-    const controller = createRecoveryRequest();
-    const hasCachedData = attachments.length > 0 || diagnostics.length > 0;
-    setLoading(!hasCachedData);
-    setRefreshing(hasCachedData);
-    setAttachmentError(null);
-    setDiagnosticError(null);
-    void Promise.allSettled([
-      knowledgeClient.listAttachments({
-        mime_type: (filters.mimeType as Attachment["mime_type"]) || undefined,
-        ocr_status: (filters.ocrStatus as OcrStatus) || undefined,
-        limit: 50,
-      }, controller.signal),
-      knowledgeClient.getKnowledgeDiagnostics({ limit: 50 }, controller.signal),
-    ]).then(([attachmentResult, diagnosticResult]) => {
-      if (controller.signal.aborted) return;
-      if (attachmentResult.status === "fulfilled") {
-        setAttachments(attachmentResult.value.items);
-        setAttachmentCursor(attachmentResult.value.next_cursor);
-        setAttachmentError(null);
-      } else if (!isAborted(attachmentResult.reason, controller.signal)) {
-        setAttachmentError("附件暂时无法加载，保留最近可用数据。");
-      }
-      if (diagnosticResult.status === "fulfilled") {
-        setDiagnostics(diagnosticResult.value.items);
-        setDiagnosticCursor(diagnosticResult.value.next_cursor);
-        setDiagnosticError(null);
-      } else if (!isAborted(diagnosticResult.reason, controller.signal)) {
-        setDiagnosticError("诊断暂时无法加载，保留最近可用数据。");
-      }
-    }).finally(() => {
-      requestControllers.current.delete(controller);
-      if (!controller.signal.aborted) {
-        setLoading(false);
-        setRefreshing(false);
-      }
-    });
-
-    return () => abortRecoveryRequests();
-  }, [filters.mimeType, filters.ocrStatus, knowledgeClient, refreshVersion, workspaceId]);
 
   const createDatabaseFromName = (name: string) => {
     if (!workspaceId || !name.trim() || creatingFirstDatabase) return;
@@ -1507,70 +1427,6 @@ function AuthenticatedWorkspace({
     setDatabaseCreateOpen(databases.length > 0);
   };
 
-  const loadMoreAttachments = () => {
-    if (!workspaceId || !attachmentCursor || loading || refreshing) return;
-    const controller = createRecoveryRequest();
-    setRefreshing(true);
-    void knowledgeClient.listAttachments({
-      mime_type: (filters.mimeType as Attachment["mime_type"]) || undefined,
-      ocr_status: (filters.ocrStatus as OcrStatus) || undefined,
-      cursor: attachmentCursor,
-      limit: 50,
-    }, controller.signal).then((page) => {
-      if (controller.signal.aborted) return;
-      setAttachments((current) => [...current, ...page.items]);
-      setAttachmentCursor(page.next_cursor);
-      setAttachmentError(null);
-    }).catch((requestError: unknown) => {
-      if (!isAborted(requestError, controller.signal)) setAttachmentError("更多附件暂时无法加载，请稍后重试。");
-    }).finally(() => {
-      requestControllers.current.delete(controller);
-      if (!controller.signal.aborted) setRefreshing(false);
-    });
-  };
-
-  const loadMoreDiagnostics = () => {
-    if (!workspaceId || !diagnosticCursor || loading || refreshing) return;
-    const controller = createRecoveryRequest();
-    setRefreshing(true);
-    void knowledgeClient.getKnowledgeDiagnostics({ cursor: diagnosticCursor, limit: 50 }, controller.signal).then((page) => {
-      if (controller.signal.aborted) return;
-      setDiagnostics((current) => [...current, ...page.items]);
-      setDiagnosticCursor(page.next_cursor);
-      setDiagnosticError(null);
-    }).catch((requestError: unknown) => {
-      if (!isAborted(requestError, controller.signal)) setDiagnosticError("更多诊断暂时无法加载，请稍后重试。");
-    }).finally(() => {
-      requestControllers.current.delete(controller);
-      if (!controller.signal.aborted) setRefreshing(false);
-    });
-  };
-
-  const retryAttachments = (attachmentIds: string[]) => {
-    if (!workspaceId || retryingIds.size > 0) return;
-    const ids = [...new Set(attachmentIds)];
-    if (ids.length === 0) return;
-    setRetryingIds(new Set(ids));
-    setRetryFeedback(null);
-    const controller = createRetryRequest();
-    const retry = ids.length === 1
-      ? knowledgeClient.retryAttachmentOcr(ids[0], controller.signal)
-      : knowledgeClient.retryAttachmentOcrBatch(ids, controller.signal);
-    void retry.then((result) => {
-      if (controller.signal.aborted) return;
-      setRetryFeedback(recoveryFeedback(result));
-    }).catch((retryError: unknown) => {
-      if (!isAborted(retryError, controller.signal)) {
-        setRetryFeedback("OCR 重试请求失败，请稍后重试。");
-      }
-    }).finally(() => {
-      retryControllers.current.delete(controller);
-      if (controller.signal.aborted) return;
-      setRetryingIds(new Set());
-      setRefreshVersion((version) => version + 1);
-    });
-  };
-
   const updateDiagnosticNotes = async (
     items: KnowledgeDiagnostic[],
     patchFor: (note: Note) => { folder_id?: string | null; database_id?: string | null },
@@ -1601,7 +1457,7 @@ function AuthenticatedWorkspace({
     setRetryFeedback(failed > 0
       ? `已处理 ${updated.length} 篇，${failed} 篇失败；失败项仍保留，可重试。`
       : `已处理 ${updated.length} 篇笔记。`);
-    setRefreshVersion((version) => version + 1);
+    refreshRecovery();
   };
 
   const classifyUnfiledNotes = (folderId: string) => {
@@ -1658,7 +1514,7 @@ function AuthenticatedWorkspace({
         return archived ? { ...archived, status: "archived" as const } : note;
       }));
       setRetryFeedback(`已合并 ${matches.length} 篇同名笔记，重复副本已归档，可在归档列表恢复。`);
-      setRefreshVersion((version) => version + 1);
+       refreshRecovery();
     } catch (error) {
       setDiagnosticError(error instanceof Error ? error.message : "同名笔记合并失败，内容未删除。请重试。");
     }
@@ -1703,7 +1559,7 @@ function AuthenticatedWorkspace({
           setNoteError(null);
           setNoteMessage("附件已插入正文，保存笔记后生效。");
         }
-        setRefreshVersion((version) => version + 1);
+        refreshRecovery();
       } catch {
         if (reservedId) await knowledgeClient.deleteAttachment(reservedId).catch(() => undefined);
         setUploadError("附件上传失败，请重新选择文件。未完成的上传会自动清理。");
@@ -1797,7 +1653,6 @@ function AuthenticatedWorkspace({
       clearWorkspaceQueryCache(apiClient, { userId, workspaceId });
       await onWorkspaceChange(nextWorkspaceId);
       abortRecoveryRequests();
-      abortRetryRequests();
       abortDatabaseRequests();
       notificationTargetController.current?.abort();
     } catch (error) {

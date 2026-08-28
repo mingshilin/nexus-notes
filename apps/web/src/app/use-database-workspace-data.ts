@@ -37,9 +37,7 @@ function isAborted(error: unknown, signal: AbortSignal) {
 
 function pageLimit(bundle: DatabaseBundle | null) {
   const configured = bundle?.views[0]?.config.page_size;
-  return typeof configured === "number" && Number.isFinite(configured) && configured > 0
-    ? Math.min(Math.max(Math.trunc(configured), 1), 100)
-    : 50;
+  return typeof configured === "number" && Number.isFinite(configured) ? configured : 50;
 }
 
 export function useDatabaseWorkspaceData({
@@ -76,7 +74,9 @@ export function useDatabaseWorkspaceData({
     clientRef.current = client;
     const effectiveSelectedDatabaseId = workspaceChanged ? null : selectedDatabaseId;
     const effectiveBundle = workspaceChanged ? null : databaseBundle;
-    const effectiveNotificationRecord = workspaceChanged ? null : resolvedNotificationRecord;
+    const effectiveNotificationRecord = resolvedNotificationRecord?.workspace_id === workspaceId
+      ? resolvedNotificationRecord
+      : null;
 
     if (workspaceChanged) {
       abortDatabaseRequests();
@@ -106,12 +106,14 @@ export function useDatabaseWorkspaceData({
       return undefined;
     }
 
-    const selectedRecordDatabaseId = effectiveNotificationRecord?.database_id ?? "";
+    const selectedRecordIdentity = effectiveNotificationRecord
+      ? `${effectiveNotificationRecord.database_id}:${effectiveNotificationRecord.id}`
+      : "";
     const requestKey = [
       workspaceId,
       effectiveSelectedDatabaseId ?? "",
       refreshVersion,
-      selectedRecordDatabaseId,
+      selectedRecordIdentity,
     ].join("\u0000");
 
     // bootstrap adopts its own selected id. The resulting state update must not
