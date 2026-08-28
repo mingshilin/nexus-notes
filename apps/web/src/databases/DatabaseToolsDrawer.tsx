@@ -411,6 +411,67 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     const mutations = records.filter((record) => selectedRecordIds.includes(record.id)).map((record) => ({ record_id: record.id, base_revision: record.revision, values: { [property.id]: normalizeFieldValue(property, bulkValue) } }));
     void run(() => onBulkPreview ? onBulkPreview(mutations) : client!.bulkEdit(databaseId, { mutations }), "已保存批量更新。");
   };
+  const saveDatabasePermission = () => {
+    if (!validate(subjectId.trim(), subjectType === "user" ? "请选择成员。" : "请选择工作区角色。")) return;
+    const requestDatabaseId = databaseId;
+    const requestDatabaseGeneration = databaseGenerationRef.current;
+    const requestPanel = panel;
+    const requestPanelGeneration = panelGenerationRef.current;
+    const requestSubjectId = subjectId.trim();
+    const requestRole = role;
+    const current = visibleDatabasePermissions.find((permission) => permission.subject_type === subjectType && permission.subject_id === requestSubjectId);
+    void run(async () => {
+      abortRequest(databasePermissionsControllerRef);
+      const controller = new AbortController();
+      databasePermissionsControllerRef.current = controller;
+      const isCurrent = () => requestIsCurrent(controller, requestDatabaseId, requestDatabaseGeneration, requestPanel, requestPanelGeneration, databasePermissionsControllerRef);
+      try {
+        await client!.setDatabasePermission(requestDatabaseId, {
+          subject_type: subjectType,
+          subject_id: requestSubjectId,
+          role: requestRole,
+          base_revision: current?.revision ?? 1,
+        });
+        if (!isCurrent()) return;
+        const items = await client!.listDatabasePermissions(requestDatabaseId, controller.signal);
+        if (isCurrent()) setDatabasePermissions(items);
+      } finally {
+        if (databasePermissionsControllerRef.current === controller) databasePermissionsControllerRef.current = null;
+      }
+    });
+  };
+  const saveFieldPermission = () => {
+    if (!validate(subjectId.trim(), subjectType === "user" ? "请选择成员。" : "请选择工作区角色。")) return;
+    const requestDatabaseId = databaseId;
+    const requestDatabaseGeneration = databaseGenerationRef.current;
+    const requestPanel = panel;
+    const requestPanelGeneration = panelGenerationRef.current;
+    const requestPropertyId = visiblePermissionPropertyId;
+    const requestSubjectId = subjectId.trim();
+    const requestCanRead = fieldCanRead;
+    const requestCanWrite = fieldCanWrite;
+    const current = visibleFieldPermissions.find((permission) => permission.property_id === requestPropertyId && permission.subject_type === subjectType && permission.subject_id === requestSubjectId);
+    void run(async () => {
+      abortRequest(fieldPermissionsControllerRef);
+      const controller = new AbortController();
+      fieldPermissionsControllerRef.current = controller;
+      const isCurrent = () => requestIsCurrent(controller, requestDatabaseId, requestDatabaseGeneration, requestPanel, requestPanelGeneration, fieldPermissionsControllerRef);
+      try {
+        await client!.setFieldPermission(requestDatabaseId, requestPropertyId, {
+          subject_type: subjectType,
+          subject_id: requestSubjectId,
+          can_read: requestCanRead,
+          can_write: requestCanWrite,
+          base_revision: current?.revision ?? 1,
+        });
+        if (!isCurrent()) return;
+        const updated = await client!.listFieldPermissions(requestDatabaseId, requestPropertyId, controller.signal);
+        if (isCurrent()) setFieldPermissions((items) => [...items.filter((item) => item.property_id !== requestPropertyId), ...updated]);
+      } finally {
+        if (fieldPermissionsControllerRef.current === controller) fieldPermissionsControllerRef.current = null;
+      }
+    });
+  };
   const previewCsv = async () => {
     if (disabled || !client) return;
     abortRequest(csvPreviewControllerRef);
@@ -544,12 +605,12 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
         </> : null}
         {renderedPanel === "bulk" ? <DatabaseBulkForm records={records} properties={properties} selectedIds={selectedRecordIds} propertyId={bulkPropertyId} value={bulkValue} disabled={disabled} onSelectionChange={(id, selected) => setSelectedRecordIds((current) => selected ? [...current, id] : current.filter((currentId) => currentId !== id))} onPropertyChange={setBulkPropertyId} onValueChange={setBulkValue} onSubmit={submitBulk} /> : null}
         {renderedPanel === "permission" ? <>
-          <DatabasePermissionForm subjectType={subjectType} subjectId={visibleSubjectId} role={role} members={collaborationClient ? visibleMembers : undefined} disabled={disabled} onSubjectTypeChange={changeSubjectType} onSubjectChange={setSubjectId} onRoleChange={setRole} onSubmit={() => { if (!validate(subjectId.trim(), subjectType === "user" ? "请选择成员。" : "请选择工作区角色。")) return; const current = visibleDatabasePermissions.find((permission) => permission.subject_type === subjectType && permission.subject_id === subjectId.trim()); void run(async () => { await client!.setDatabasePermission(databaseId, { subject_type: subjectType, subject_id: subjectId.trim(), role, base_revision: current?.revision ?? 1 }); setDatabasePermissions(await client!.listDatabasePermissions(databaseId)); }); }} />
+          <DatabasePermissionForm subjectType={subjectType} subjectId={visibleSubjectId} role={role} members={collaborationClient ? visibleMembers : undefined} disabled={disabled} onSubjectTypeChange={changeSubjectType} onSubjectChange={setSubjectId} onRoleChange={setRole} onSubmit={saveDatabasePermission} />
           <ul className="database-entity-list" aria-label="数据库权限列表">{visibleDatabasePermissions.map((permission) => <li key={permission.id}><span>{permission.subject_id} · {permission.role} · r{permission.revision}</span><button type="button" aria-label={`删除数据库权限 ${permission.subject_id}`} disabled={disabled} onClick={() => void run(async () => { await client!.deleteDatabasePermission(databaseId, permission.id, { base_revision: permission.revision }); setDatabasePermissions((current) => current.filter((item) => item.id !== permission.id)); })}>删除</button></li>)}</ul>
           <label>权限字段<select aria-label="权限字段" value={visiblePermissionPropertyId} onChange={(event) => setPermissionPropertyId(event.target.value)}>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label>
           <label>字段可读<input type="checkbox" checked={fieldCanRead} onChange={(event) => { setFieldCanRead(event.target.checked); if (!event.target.checked) setFieldCanWrite(false); }} /></label>
           <label>字段可写<input type="checkbox" checked={fieldCanWrite} disabled={!fieldCanRead} onChange={(event) => setFieldCanWrite(event.target.checked)} /></label>
-          <button type="button" disabled={disabled || !visiblePermissionPropertyId} onClick={() => { if (!validate(subjectId.trim(), subjectType === "user" ? "请选择成员。" : "请选择工作区角色。")) return; const current = visibleFieldPermissions.find((permission) => permission.property_id === visiblePermissionPropertyId && permission.subject_type === subjectType && permission.subject_id === subjectId.trim()); void run(async () => { await client!.setFieldPermission(databaseId, visiblePermissionPropertyId, { subject_type: subjectType, subject_id: subjectId.trim(), can_read: fieldCanRead, can_write: fieldCanWrite, base_revision: current?.revision ?? 1 }); const updated = await client!.listFieldPermissions(databaseId, visiblePermissionPropertyId); setFieldPermissions((items) => [...items.filter((item) => item.property_id !== visiblePermissionPropertyId), ...updated]); }); }}>保存字段权限</button>
+          <button type="button" disabled={disabled || !visiblePermissionPropertyId} onClick={saveFieldPermission}>保存字段权限</button>
           <ul className="database-entity-list" aria-label="字段权限列表">{visibleFieldPermissions.filter((permission) => permission.property_id === visiblePermissionPropertyId).map((permission) => <li key={permission.id}><span>{permission.subject_id} · r{permission.revision}</span><button type="button" aria-label={`删除字段权限 ${permission.subject_id}`} disabled={disabled} onClick={() => void run(async () => { await client!.deleteFieldPermission(databaseId, permission.property_id, permission.id, { base_revision: permission.revision }); setFieldPermissions((current) => current.filter((item) => item.id !== permission.id)); })}>删除</button></li>)}</ul>
           <DatabasePermissionMatrix members={visibleMembers} properties={properties} databasePermissions={visibleDatabasePermissions} fieldPermissions={visibleFieldPermissions} />
         </> : null}

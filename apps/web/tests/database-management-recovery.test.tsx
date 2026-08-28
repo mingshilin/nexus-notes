@@ -272,4 +272,104 @@ describe("database management recovery", () => {
     expect(within(management).queryByRole("option", { name: "Lin A · a@example.com" })).not.toBeInTheDocument();
     expect(within(management).queryByLabelText("成员 ID")).not.toBeInTheDocument();
   });
+
+  it("ignores a delayed database-permission refresh after switching databases", async () => {
+    const refreshA = deferred<Array<Record<string, unknown>>>();
+    let databaseAListCalls = 0;
+    const permissionA = { id: "permission-a", subject_id: "user-a", subject_type: "user", role: "viewer", revision: 2 };
+    const permissionB = { id: "permission-b", subject_id: "user-b", subject_type: "user", role: "editor", revision: 1 };
+    const client = statsClient({
+      setDatabasePermission: vi.fn(async () => ({})),
+      listDatabasePermissions: vi.fn((databaseId: string) => {
+        if (databaseId === "db-a") {
+          databaseAListCalls += 1;
+          return databaseAListCalls === 1 ? Promise.resolve([]) : refreshA.promise;
+        }
+        return Promise.resolve([permissionB]);
+      }),
+      listFieldPermissions: vi.fn(async () => []),
+    });
+    const rendered = renderDrawer("db-a", client);
+    let management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    await waitFor(() => expect(client.listDatabasePermissions).toHaveBeenCalledWith("db-a", expect.any(AbortSignal)));
+
+    fireEvent.change(within(management).getByLabelText("成员 ID"), { target: { value: "user-a" } });
+    fireEvent.click(within(management).getByRole("button", { name: "保存权限" }));
+    await waitFor(() => {
+      expect(client.setDatabasePermission).toHaveBeenCalledWith("db-a", expect.objectContaining({ subject_id: "user-a" }));
+      expect(client.listDatabasePermissions).toHaveBeenCalledTimes(2);
+    });
+    expect(client.listDatabasePermissions).toHaveBeenNthCalledWith(2, "db-a", expect.any(AbortSignal));
+
+    rendered.rerender(rendered.element({
+      database: makeDatabase("db-b"),
+      databaseId: "db-b",
+      properties: [makeProperty("db-b")],
+      records: [makeRecord("db-b")],
+      views: [makeView("db-b")],
+    }));
+    await waitFor(() => expect(within(screen.getByRole("dialog", { name: "数据库工具" })).getByRole("button", { name: "概览" })).toBeInTheDocument());
+    management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    await waitFor(() => expect(client.listDatabasePermissions).toHaveBeenCalledWith("db-b", expect.any(AbortSignal)));
+    await waitFor(() => expect(screen.queryAllByText(/user-b/).length).toBeGreaterThan(0));
+
+    await act(async () => {
+      refreshA.resolve([permissionA]);
+      await Promise.resolve();
+    });
+    expect(screen.queryAllByText(/user-a/)).toHaveLength(0);
+    expect(screen.queryAllByText(/user-b/).length).toBeGreaterThan(0);
+  });
+
+  it("ignores a delayed field-permission refresh after switching databases", async () => {
+    const refreshA = deferred<Array<Record<string, unknown>>>();
+    let fieldAListCalls = 0;
+    const permissionA = { id: "field-a", property_id: "name", subject_id: "user-a", subject_type: "user", can_read: true, can_write: false, revision: 2 };
+    const permissionB = { id: "field-b", property_id: "name", subject_id: "user-b", subject_type: "user", can_read: true, can_write: true, revision: 1 };
+    const client = statsClient({
+      setFieldPermission: vi.fn(async () => ({})),
+      listDatabasePermissions: vi.fn(async () => []),
+      listFieldPermissions: vi.fn((databaseId: string) => {
+        if (databaseId === "db-a") {
+          fieldAListCalls += 1;
+          return fieldAListCalls === 1 ? Promise.resolve([]) : refreshA.promise;
+        }
+        return Promise.resolve([permissionB]);
+      }),
+    });
+    const rendered = renderDrawer("db-a", client);
+    let management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    await waitFor(() => expect(client.listFieldPermissions).toHaveBeenCalledWith("db-a", "name", expect.any(AbortSignal)));
+
+    fireEvent.change(within(management).getByLabelText("成员 ID"), { target: { value: "user-a" } });
+    fireEvent.click(within(management).getByRole("button", { name: "保存字段权限" }));
+    await waitFor(() => {
+      expect(client.setFieldPermission).toHaveBeenCalledWith("db-a", "name", expect.objectContaining({ subject_id: "user-a" }));
+      expect(client.listFieldPermissions).toHaveBeenCalledTimes(2);
+    });
+    expect(client.listFieldPermissions).toHaveBeenNthCalledWith(2, "db-a", "name", expect.any(AbortSignal));
+
+    rendered.rerender(rendered.element({
+      database: makeDatabase("db-b"),
+      databaseId: "db-b",
+      properties: [makeProperty("db-b")],
+      records: [makeRecord("db-b")],
+      views: [makeView("db-b")],
+    }));
+    await waitFor(() => expect(within(screen.getByRole("dialog", { name: "数据库工具" })).getByRole("button", { name: "概览" })).toBeInTheDocument());
+    management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    await waitFor(() => expect(client.listFieldPermissions).toHaveBeenCalledWith("db-b", "name", expect.any(AbortSignal)));
+    await waitFor(() => expect(screen.queryAllByText(/user-b/).length).toBeGreaterThan(0));
+
+    await act(async () => {
+      refreshA.resolve([permissionA]);
+      await Promise.resolve();
+    });
+    expect(screen.queryAllByText(/user-a/)).toHaveLength(0);
+    expect(screen.queryAllByText(/user-b/).length).toBeGreaterThan(0);
+  });
 });
