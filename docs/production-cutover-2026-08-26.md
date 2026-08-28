@@ -7,9 +7,9 @@ Cutover date: 2026-08-28 (Asia/Shanghai)
 - Production URL: <https://notes.msl88ljctengxun.xyz/>
 - Worker: `modern-notes-saas`
 - Beta Worker version: `4cff06b5-0807-410f-b4f8-7ca1cb639014`
-- Source branch: `codex/personal-ai-provider-editor-focus`
-- Source commit deployed: `4b4c7a9` (system Workers AI plus personal provider fallback and Note Info Inspector changes).
-- GitHub PR: <https://github.com/mingshilin/nexus-notes/pull/10> (merged as `b0bfd7c`; this follow-up branch is not yet merged)
+- Source branch: `codex/personal-ai-provider-editor-focus-clean`
+- Source commit deployed: `4b4c7a9` (system Workers AI plus personal provider fallback and Note Info Inspector changes); the same tree was merged to `main` by PR #12 as `2f2dca2`.
+- GitHub PRs: <https://github.com/mingshilin/nexus-notes/pull/10> and <https://github.com/mingshilin/nexus-notes/pull/12> (both merged)
 - Previous Worker version retained for rollback: `1c5198ff-7671-4e97-9c1a-1e9dc3c131cc`
 
 ## Backup And Data Migration
@@ -49,7 +49,7 @@ Legacy sessions, email codes, reset tokens and offline drafts were intentionally
 
 ## Verification
 
-- GitHub Public Beta CI: PR #10 passed before merge; follow-up provider/editor branch still needs its own PR CI
+- GitHub Public Beta CI: PR #10 and PR #12 passed before merge
 - `/api/v2/health`: `status=ok`, `version=personal-ai-editor-focus-release`, `ocr=ready`
 - CSP, HSTS, X-Frame-Options, X-Content-Type-Options and Referrer-Policy present
 - Initial HTML does not preload Markdown, OCR or AI chunks
