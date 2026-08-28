@@ -81,13 +81,21 @@ export function useNotesListData(options: NotesListDataOptions): NotesListDataRe
   const [notesPageLoading, setNotesPageLoading] = useState(false);
   const pageControllerRef = useRef<AbortController | null>(null);
   const requestVersionRef = useRef(0);
+  const workspaceIdRef = useRef(workspaceId);
 
   useEffect(() => {
+    const workspaceChanged = workspaceIdRef.current !== workspaceId;
+    workspaceIdRef.current = workspaceId;
     pageControllerRef.current?.abort();
     pageControllerRef.current = null;
     const requestVersion = ++requestVersionRef.current;
     setNotesNextCursor(null);
     setNotesPageLoading(false);
+    if (workspaceChanged) {
+      setNotes([]);
+      setSelectedNoteId(null);
+      setCreatingNote(false);
+    }
     if (!workspaceId) {
       setNotes([]);
       setSelectedNoteId(null);
