@@ -47,6 +47,7 @@ interface CacheEntry<T> {
   value?: T;
   expiresAt: number;
   inFlight?: Promise<T>;
+  sequence: number;
 }
 
 function cacheKey(key: WorkspaceCacheKey) {
@@ -102,6 +103,8 @@ export class WorkspaceQueryCache {
   private readonly now: () => number;
   private readonly onEvent?: (event: WorkspaceQueryCacheEvent) => void;
   private readonly entries = new Map<string, CacheEntry<unknown>>();
+  private generationValue = 0;
+  private requestSequence = 0;
   private readonly counts: WorkspaceQueryCacheMetrics = {
     hits: 0,
     misses: 0,
@@ -135,6 +138,7 @@ export class WorkspaceQueryCache {
         key,
         hasValue: false,
         expiresAt: 0,
+        sequence: 0,
       };
       this.entries.set(serializedKey, entry);
     }
@@ -152,6 +156,7 @@ export class WorkspaceQueryCache {
   }
 
   invalidate(filter?: Partial<WorkspaceCacheKey>) {
+    this.generationValue += 1;
     if (!filter) {
       this.entries.clear();
       return;
@@ -163,15 +168,30 @@ export class WorkspaceQueryCache {
 
   /** Seed a related query without disturbing a request that is already newer. */
   prime<T>(key: WorkspaceCacheKey, value: T, ttlMs: number) {
+    return this.primeAt(key, value, ttlMs, this.generationValue, this.requestSequence);
+  }
+
+  primeAt<T>(key: WorkspaceCacheKey, value: T, ttlMs: number, generation: number, sourceSequence: number) {
+    if (generation !== this.generationValue) return false;
     const serializedKey = cacheKey(key);
     const current = this.entries.get(serializedKey) as CacheEntry<T> | undefined;
-    if (current?.inFlight) return;
+    if (current?.inFlight || (current && current.sequence >= sourceSequence)) return false;
     this.entries.set(serializedKey, {
       key,
       hasValue: true,
       value,
       expiresAt: this.now() + Math.max(0, ttlMs),
+      sequence: sourceSequence,
     });
+    return true;
+  }
+
+  generation() {
+    return this.generationValue;
+  }
+
+  sequenceFor(key: WorkspaceCacheKey) {
+    return (this.entries.get(cacheKey(key)) as CacheEntry<unknown> | undefined)?.sequence ?? 0;
   }
 
   clearWorkspace(workspaceId: string) {
@@ -200,6 +220,8 @@ export class WorkspaceQueryCache {
     this.emit("miss", entry.key);
     const startedAt = this.now();
     const controller = new AbortController();
+    const sequence = ++this.requestSequence;
+    entry.sequence = sequence;
     let loaded: Promise<T>;
     try {
       // Start the fetch synchronously so an urgent navigation does not wait for a microtask.
@@ -209,10 +231,11 @@ export class WorkspaceQueryCache {
     }
     const request = loaded
       .then((value) => {
-        if (this.entries.get(serializedKey) === entry) {
+        if (this.entries.get(serializedKey) === entry && entry.sequence <= sequence) {
           entry.hasValue = true;
           entry.value = value;
           entry.expiresAt = this.now() + ttlMs;
+          entry.sequence = sequence;
           this.emit("commit", entry.key, this.now() - startedAt);
         }
         return value;

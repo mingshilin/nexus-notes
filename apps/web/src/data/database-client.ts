@@ -135,9 +135,17 @@ export class DatabaseClient {
       `database-bootstrap:${this.workspaceId}:${key}`,
       requestSignal,
     );
+    const sharedKey = this.userId ? {
+      userId: this.userId,
+      workspaceId: this.workspaceId,
+      domain: "databases" as const,
+      query: key,
+    } : null;
+    const sharedGeneration = this.queryCache?.generation() ?? 0;
     const shared = this.shared(key, load, options.signal);
+    const sharedSequence = sharedKey ? this.queryCache?.sequenceFor(sharedKey) ?? 0 : 0;
     if (shared) return shared.then((value) => {
-      this.primeBootstrap(value);
+      this.primeBootstrap(value, sharedGeneration, sharedSequence);
       return value;
     });
     return this.cached(key, load, options.signal, generation, (value, requestToken) => {
@@ -145,7 +153,7 @@ export class DatabaseClient {
       if (value.bundle) {
         this.commitCache(`database:${value.bundle.database.id}`, value.bundle, requestToken, generation);
       }
-      this.primeBootstrap(value);
+      this.primeBootstrap(value, sharedGeneration, sharedSequence);
     });
   }
 
@@ -466,18 +474,22 @@ export class DatabaseClient {
     );
   }
 
-  private primeBootstrap(value: DatabaseBootstrap) {
+  private primeBootstrap(value: DatabaseBootstrap, generation: number, sourceSequence: number) {
     if (!this.queryCache || !this.userId) return;
-    this.queryCache.prime(
+    this.queryCache.primeAt(
       { userId: this.userId, workspaceId: this.workspaceId, domain: "databases", query: "databases" },
       value.items,
       DATABASE_CACHE_TTL_MS,
+      generation,
+      sourceSequence,
     );
     if (value.bundle) {
-      this.queryCache.prime(
+      this.queryCache.primeAt(
         { userId: this.userId, workspaceId: this.workspaceId, domain: "databases", query: `database:${value.bundle.database.id}` },
         value.bundle,
         DATABASE_CACHE_TTL_MS,
+        generation,
+        sourceSequence,
       );
     }
   }

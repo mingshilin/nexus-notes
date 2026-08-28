@@ -88,6 +88,54 @@ describe("DatabaseClient", () => {
     expect(api.request).toHaveBeenCalledOnce();
   });
 
+  it("does not let a slower bootstrap replace a newer settled list result", async () => {
+    const data = await loadData();
+    const bootstrapRequest = deferred<any>();
+    const listRequest = deferred<{ items: Array<{ id: string; name: string }> }>();
+    const api = {
+      request: vi.fn(({ path }: { path: string }) => path.includes("/bootstrap") ? bootstrapRequest.promise : listRequest.promise),
+    };
+    const queryCache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const client = new data.DatabaseClient(api, "ws-1", { userId: "user-1", queryCache });
+    const bootstrap = client.bootstrap({ databaseId: "db-1", limit: 50 });
+    const list = client.listDatabases();
+
+    listRequest.resolve({ items: [{ id: "db-new", name: "New" }] });
+    await expect(list).resolves.toEqual([{ id: "db-new", name: "New" }]);
+    bootstrapRequest.resolve({
+      items: [{ id: "db-old", name: "Old" }], selected_database_id: "db-old", bundle: null,
+      records: { items: [], next_cursor: null },
+    });
+    await bootstrap;
+
+    await expect(client.listDatabases()).resolves.toEqual([{ id: "db-new", name: "New" }]);
+    expect(api.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not reinsert a stale bootstrap into shared cache after mutation invalidation", async () => {
+    const data = await loadData();
+    const bootstrapRequest = deferred<any>();
+    const api = {
+      request: vi.fn(({ path, method }: { path: string; method?: string }) => {
+        if (path.includes("/bootstrap")) return bootstrapRequest.promise;
+        if (method === "POST") return Promise.resolve({ database: { id: "db-created", name: "Created" } });
+        return Promise.resolve({ items: [{ id: "db-fresh", name: "Fresh" }] });
+      }),
+    };
+    const queryCache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const client = new data.DatabaseClient(api, "ws-1", { userId: "user-1", queryCache });
+    const bootstrap = client.bootstrap({ databaseId: "db-old", limit: 50 });
+    await client.createDatabase({ name: "Created", description: "" });
+    bootstrapRequest.resolve({
+      items: [{ id: "db-old", name: "Old" }], selected_database_id: "db-old", bundle: null,
+      records: { items: [], next_cursor: null },
+    });
+    await bootstrap;
+
+    await expect(client.listDatabases()).resolves.toEqual([{ id: "db-fresh", name: "Fresh" }]);
+    expect(api.request.mock.calls.filter(([input]) => input.path === "/api/v2/databases" && !input.method)).toHaveLength(1);
+  });
+
   it("serves stale database cache while revalidating and keeps it after an aborted refresh", async () => {
     const data = await loadData();
     let now = 1_000;
