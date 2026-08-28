@@ -3,6 +3,21 @@ import { describe, expect, it, vi } from "vitest";
 import { AIChatPanel } from "../src/ai/AIChatPanel";
 
 describe("AIChatPanel", () => {
+  function actionResponse(summary: string) {
+    return {
+      message: `${summary}消息`,
+      model: "beta-model",
+      action_proposals: [{
+        action_id: "shared-action-id",
+        tool: "create_note" as const,
+        summary,
+        input: { title: summary, content: `${summary}内容` },
+        requires_confirmation: true,
+        expires_at: "2099-08-25T01:00:00.000Z",
+      }],
+    };
+  }
+
   it("shows an explicit configuration status without exposing provider secrets", async () => {
     const client = { request: vi.fn(async (options: { path: string }) => options.path === "/api/v2/ai/status" || options.path === "/api/v2/ai/config" ? { configured: false, source: "unconfigured" } : { message: "unused", model: "beta-model" }) };
 
@@ -425,6 +440,160 @@ describe("AIChatPanel", () => {
     expect(await screen.findByText("已确认")).toBeInTheDocument();
     expect(screen.getByText("创建复盘笔记")).toBeInTheDocument();
     expect(rejectAiAction).not.toHaveBeenCalled();
+  });
+
+  it("does not repopulate a stale confirmation after the explicit read scope changes", async () => {
+    let chatAttempt = 0;
+    let resolveConfirm!: (value: { action: { action_id: string; status: "executed"; revision: number } }) => void;
+    const request = vi.fn(async (input: { path: string }) => {
+      if (input.path === "/api/v2/ai/status") return { configured: true, source: "server_default" };
+      chatAttempt += 1;
+      return actionResponse(chatAttempt === 1 ? "旧范围提案" : "新范围提案");
+    });
+    const confirmAiAction = vi.fn(() => new Promise<{ action: { action_id: string; status: "executed"; revision: number } }>((resolve) => {
+      resolveConfirm = resolve;
+    }));
+    const view = render(<AIChatPanel
+      client={{ request, confirmAiAction, rejectAiAction: vi.fn() } as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a"], selected_database_ids: [] }}
+    />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "确认旧范围" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "旧范围提案" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+    await waitFor(() => expect(confirmAiAction).toHaveBeenCalledOnce());
+
+    view.rerender(<AIChatPanel
+      client={{ request, confirmAiAction, rejectAiAction: vi.fn() } as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-b"], selected_database_ids: [] }}
+    />);
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "旧范围提案" })).not.toBeInTheDocument());
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "确认新范围" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "新范围提案" })).toBeInTheDocument();
+
+    resolveConfirm({ action: { action_id: "shared-action-id", status: "executed", revision: 2 } });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("待确认")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认执行" })).toBeInTheDocument();
+    expect(screen.queryByText("已确认")).not.toBeInTheDocument();
+  });
+
+  it("does not repopulate a stale rejection after the explicit read scope changes", async () => {
+    let chatAttempt = 0;
+    let resolveReject!: (value: { action: { action_id: string; rejected: boolean } }) => void;
+    const request = vi.fn(async (input: { path: string }) => {
+      if (input.path === "/api/v2/ai/status") return { configured: true, source: "server_default" };
+      chatAttempt += 1;
+      return actionResponse(chatAttempt === 1 ? "旧范围拒绝提案" : "新范围拒绝提案");
+    });
+    const rejectAiAction = vi.fn(() => new Promise<{ action: { action_id: string; rejected: boolean } }>((resolve) => {
+      resolveReject = resolve;
+    }));
+    const view = render(<AIChatPanel
+      client={{ request, confirmAiAction: vi.fn(), rejectAiAction } as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a"], selected_database_ids: [] }}
+    />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "拒绝旧范围" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "旧范围拒绝提案" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
+    await waitFor(() => expect(rejectAiAction).toHaveBeenCalledOnce());
+
+    view.rerender(<AIChatPanel
+      client={{ request, confirmAiAction: vi.fn(), rejectAiAction } as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-b"], selected_database_ids: [] }}
+    />);
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "旧范围拒绝提案" })).not.toBeInTheDocument());
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "拒绝新范围" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "新范围拒绝提案" })).toBeInTheDocument();
+
+    resolveReject({ action: { action_id: "shared-action-id", rejected: true } });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("待确认")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "拒绝" })).toBeInTheDocument();
+    expect(screen.queryByText("已拒绝")).not.toBeInTheDocument();
+  });
+
+  it("does not repopulate a stale confirmation after clearing the conversation", async () => {
+    let chatAttempt = 0;
+    let resolveConfirm!: (value: { action: { action_id: string; status: "executed"; revision: number } }) => void;
+    const request = vi.fn(async (input: { path: string }) => {
+      if (input.path === "/api/v2/ai/status") return { configured: true, source: "server_default" };
+      chatAttempt += 1;
+      return actionResponse(chatAttempt === 1 ? "清空前提案" : "清空后提案");
+    });
+    const confirmAiAction = vi.fn(() => new Promise<{ action: { action_id: string; status: "executed"; revision: number } }>((resolve) => {
+      resolveConfirm = resolve;
+    }));
+    render(<AIChatPanel client={{ request, confirmAiAction, rejectAiAction: vi.fn() } as any} workspaceId="ws-1" />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "清空前确认" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "清空前提案" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+    await waitFor(() => expect(confirmAiAction).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "清空对话" }));
+
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "清空后确认" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "清空后提案" })).toBeInTheDocument();
+
+    resolveConfirm({ action: { action_id: "shared-action-id", status: "executed", revision: 2 } });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("待确认")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认执行" })).toBeInTheDocument();
+    expect(screen.queryByText("已确认")).not.toBeInTheDocument();
+  });
+
+  it("does not repopulate a stale rejection after clearing the conversation", async () => {
+    let chatAttempt = 0;
+    let resolveReject!: (value: { action: { action_id: string; rejected: boolean } }) => void;
+    const request = vi.fn(async (input: { path: string }) => {
+      if (input.path === "/api/v2/ai/status") return { configured: true, source: "server_default" };
+      chatAttempt += 1;
+      return actionResponse(chatAttempt === 1 ? "清空前拒绝提案" : "清空后拒绝提案");
+    });
+    const rejectAiAction = vi.fn(() => new Promise<{ action: { action_id: string; rejected: boolean } }>((resolve) => {
+      resolveReject = resolve;
+    }));
+    render(<AIChatPanel client={{ request, confirmAiAction: vi.fn(), rejectAiAction } as any} workspaceId="ws-1" />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "清空前拒绝" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "清空前拒绝提案" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
+    await waitFor(() => expect(rejectAiAction).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "清空对话" }));
+
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "清空后拒绝" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "清空后拒绝提案" })).toBeInTheDocument();
+
+    resolveReject({ action: { action_id: "shared-action-id", rejected: true } });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("待确认")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "拒绝" })).toBeInTheDocument();
+    expect(screen.queryByText("已拒绝")).not.toBeInTheDocument();
   });
 
   it("rejects a proposal, handles expiry, and never persists sensitive AI content in browser storage", async () => {

@@ -277,6 +277,12 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
     }));
   };
 
+  const isCurrentActionRequest = (actionWorkspaceId: string, actionScopeFingerprint: string, actionGeneration: number) =>
+    mountedRef.current
+    && actionWorkspaceId === workspaceIdRef.current
+    && actionScopeFingerprint === currentScopeFingerprintRef.current
+    && actionGeneration === requestGenerationRef.current;
+
   const send = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const content = draft.trim();
@@ -369,8 +375,13 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
   };
 
   const confirmProposal = async (proposal: AiActionProposal) => {
+    const actionWorkspaceId = workspaceId;
+    const actionScopeFingerprint = scopeFingerprint;
+    const actionGeneration = requestGenerationRef.current;
+    const isActionCurrent = () => isCurrentActionRequest(actionWorkspaceId, actionScopeFingerprint, actionGeneration);
     const state = actionStates[proposal.action_id];
     if (!workspaceId || state?.status === "confirming" || state?.status === "rejecting" || state?.status === "confirmed" || state?.status === "rejected" || state?.status === "expired") return;
+    if (!isActionCurrent()) return;
     if (isProposalExpired(proposal)) {
       updateActionState(proposal.action_id, { status: "expired", error: null });
       return;
@@ -378,6 +389,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
     updateActionState(proposal.action_id, { status: "confirming", error: null });
     try {
       const response = await client.confirmAiAction(workspaceId, proposal.action_id, state?.baseRevision ?? 1);
+      if (!isActionCurrent()) return;
       if (response.action.status === "executed") {
         updateActionState(proposal.action_id, { status: "confirmed", error: null, baseRevision: (state?.baseRevision ?? 1) + 1 });
       } else {
@@ -388,14 +400,20 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
         });
       }
     } catch (caught) {
+      if (!isActionCurrent()) return;
       const normalized = normalizeActionError(caught);
       updateActionState(proposal.action_id, { ...normalized, error: normalized.message, baseRevision: state?.baseRevision ?? 1 });
     }
   };
 
   const rejectProposal = async (proposal: AiActionProposal) => {
+    const actionWorkspaceId = workspaceId;
+    const actionScopeFingerprint = scopeFingerprint;
+    const actionGeneration = requestGenerationRef.current;
+    const isActionCurrent = () => isCurrentActionRequest(actionWorkspaceId, actionScopeFingerprint, actionGeneration);
     const state = actionStates[proposal.action_id];
     if (!workspaceId || state?.status === "confirming" || state?.status === "rejecting" || state?.status === "confirmed" || state?.status === "rejected" || state?.status === "expired") return;
+    if (!isActionCurrent()) return;
     if (isProposalExpired(proposal)) {
       updateActionState(proposal.action_id, { status: "expired", error: null });
       return;
@@ -403,8 +421,10 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
     updateActionState(proposal.action_id, { status: "rejecting", error: null });
     try {
       await client.rejectAiAction(workspaceId, proposal.action_id, state?.baseRevision ?? 1);
+      if (!isActionCurrent()) return;
       updateActionState(proposal.action_id, { status: "rejected", error: null, baseRevision: (state?.baseRevision ?? 1) + 1 });
     } catch (caught) {
+      if (!isActionCurrent()) return;
       const normalized = normalizeActionError(caught);
       updateActionState(proposal.action_id, { ...normalized, error: normalized.message, baseRevision: state?.baseRevision ?? 1 });
     }
