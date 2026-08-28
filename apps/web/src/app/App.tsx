@@ -41,6 +41,7 @@ import { localDateKey, noteMatchesListView, useNotesListData, type NoteListView 
 import { useDatabaseWorkspaceData } from "./use-database-workspace-data";
 import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
 import { useNoteInspectorData } from "./use-note-inspector-data";
+import { useNoteMutations } from "./use-note-mutations";
 import { NotesDomain, type NotesDomainCallbacks, type NotesEditorState, type NotesOverviewState } from "./domains/NotesDomain";
 import { DatabaseDomain, type DatabaseDomainCallbacks, type DatabaseDomainSelection } from "./domains/DatabaseDomain";
 import { KnowledgeDomain } from "./domains/KnowledgeDomain";
@@ -75,30 +76,6 @@ type NoteConflictState = {
   local: { title: string; content: string };
   server: Note;
 };
-
-function permanentDeleteErrorMessage(error: unknown) {
-  const candidate = error instanceof ApiClientError
-    ? { code: error.code, retryable: error.retryable, requestId: error.requestId }
-    : typeof error === "object" && error !== null
-      ? error as { code?: unknown; retryable?: unknown; requestId?: unknown; request_id?: unknown }
-      : {};
-  const code = typeof candidate.code === "string" ? candidate.code : "";
-  const retryable = candidate.retryable === true;
-  const requestId = typeof candidate.requestId === "string"
-    ? candidate.requestId
-    : typeof candidate.request_id === "string" ? candidate.request_id : undefined;
-  const message = code === "NOTE_CONFLICT"
-    ? "笔记已发生变化。请刷新回收站后再试。"
-    : code === "NOTE_NOT_TRASHED"
-      ? "笔记已不在回收站中。请刷新回收站后再试。"
-      : code === "NOTE_NOT_FOUND"
-        ? "笔记已不存在或无权访问。请刷新回收站后再试。"
-        : code === "NETWORK_ERROR" || code === "TIMEOUT" || retryable
-          ? "网络或服务暂时不可用。笔记仍保留在回收站中，可安全重试。"
-          : "永久删除失败，请重试。笔记仍保留在回收站中。";
-  const safeRequestId = requestId && /^[A-Za-z0-9._:-]{1,128}$/u.test(requestId) ? requestId : undefined;
-  return safeRequestId ? `${message} 请求 ID：${safeRequestId}` : message;
-}
 
 function clearUserScopedBrowserState() {
   if (typeof window === "undefined") return;
@@ -319,14 +296,9 @@ function AuthenticatedWorkspace({
   const [editorMode, setEditorMode] = useState<"edit" | "preview">("edit");
   const [draftFolderId, setDraftFolderId] = useState<string | null>(null);
   const [draftDatabaseId, setDraftDatabaseId] = useState<string | null>(null);
-  const [noteSaving, setNoteSaving] = useState(false);
-  const [noteMessage, setNoteMessage] = useState<string | null>(null);
-  const [noteError, setNoteError] = useState<string | null>(null);
   const [restoringRevision, setRestoringRevision] = useState<number | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
-  const [permanentDeletePending, setPermanentDeletePending] = useState(false);
-  const [permanentDeleteError, setPermanentDeleteError] = useState<string | null>(null);
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
   const [serverRetryVersion, setServerRetryVersion] = useState(0);
   const [noteConflict, setNoteConflict] = useState<NoteConflictState | null>(null);
@@ -372,6 +344,10 @@ function AuthenticatedWorkspace({
   const permanentDeletePendingRef = useRef(false);
   const permanentDeleteWasOpenRef = useRef(false);
   const permanentDeleteFocusTargetRef = useRef<"origin" | "fallback">("origin");
+  const closePermanentDeleteDialog = useCallback((focusTarget: "origin" | "fallback" = "origin") => {
+    permanentDeleteFocusTargetRef.current = focusTarget;
+    setPermanentDeleteOpen(false);
+  }, [setPermanentDeleteOpen]);
   const focusInstalledNoteRef = useRef(false);
   const installedNotesRef = useRef(new Map<string, Note>());
   const mountedRef = useRef(true);
@@ -488,6 +464,67 @@ function AuthenticatedWorkspace({
     creatingNote,
   });
   const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
+  const installMutatedNote = useCallback((saved: Note) => {
+    installedNotesRef.current.set(saved.id, saved);
+    setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
+    setSelectedNoteId(saved.id);
+    setCreatingNote(false);
+    setDraftTitle(saved.title);
+    setDraftContent(saved.content);
+    setDraftFolderId(saved.folder_id);
+    setDraftDatabaseId(saved.database_id);
+    draftTitleRef.current = saved.title;
+    draftContentRef.current = saved.content;
+    setEditorMode("edit");
+  }, [setNotes]);
+  const selectMutationListView = useCallback((view: NoteListView) => {
+    noteListViewRef.current = view;
+    setNoteListView(view);
+  }, []);
+  const completeStatusChange = useCallback(() => setActivePane("canvas"), []);
+  const completePermanentDelete = useCallback((noteId: string) => {
+    setNotes((current) => current.filter((note) => note.id !== noteId));
+    setSelectedNoteId(null);
+    setDraftTitle("");
+    setDraftContent("");
+    setDraftFolderId(null);
+    setDraftDatabaseId(null);
+    setEditorMode("edit");
+    draftTitleRef.current = "";
+    draftContentRef.current = "";
+    closePermanentDeleteDialog("fallback");
+  }, [closePermanentDeleteDialog, setNotes]);
+  const {
+    noteSaving,
+    setNoteSaving,
+    noteMessage,
+    setNoteMessage,
+    noteError,
+    setNoteError,
+    permanentDeletePending,
+    permanentDeleteError,
+    setPermanentDeleteError,
+    saveExistingNote,
+    changeSelectedNoteStatus,
+    toggleSelectedNoteFlag,
+    deleteSelectedNotePermanently,
+  } = useNoteMutations({
+    notesClient,
+    workspaceId,
+    role,
+    logoutPending,
+    selectedNote,
+    draft: {
+      title: draftTitle,
+      content: draftContent,
+      folderId: draftFolderId,
+      databaseId: draftDatabaseId,
+    },
+    installNote: installMutatedNote,
+    selectListView: selectMutationListView,
+    completeStatusChange,
+    completePermanentDelete,
+  });
   const workbenchMode = useWorkbenchMode();
   permanentDeletePendingRef.current = permanentDeletePending;
   const visibleNotes = noteFolderFilter === null
@@ -564,11 +601,6 @@ function AuthenticatedWorkspace({
     setNoteSearchQuery("");
     setDebouncedNoteSearchQuery("");
   }, [workspaceId]);
-
-  const closePermanentDeleteDialog = (focusTarget: "origin" | "fallback" = "origin") => {
-    permanentDeleteFocusTargetRef.current = focusTarget;
-    setPermanentDeleteOpen(false);
-  };
 
   useEffect(() => {
     draftControllerRef.current = draftController;
@@ -883,99 +915,7 @@ function AuthenticatedWorkspace({
       setServerRetryVersion((version) => version + 1);
       return;
     }
-    if (!selectedNote) return;
-    setNoteSaving(true);
-    setNoteMessage(null);
-    setNoteError(null);
-    const request = notesClient.update(selectedNote.id, {
-        base_revision: selectedNote.revision,
-        title: draftTitle,
-        content: draftContent,
-        folder_id: draftFolderId,
-        database_id: draftDatabaseId,
-        source: "manual",
-      });
-    void request.then((saved) => {
-      setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
-      setSelectedNoteId(saved.id);
-      setCreatingNote(false);
-      setDraftTitle(saved.title);
-      setDraftContent(saved.content);
-      setDraftFolderId(saved.folder_id);
-      setDraftDatabaseId(saved.database_id);
-      draftTitleRef.current = saved.title;
-      draftContentRef.current = saved.content;
-      setNoteMessage("已保存");
-      setEditorMode("edit");
-    }).catch(() => {
-      setNoteError("笔记保存失败，请稍后重试。未保存的内容仍保留在当前编辑器中。");
-    }).finally(() => setNoteSaving(false));
-  };
-
-  const changeSelectedNoteStatus = (status: "active" | "archived" | "trashed") => {
-    if (logoutPending || !workspaceId || noteSaving || !selectedNote) return;
-    setNoteSaving(true);
-    setNoteMessage(null);
-    setNoteError(null);
-    const contentChanged = draftTitle !== selectedNote.title || draftContent !== selectedNote.content;
-    const folderChanged = draftFolderId !== selectedNote.folder_id;
-    const databaseChanged = draftDatabaseId !== selectedNote.database_id;
-    void notesClient.update(selectedNote.id, {
-      base_revision: selectedNote.revision,
-      status,
-      source: "manual",
-      ...(contentChanged ? { title: draftTitle, content: draftContent } : {}),
-      ...(folderChanged ? { folder_id: draftFolderId } : {}),
-      ...(databaseChanged ? { database_id: draftDatabaseId } : {}),
-    }).then((saved) => {
-      const nextView: NoteListView = status === "trashed" ? "trash" : status === "archived" ? "archived" : "all";
-      noteListViewRef.current = nextView;
-      installedNotesRef.current.set(saved.id, saved);
-      setNoteListView(nextView);
-      setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
-      setSelectedNoteId(saved.id);
-      setCreatingNote(false);
-      setDraftTitle(saved.title);
-      setDraftContent(saved.content);
-      setDraftFolderId(saved.folder_id);
-      setDraftDatabaseId(saved.database_id);
-      draftTitleRef.current = saved.title;
-      draftContentRef.current = saved.content;
-      setNoteMessage(status === "trashed" ? "已移入回收站" : "已恢复");
-      setEditorMode("edit");
-      setActivePane("canvas");
-    }).catch(() => {
-      setNoteError(status === "trashed" ? "移入回收站失败，请稍后重试。" : "恢复笔记失败，请稍后重试。");
-    }).finally(() => setNoteSaving(false));
-  };
-
-  const toggleSelectedNoteFlag = (field: "is_favorite" | "is_pinned") => {
-    if (logoutPending || role === "viewer" || noteSaving || !workspaceId || !selectedNote || selectedNote.status === "trashed") return;
-    const nextValue = !selectedNote[field];
-    setNoteSaving(true);
-    setNoteMessage(null);
-    setNoteError(null);
-    void notesClient.update(selectedNote.id, {
-      base_revision: selectedNote.revision,
-      [field]: nextValue,
-      source: "manual",
-    }).then((saved) => {
-      setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
-      installedNotesRef.current.set(saved.id, saved);
-      setSelectedNoteId(saved.id);
-      setDraftTitle(saved.title);
-      setDraftContent(saved.content);
-      setDraftFolderId(saved.folder_id);
-      setDraftDatabaseId(saved.database_id);
-      draftTitleRef.current = saved.title;
-      draftContentRef.current = saved.content;
-      setNoteMessage(field === "is_favorite"
-        ? nextValue ? "已加入收藏" : "已取消收藏"
-        : nextValue ? "已置顶" : "已取消置顶");
-      setEditorMode("edit");
-    }).catch(() => {
-      setNoteError(field === "is_favorite" ? "收藏状态保存失败，请重试。" : "置顶状态保存失败，请重试。");
-    }).finally(() => setNoteSaving(false));
+    void saveExistingNote();
   };
 
   const openPermanentDelete = (opener: HTMLButtonElement) => {
@@ -984,29 +924,6 @@ function AuthenticatedWorkspace({
     permanentDeleteFocusTargetRef.current = "origin";
     setPermanentDeleteError(null);
     setPermanentDeleteOpen(true);
-  };
-
-  const deleteSelectedNotePermanently = () => {
-    if (logoutPending || permanentDeletePending || !workspaceId || !selectedNote || selectedNote.status !== "trashed") return;
-    setPermanentDeletePending(true);
-    setPermanentDeleteError(null);
-    void notesClient.deletePermanently(selectedNote.id, {
-      base_revision: selectedNote.revision,
-    }).then(() => {
-      setNotes((current) => current.filter((note) => note.id !== selectedNote.id));
-      setSelectedNoteId(null);
-      setDraftTitle("");
-      setDraftContent("");
-      setDraftFolderId(null);
-      setDraftDatabaseId(null);
-      setEditorMode("edit");
-      draftTitleRef.current = "";
-      draftContentRef.current = "";
-      setNoteMessage("笔记已永久删除");
-      closePermanentDeleteDialog("fallback");
-    }).catch((error: unknown) => {
-      setPermanentDeleteError(permanentDeleteErrorMessage(error));
-    }).finally(() => setPermanentDeletePending(false));
   };
 
   const updateActiveDraftInput = (title: string, content: string) => {
