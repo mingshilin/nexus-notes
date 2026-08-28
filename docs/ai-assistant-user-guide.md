@@ -6,11 +6,11 @@
 
 Preview 地址：<https://nexus-notes-public-beta-preview.shilinming9.workers.dev/>
 
-当前 Preview 的 AI 默认关闭（`AI_ENABLED=false`）。你可以打开 AI 助手查看入口和配置状态，但在管理员接入真实 OpenAI-compatible provider 前，聊天请求会显示“未配置”恢复提示，不会影响笔记、数据库和提醒功能。
+系统 AI 默认由 Nexus Notes 提供，用户无需 API Key。AI 页面可以选择“系统 AI”或“我的 AI”；选择“我的 AI”但个人配置不完整时会自动回退系统 AI。当前生产已经启用系统 AI。
 
 ## AI 可以做什么
 
-接入 provider 并启用后，AI 助手可以在当前工作区中提出以下操作：
+AI 助手可以在当前工作区中提出以下操作：
 
 - 建立、更新、归档、恢复或删除笔记。
 - 建立文件夹、批量应用标签。
@@ -31,7 +31,7 @@ Preview 地址：<https://nexus-notes-public-beta-preview.shilinming9.workers.de
 
 ## 安全边界
 
-AI 不会获得其他工作区的数据。用户笔记正文、密码、session、邮件验证码和 provider key 不写入日志、Analytics、IndexedDB 或浏览器缓存。Provider key 只允许由管理员配置为 Worker Secret；不要把 key 放进前端环境变量、`wrangler.toml`、Git 或聊天内容。
+AI 不会获得其他工作区的数据。用户笔记正文、密码、session、邮件验证码和 provider key 不写入日志、Analytics、IndexedDB 或浏览器缓存。个人 Provider key 使用 Worker 加密后保存，不会以明文返回；管理员系统 provider key 只允许配置为 Worker Secret。不要把任何 key 放进前端环境变量、`wrangler.toml`、Git 或聊天内容。
 
 ## 验收限制
 
