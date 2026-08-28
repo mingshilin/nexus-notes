@@ -14,10 +14,9 @@ import { CollaborationClient } from "../data/collaboration-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic, type RecoveryFilters } from "../knowledge/KnowledgeRecoveryPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { useWorkbenchMode } from "../layout/use-mobile-layout";
-import type { DatabaseClient, DatabaseBundle } from "../data/database-client";
+import type { DatabaseClient } from "../data/database-client";
 import { BetaLocalStore } from "../data/local-store";
 import { NoteDraftController, type DraftSyncResult, type NoteDraftStore } from "../notes/note-draft-controller";
-import { NormalizedCache } from "../data/normalized-cache";
 import { useWorkspaceSync } from "../data/use-workspace-sync";
 import type { SyncChange } from "../data/sync-engine";
 import { ProductNavigation, type AccountSubsection, type ProductDomain } from "../navigation/ProductNavigation";
@@ -39,6 +38,7 @@ import { useWorkspaceNavigation } from "./use-workspace-navigation";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { clearWorkspaceQueryCache } from "../data/workspace-query-cache";
 import { localDateKey, noteMatchesListView, useNotesListData, type NoteListView } from "./use-notes-list-data";
+import { useDatabaseWorkspaceData } from "./use-database-workspace-data";
 import { NotesDomain, type NotesDomainCallbacks, type NotesEditorState, type NotesOverviewState } from "./domains/NotesDomain";
 import { DatabaseDomain, type DatabaseDomainCallbacks, type DatabaseDomainSelection } from "./domains/DatabaseDomain";
 import { KnowledgeDomain } from "./domains/KnowledgeDomain";
@@ -363,14 +363,7 @@ function AuthenticatedWorkspace({
   const [selectedDatabaseRecordId, setSelectedDatabaseRecordId] = useState<string | null>(null);
   const [selectedCommentId, setSelectedCommentId] = useState<string | null>(null);
   const [collaborationInitialSection, setCollaborationInitialSection] = useState<"people" | "comments" | "shares">("people");
-  const [databases, setDatabases] = useState<Database[]>([]);
-  const [selectedDatabaseId, setSelectedDatabaseId] = useState<string | null>(null);
-  const [databaseBundle, setDatabaseBundle] = useState<DatabaseBundle | null>(null);
-  const [databaseRecords, setDatabaseRecords] = useState<DatabaseRecord[]>([]);
   const [resolvedNotificationRecord, setResolvedNotificationRecord] = useState<DatabaseRecord | null>(null);
-  const [databaseRecordsNextCursor, setDatabaseRecordsNextCursor] = useState<string | null>(null);
-  const [databaseLoading, setDatabaseLoading] = useState(false);
-  const [databaseError, setDatabaseError] = useState<string | null>(null);
   const [databaseRefreshVersion, setDatabaseRefreshVersion] = useState(0);
   const [firstDatabaseName, setFirstDatabaseName] = useState("");
   const [databaseCreateOpen, setDatabaseCreateOpen] = useState(false);
@@ -392,9 +385,6 @@ function AuthenticatedWorkspace({
   const [refreshVersion, setRefreshVersion] = useState(0);
   const requestControllers = useRef(new Set<AbortController>());
   const retryControllers = useRef(new Set<AbortController>());
-  const databaseControllers = useRef(new Set<AbortController>());
-  const databaseCache = useRef(new NormalizedCache());
-  const databaseSelectionSync = useRef<string | null>(null);
   const attachmentQueryIdentity = useRef<string | null>(null);
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
   const notificationOpenerRef = useRef<HTMLElement | null>(null);
@@ -451,6 +441,30 @@ function AuthenticatedWorkspace({
     userSelectedNote,
     setSelectedNoteId,
     setCreatingNote,
+  });
+  const {
+    databases,
+    setDatabases,
+    selectedDatabaseId,
+    setSelectedDatabaseId,
+    databaseBundle,
+    setDatabaseBundle,
+    databaseRecords,
+    setDatabaseRecords,
+    databaseRecordsNextCursor,
+    setDatabaseRecordsNextCursor,
+    databaseLoading,
+    databaseError,
+    setDatabaseError,
+    requestDatabasePage,
+    abortDatabaseRequests,
+  } = useDatabaseWorkspaceData({
+    client: databaseClient,
+    workspaceId,
+    active: activeDomain === "databases",
+    webClipperOpen,
+    refreshVersion: databaseRefreshVersion,
+    resolvedNotificationRecord,
   });
   const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
   const workbenchMode = useWorkbenchMode();
@@ -1238,17 +1252,6 @@ function AuthenticatedWorkspace({
     retryControllers.current.clear();
   };
 
-  const abortDatabaseRequests = () => {
-    databaseControllers.current.forEach((controller) => controller.abort());
-    databaseControllers.current.clear();
-  };
-
-  const createDatabaseRequest = () => {
-    const controller = new AbortController();
-    databaseControllers.current.add(controller);
-    return controller;
-  };
-
   const createRetryRequest = () => {
     const controller = new AbortController();
     retryControllers.current.add(controller);
@@ -1398,7 +1401,6 @@ function AuthenticatedWorkspace({
   useEffect(() => () => {
     abortRecoveryRequests();
     abortRetryRequests();
-    abortDatabaseRequests();
     notificationTargetController.current?.abort();
     historyController.current?.abort();
   }, []);
@@ -1461,76 +1463,6 @@ function AuthenticatedWorkspace({
 
     return () => abortRecoveryRequests();
   }, [filters.mimeType, filters.ocrStatus, knowledgeClient, refreshVersion, workspaceId]);
-
-  useEffect(() => {
-    if (activeDomain !== "databases") return undefined;
-    if (selectedDatabaseId && databaseSelectionSync.current === selectedDatabaseId && databaseBundle?.database.id === selectedDatabaseId) {
-      databaseSelectionSync.current = null;
-      return undefined;
-    }
-    abortDatabaseRequests();
-    if (!workspaceId) {
-      setDatabases([]);
-      setSelectedDatabaseId(null);
-      setDatabaseBundle(null);
-      setDatabaseRecords([]);
-      setDatabaseError("未选择工作区，无法加载数据库。");
-      return undefined;
-    }
-    const controller = createDatabaseRequest();
-    setDatabaseLoading(!databaseBundle && databases.length === 0);
-    setDatabaseError(null);
-    void databaseClient.bootstrap({
-      databaseId: selectedDatabaseId ?? undefined,
-      limit: databaseBundle?.views[0]?.config.page_size ?? 50,
-      signal: controller.signal,
-    }).then((bootstrap) => {
-      if (controller.signal.aborted) return;
-      setDatabases(bootstrap.items);
-      databaseSelectionSync.current = bootstrap.selected_database_id;
-      setSelectedDatabaseId(bootstrap.selected_database_id);
-      setDatabaseBundle(bootstrap.bundle);
-      const targetRecord = bootstrap.bundle && resolvedNotificationRecord?.database_id === bootstrap.bundle.database.id
-        && !bootstrap.records.items.some((record) => record.id === resolvedNotificationRecord.id)
-        ? resolvedNotificationRecord
-        : null;
-      const records = targetRecord ? [targetRecord, ...bootstrap.records.items] : bootstrap.records.items;
-      setDatabaseRecords(records);
-      setDatabaseRecordsNextCursor(bootstrap.records.next_cursor);
-      setSelectedDatabaseRecordId((current) => current && records.some((record) => record.id === current) ? current : records[0]?.id ?? null);
-      if (bootstrap.bundle) {
-        databaseCache.current.writeEntity({ workspaceId, type: "database", id: bootstrap.bundle.database.id, revision: bootstrap.bundle.database.revision, data: bootstrap.bundle.database });
-        for (const property of bootstrap.bundle.properties) {
-          databaseCache.current.writeEntity({ workspaceId, type: "database-property", id: property.id, revision: property.revision, data: property });
-        }
-        for (const record of records) {
-          databaseCache.current.writeEntity({ workspaceId, type: "database-record", id: record.id, revision: record.revision, data: record });
-        }
-      }
-    }).catch((error: unknown) => {
-      if (!isAborted(error, controller.signal)) setDatabaseError("数据库内容暂时无法加载，保留最近可用数据。");
-    }).finally(() => {
-      databaseControllers.current.delete(controller);
-      if (!controller.signal.aborted) setDatabaseLoading(false);
-    });
-    return () => controller.abort();
-  }, [activeDomain, databaseBundle, databaseClient, databaseRefreshVersion, databases.length, resolvedNotificationRecord, selectedDatabaseId, workspaceId]);
-
-  useEffect(() => {
-    if (!webClipperOpen || !workspaceId) return undefined;
-    const controller = new AbortController();
-    void databaseClient.listDatabases(controller.signal).then((items) => {
-      if (!controller.signal.aborted) setDatabases(items);
-    }).catch(() => {
-      // The clipper remains usable for Inbox and Daily when database discovery is unavailable.
-    });
-    return () => controller.abort();
-  }, [databaseClient, webClipperOpen, workspaceId]);
-
-  const requestDatabasePage = useCallback(({ cursor, limit, viewId, signal }: { cursor: string | null; limit: number; viewId?: string; signal?: AbortSignal }) => {
-    if (!workspaceId || !selectedDatabaseId) return Promise.resolve({ items: [], next_cursor: null });
-    return databaseClient.listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, viewId, limit, signal });
-  }, [databaseClient, selectedDatabaseId, workspaceId]);
 
   const createDatabaseFromName = (name: string) => {
     if (!workspaceId || !name.trim() || creatingFirstDatabase) return;
