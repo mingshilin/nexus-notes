@@ -98,9 +98,12 @@ describe("reminder depth", () => {
       ]);
       await expect(repository.listDeliveries("ws-1", "user-2", "reminder-1")).resolves.toEqual([]);
 
-      await expect(repository.retryDelivery({
-        workspaceId: "ws-1", userId: "user-1", reminderId: "reminder-1", deliveryId: "delivery-1", now,
-      })).resolves.toMatchObject({ id: "delivery-1", status: "queued", last_error_code: null });
+      const retries = await Promise.all([
+        repository.retryDelivery({ workspaceId: "ws-1", userId: "user-1", reminderId: "reminder-1", deliveryId: "delivery-1", now }),
+        repository.retryDelivery({ workspaceId: "ws-1", userId: "user-1", reminderId: "reminder-1", deliveryId: "delivery-1", now }),
+      ]);
+      expect(retries.filter(Boolean)).toHaveLength(1);
+      expect(retries.find(Boolean)).toMatchObject({ id: "delivery-1", status: "queued", last_error_code: null });
       expect(await test.db.prepare("SELECT status, dispatched_at, available_at FROM reminder_deliveries d JOIN reminder_delivery_outbox o ON o.delivery_id = d.id WHERE d.id = 'delivery-1'").first())
         .toEqual({ status: "queued", dispatched_at: null, available_at: now });
       await expect(repository.retryDelivery({

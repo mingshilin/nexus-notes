@@ -185,15 +185,6 @@ export class D1ReminderDeliveryRepository {
     deliveryId: string;
     now: string;
   }) {
-    const update = this.db.prepare(
-      `UPDATE reminder_deliveries
-       SET status = 'queued', last_error_code = NULL, updated_at = ?
-       WHERE id = ? AND workspace_id = ? AND user_id = ? AND reminder_id = ? AND status = 'failed'
-         AND EXISTS (
-           SELECT 1 FROM reminders r
-           WHERE r.id = reminder_id AND r.workspace_id = workspace_id AND r.user_id = user_id AND r.deleted_at IS NULL
-         )`,
-    ).bind(input.now, input.deliveryId, input.workspaceId, input.userId, input.reminderId);
     const outbox = this.db.prepare(
       `INSERT INTO reminder_delivery_outbox (
          id, delivery_id, payload_json, available_at, attempt_count, created_at, updated_at
@@ -209,14 +200,34 @@ export class D1ReminderDeliveryRepository {
                 'channel', d.channel
               ), ?, 0, ?, ?
        FROM reminder_deliveries d
-       WHERE d.id = ? AND d.status = 'queued' AND d.updated_at = ?
+       JOIN reminders r ON r.id = d.reminder_id AND r.workspace_id = d.workspace_id AND r.user_id = d.user_id
+       WHERE d.id = ? AND d.workspace_id = ? AND d.user_id = ? AND d.reminder_id = ?
+         AND d.status = 'failed' AND r.deleted_at IS NULL
        ON CONFLICT(delivery_id) DO UPDATE SET
          dispatched_at = NULL,
          available_at = excluded.available_at,
          updated_at = excluded.updated_at`,
-    ).bind(input.now, input.now, input.now, input.deliveryId, input.now);
-    const results = await this.db.batch([update, outbox]);
-    if ((results[0]?.meta.changes ?? 0) !== 1) return null;
+    ).bind(input.now, input.now, input.now, input.deliveryId, input.workspaceId, input.userId, input.reminderId);
+    const update = this.db.prepare(
+      `UPDATE reminder_deliveries
+       SET status = 'queued', last_error_code = NULL, updated_at = ?
+       WHERE id = ? AND workspace_id = ? AND user_id = ? AND reminder_id = ? AND status = 'failed'
+         AND EXISTS (
+           SELECT 1 FROM reminders r
+           WHERE r.id = ? AND r.workspace_id = ? AND r.user_id = ? AND r.deleted_at IS NULL
+         )`,
+    ).bind(
+      input.now,
+      input.deliveryId,
+      input.workspaceId,
+      input.userId,
+      input.reminderId,
+      input.reminderId,
+      input.workspaceId,
+      input.userId,
+    );
+    const results = await this.db.batch([outbox, update]);
+    if ((results[1]?.meta.changes ?? 0) !== 1) return null;
     return this.getOwnedDelivery(input.workspaceId, input.userId, input.reminderId, input.deliveryId);
   }
 
