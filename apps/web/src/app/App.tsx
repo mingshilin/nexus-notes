@@ -29,6 +29,7 @@ import { NoteTagPanel } from "../notes/NoteTagPanel";
 import { NoteAiActions } from "../ai/NoteAiActions";
 import { CommandPalette, type CommandAction } from "../commands/CommandPalette";
 import { CreateCenter, ImportExportCenter, type CreateActionResult } from "../create";
+import { createTaskDatabase } from "../databases/task-database";
 import { InviteRedemptionPage } from "../collaboration/InviteRedemptionPage";
 import { PublicSharePage } from "../collaboration/PublicSharePage";
 import { NotificationCenter } from "../collaboration/NotificationCenter";
@@ -1547,6 +1548,25 @@ function AuthenticatedWorkspace({
 
   const createFirstDatabase = () => createDatabaseFromName(firstDatabaseName);
 
+  const createTaskDatabaseFromCenter = async (): Promise<CreateActionResult> => {
+    if (!workspaceId || role === "viewer") return { status: "rejected", message: "当前工作区没有创建任务数据库的权限。" };
+    try {
+      const setup = await createTaskDatabase(databaseClient);
+      setDatabases((current) => [...current.filter((database) => database.id !== setup.database.id), setup.database]);
+      setSelectedDatabaseId(setup.database.id);
+      setDatabaseBundle(null);
+      setDatabaseRecords([]);
+      setDatabaseRecordsNextCursor(null);
+      setDatabaseError(null);
+      setDatabaseRefreshVersion((version) => version + 1);
+      setActivePane("canvas");
+      transitionToDomain("databases");
+      return { status: "completed" };
+    } catch {
+      return { status: "rejected", message: "任务数据库创建失败，未完成的结构会自动清理；请重试。" };
+    }
+  };
+
   const openDatabaseCreation = () => {
     setFeatureMapOpen(false);
     setFirstDatabaseName("");
@@ -1898,6 +1918,7 @@ function AuthenticatedWorkspace({
         openDatabaseCreation();
         return { status: "completed" };
       } : undefined}
+      onCreateTaskDatabase={workspaceId ? createTaskDatabaseFromCenter : undefined}
       onCreateReminder={workspaceId ? () => {
         changeDomain("reminders");
         return { status: "completed" };
