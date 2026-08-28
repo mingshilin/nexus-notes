@@ -127,7 +127,7 @@ export function AccountCenter({ client, ai, collaboration, operations, workspace
         {tabs.map((tab) => <button key={tab.id} id={`account-tab-${tab.id}`} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls={`account-panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => setActiveTab(tab.id)} onKeyDown={moveTab}>{tab.label}</button>)}
       </div>
       <div className="account-panels">
-        <div hidden={activeTab !== "overview"}><AccountOverviewPanel client={client} active={activeTab === "overview"} /></div>
+        <div hidden={activeTab !== "overview"}><AccountOverviewPanel client={client} active={activeTab === "overview"} onOpenAiControls={() => setActiveTab("ai")} /></div>
         <div hidden={activeTab !== "profile"}><ProfilePanel client={client} profile={profile} loading={profileLoading} error={profileError} onRetry={() => setProfileRetry((retry) => retry + 1)} onProfileChange={handleProfileChange} /></div>
         <div hidden={activeTab !== "security"}><SecurityPanel active={activeTab === "security"} client={client} profile={profile} sessions={sessions} loading={sessionsLoading} error={sessionsError} onRetry={refreshSessions} onSessionsRefresh={refreshSessions} onSessionRevokeStart={invalidateSessions} onSessionRevokeFailed={handleSessionRevokeFailed} onSessionRevoked={handleSessionRevoked} onProfileChange={handleProfileChange} /></div>
         <div hidden={activeTab !== "workspace"}><WorkspacePanel workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} client={collaboration} currentUserId={currentUserId} onWorkspaceChange={onWorkspaceChange} onCreateWorkspace={onCreateWorkspace} /></div>

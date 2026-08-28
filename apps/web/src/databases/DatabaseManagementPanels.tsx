@@ -17,13 +17,15 @@ export function DatabaseOverviewPanel({
   stats,
   loading,
   error,
+  onRetry,
 }: {
   stats: DatabaseStats | null;
   loading: boolean;
   error: string | null;
+  onRetry?(): void;
 }) {
   if (loading) return <p className="database-management-state" role="status">正在加载数据库概览…</p>;
-  if (error) return <p className="database-operation-error" role="alert">{error}</p>;
+  if (error) return <div className="database-management-error"><p className="database-operation-error" role="alert">{error}</p>{onRetry ? <button type="button" onClick={onRetry}>重试数据库概览</button> : null}</div>;
   if (!stats) return <p className="database-management-state">暂无统计信息。</p>;
   const metrics = [
     ["记录", stats.record_count],

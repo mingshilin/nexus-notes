@@ -24,6 +24,7 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
   const [stats, setStats] = useState<DatabaseStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState<string | null>(null);
+  const [statsRetry, setStatsRetry] = useState(0);
   const [recordValues, setRecordValues] = useState<Record<string, unknown>>({});
   const [propertyName, setPropertyName] = useState("");
   const [propertyType, setPropertyType] = useState<PropertyType>("text");
@@ -88,7 +89,7 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
       if (active) setStatsLoading(false);
     });
     return () => { active = false; };
-  }, [client, databaseId, open]);
+  }, [client, databaseId, open, statsRetry]);
   useEffect(() => { if (panel === "comment" && client && commentRecordId) void client.listComments(databaseId, commentRecordId).then(setComments).catch(() => setComments([])); }, [client, commentRecordId, databaseId, panel]);
   useEffect(() => {
     if (!open || panel !== "permission" || !client) return;
@@ -246,7 +247,7 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
         <button className={panel === id ? "active" : ""} key={id} type="button" onClick={() => { setPanel(id); setFeedback(null); }}>{label}</button>,
       )}</nav>
       <div className="database-tools-form">
-        {panel === "overview" ? <DatabaseOverviewPanel stats={stats} loading={statsLoading} error={statsError} /> : null}
+        {panel === "overview" ? <DatabaseOverviewPanel stats={stats} loading={statsLoading} error={statsError} onRetry={() => setStatsRetry((value) => value + 1)} /> : null}
         {panel === "database" ? <section aria-label="数据库表单">
           <h2>数据库设置</h2>
           <label>数据库名称<input value={databaseName} onChange={(event) => setDatabaseName(event.target.value)} /></label>

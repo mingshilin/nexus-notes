@@ -88,6 +88,8 @@ export function ReminderPanel({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [failedBulkIds, setFailedBulkIds] = useState<string[]>([]);
+  const [retryRequest, setRetryRequest] = useState<{ reminder: Reminder; input: UpdateReminderInput; success: string } | null>(null);
 
   const [editing, setEditing] = useState<Reminder | null>(null);
   const [title, setTitle] = useState("");
@@ -127,6 +129,7 @@ export function ReminderPanel({
       setReminders(page.items);
       setNextCursor(page.next_cursor);
       setSelectedIds(new Set());
+      setFailedBulkIds([]);
     }).catch(() => {
       if (!controller.signal.aborted) setError("提醒暂时无法加载，保留最近可用数据。请稍后重试。");
     }).finally(() => {
@@ -264,29 +267,38 @@ export function ReminderPanel({
     return client.updateReminder(reminder.id, input).then((updated) => {
       setReminders((current) => current.map((item) => item.id === updated.id ? updated : item));
       setFeedback(success);
+      setRetryRequest(null);
       return updated;
     }).catch(() => {
       setError("提醒状态更新失败，当前提醒仍保留。");
+      setRetryRequest({ reminder, input, success });
       return undefined;
     }).finally(() => setPending(false));
   };
 
-  const completeSelected = () => {
-    const selected = reminders.filter((reminder) => selectedIds.has(reminder.id) && reminder.status === "pending");
+  const completeReminderBatch = (ids: readonly string[]) => {
+    const selected = reminders.filter((reminder) => ids.includes(reminder.id) && reminder.status === "pending");
     if (selected.length === 0) return;
     setPending(true);
     setError(null);
-    void Promise.all(selected.map((reminder) => client.updateReminder(reminder.id, {
+    setFeedback(null);
+    void Promise.allSettled(selected.map((reminder) => client.updateReminder(reminder.id, {
       base_revision: reminder.revision,
       status: "dismissed",
-    }))).then((updated) => {
+    }))).then((settled) => {
+      const updated = settled.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const failedIds = settled.flatMap((result, index) => result.status === "rejected" ? [selected[index]!.id] : []);
       const byId = new Map(updated.map((item) => [item.id, item]));
       setReminders((current) => current.map((item) => byId.get(item.id) ?? item));
-      setSelectedIds(new Set());
-      setFeedback(`已完成 ${updated.length} 条提醒。重复提醒系列已结束。`);
-    }).catch(() => setError("部分提醒未能完成，列表已保留，可重试。"))
+      setSelectedIds(new Set(failedIds));
+      setFailedBulkIds(failedIds);
+      if (failedIds.length) setError(`${updated.length} 条完成，${failedIds.length} 条未完成；成功结果已保留，可重试失败项。`);
+      else setFeedback(`已完成 ${updated.length} 条提醒。重复提醒系列已结束。`);
+    })
       .finally(() => setPending(false));
   };
+
+  const completeSelected = () => completeReminderBatch([...selectedIds]);
 
   const snooze = (reminder: Reminder, minutes: 10 | 60 | 1440) => {
     setPending(true);
@@ -378,7 +390,7 @@ export function ReminderPanel({
         </select></label>
         <button type="button" disabled={pending || selectedIds.size === 0} onClick={completeSelected}>完成所选</button>
       </div>
-      {error ? <p className="reminder-error" role="alert">{error}</p> : null}
+      {error ? <div className="reminder-error-row"><p className="reminder-error" role="alert">{error}</p>{failedBulkIds.length ? <button type="button" disabled={pending} onClick={() => completeReminderBatch(failedBulkIds)}>重试未完成提醒</button> : retryRequest ? <button type="button" disabled={pending} onClick={() => { void updateOne(retryRequest.reminder, retryRequest.input, retryRequest.success); }}>重试提醒</button> : null}</div> : null}
       {feedback ? <p className="reminder-feedback" aria-live="polite">{feedback}</p> : null}
       {loading ? <p className="reminder-state" role="status">正在加载提醒…</p> : null}
       {refreshing ? <p className="reminder-state" role="status">正在刷新提醒…</p> : null}

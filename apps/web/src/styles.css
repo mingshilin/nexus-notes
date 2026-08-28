@@ -357,6 +357,8 @@ button { color: inherit; }
 .account-error, .account-error-row p { margin: 0; color: hsl(var(--destructive)); line-height: 1.5; }
 .account-status, .account-inline-status { margin: 0; color: #14804a; line-height: 1.5; }
 .account-error-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.knowledge-search-error-row, .database-management-error, .reminder-error-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.knowledge-search-error-row button, .database-management-error button, .reminder-error-row button { min-height: 34px; border: 1px solid var(--border-subtle); border-radius: 9px; padding: 6px 10px; color: hsl(var(--foreground)); background: var(--surface-elevated); cursor: pointer; font-weight: 700; }
 .account-actions { display: flex; flex-wrap: wrap; gap: 9px; }
 .account-session-list { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
 .account-session-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 13px 0; border-top: 1px solid var(--border-subtle); }
