@@ -244,10 +244,12 @@ describe("live note workspace flow", () => {
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(await screen.findByRole("button", { name: /待归档到数据库/ }));
 
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记信息" }));
     const databaseSelect = await screen.findByRole("combobox", { name: "笔记数据库" });
     expect(databaseSelect).toHaveValue("");
     expect(within(databaseSelect).getByRole("option", { name: "项目数据库" })).toBeInTheDocument();
     fireEvent.change(databaseSelect, { target: { value: "db-projects" } });
+    fireEvent.click(screen.getByRole("button", { name: "关闭检查器" }));
     fireEvent.click(screen.getByRole("button", { name: "保存笔记" }));
 
     await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
@@ -289,12 +291,14 @@ describe("live note workspace flow", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(await screen.findByRole("button", { name: /发布计划/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记信息" }));
     fireEvent.click(screen.getByRole("button", { name: "生成摘要" }));
 
     expect(await screen.findByText("建议先完成回归测试。" )).toBeVisible();
     expect(apiClient.request.mock.calls.some(([request]) => request.path === "/api/v2/notes/ai-note" && request.method === "PATCH")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "应用到正文" }));
     await screen.findByText("已应用到当前草稿。");
+    fireEvent.click(screen.getByRole("button", { name: "关闭检查器" }));
     expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("先完成测试。\n\n## AI 摘要\n\n建议先完成回归测试。");
 
     fireEvent.click(screen.getByRole("button", { name: "保存笔记" }));
