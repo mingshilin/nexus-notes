@@ -27,6 +27,8 @@
     "verify:deploy:online": "node scripts/verify-deploy-readiness.mjs --dist=apps/web/dist --online",
     "smoke:daily-visible": "node scripts/smoke-daily-log-visible.mjs",
     "test:e2e": "node scripts/smoke-beta-browser.mjs --require-auth --authenticated",
+    "test:e2e:ai": "node tests/e2e/ai-assistant-flow.mjs",
+    "test:e2e:navigation": "node tests/e2e/navigation-performance.mjs",
     "test:a11y": "node scripts/smoke-beta-browser.mjs --require-auth --authenticated",
     "test:e2e:cleanup-recovery": "node scripts/smoke-beta-browser.mjs --require-auth --authenticated --cleanup-recovery",
     "test:browser-shell": "node scripts/smoke-beta-browser.mjs --public-shell",

@@ -12,6 +12,65 @@ const SESSION_ENV = "NEXUS_NOTES_BETA_SESSION_TOKEN";
 export const INSPECTOR_INERT_NAVIGATION_SELECTOR = "nav[aria-label='移动端主导航'][inert], nav[aria-label='主导航'][inert], [role='navigation'][inert]";
 const MOBILE_LAYOUT_METRICS = { width: 390, height: 844, deviceScaleFactor: 2, mobile: true };
 const MOBILE_KEYBOARD_METRICS = { ...MOBILE_LAYOUT_METRICS, height: 500 };
+export const NAVIGATION_SHELL_BUDGET_MS = 100;
+export const CACHED_PAGE_BUDGET_MS = 250;
+
+export function buildAccessibilityAuditExpression(expectedViewport = 390) {
+  const expected = Number.isFinite(Number(expectedViewport)) ? Number(expectedViewport) : 390;
+  return `(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none' && rect.width > 0 && rect.height > 0;
+    };
+    const name = (node) => (node.getAttribute('aria-label') || node.getAttribute('title') || node.textContent || '').replace(/\\s+/g, ' ').trim();
+    const controls = [...document.querySelectorAll('button,[role="button"],input,select,textarea')].filter(visible);
+    const scrollOwners = [...document.querySelectorAll('[data-scroll-owner]')].filter(visible);
+    return {
+      expectedViewport: ${expected},
+      viewport: window.innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      scrollOwners: scrollOwners.length,
+      scrollOwnerNames: scrollOwners.map((node) => node.getAttribute('data-scroll-owner') || '').slice(0, 3),
+      unnamedButtons: controls.filter((node) => (node.matches('button,[role="button"]') && !name(node))).length,
+      unnamedInputs: controls.filter((node) => (node.matches('input,select,textarea') && !name(node) && !node.closest('[aria-hidden="true"]'))).length,
+    };
+  })()`;
+}
+
+export function buildSensitiveDiagnosticsExpression() {
+  return `(() => ({
+    consoleErrors: Number(window.__nexusSmokeConsoleErrors || 0),
+    exceptionCount: Number(window.__nexusSmokeExceptionCount || 0),
+    messageLength: Number(window.__nexusSmokeLastMessageLength || 0),
+  }))()`;
+}
+
+export function buildNavigationPerformanceExpression() {
+  return `(() => {
+    const navigation = performance.getEntriesByType('navigation')[0];
+    const paint = performance.getEntriesByType('paint').find((entry) => entry.name === 'first-contentful-paint');
+    return {
+      navigationStart: navigation?.startTime ?? 0,
+      domContentLoadedEventEnd: navigation?.domContentLoadedEventEnd ?? null,
+      firstContentfulPaint: paint?.startTime ?? null,
+    };
+  })()`;
+}
+
+export function parseBrowserGateOutput(output) {
+  const lines = String(output).trim().split(/\r?\n/u).reverse();
+  for (const line of lines) {
+    try {
+      const value = JSON.parse(line);
+      if (value && typeof value === 'object' && (value.status === 'PASS' || value.status === 'BLOCKED')) return value;
+    } catch {
+      // Ignore non-JSON browser diagnostics and inspect the next line.
+    }
+  }
+  throw new Error('Browser gate output did not contain a PASS or BLOCKED result');
+}
 
 export function parseArgs(argv) {
   const options = {
@@ -67,7 +126,7 @@ async function commandExists(command) {
   return new Promise((resolveResult) => probe.on("exit", (code) => resolveResult(code === 0)));
 }
 
-async function findBrowser() {
+export async function findBrowser() {
   for (const candidate of browserCandidates()) {
     if (candidate && await commandExists(candidate)) return candidate;
   }
@@ -190,6 +249,23 @@ function connect(wsUrl) {
   };
 }
 
+export function attachBrowserDiagnostics(cdp) {
+  const state = { consoleErrors: 0, exceptionCount: 0 };
+  const removeConsole = cdp.on("Runtime.consoleAPICalled", (event) => {
+    if (event.type === "error") state.consoleErrors += 1;
+  });
+  const removeException = cdp.on("Runtime.exceptionThrown", () => {
+    state.exceptionCount += 1;
+  });
+  return {
+    state,
+    close() {
+      removeConsole();
+      removeException();
+    },
+  };
+}
+
 async function evaluate(cdp, expression) {
   const result = await cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
   if (result.exceptionDetails) {
@@ -223,7 +299,11 @@ const visibleNode = "(node) => { const style=getComputedStyle(node); const rect=
 
 // CDP locators mirror the required page.getByRole/getByLabel/getByText contract without storing a Playwright profile.
 function roleNodeExpression(role, name) {
-  const selector = role === "button" ? "button,[role='button']" : "[role='" + role + "']";
+  const selector = role === "button"
+    ? "button,[role='button']"
+    : role === "heading"
+      ? "h1,h2,h3,h4,h5,h6,[role='heading']"
+      : "[role='" + role + "']";
   const lookup = "(node) => (" + accessibleName + ")(node) === " + JSON.stringify(name);
   return "[...document.querySelectorAll(" + JSON.stringify(selector) + ")].find((candidate) => (" + lookup + ")(candidate) && (" + visibleNode + ")(candidate))";
 }
@@ -526,20 +606,116 @@ async function installRawAvatarCapture(cdp) {
   return { state, async close() { removeListener(); await cdp.send("Fetch.disable"); } };
 }
 
-async function runPublicShell(cdp) {
+export async function runPublicShell(cdp) {
   await waitFor(cdp, "document.readyState === 'complete'", "page load");
   await waitFor(cdp, "Boolean(document.body && document.body.innerText.trim())", "application shell");
-  const result = await evaluate(cdp, "(() => { const visible=(node)=>{const style=getComputedStyle(node);const rect=node.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&rect.width>0&&rect.height>0;}; const name=" + accessibleName + "; const navigation=performance.getEntriesByType('navigation')[0]; return {lang:document.documentElement.lang,viewport:window.innerWidth,devicePixelRatio:window.devicePixelRatio,scrollWidth:document.documentElement.scrollWidth,unnamedButtons:[...document.querySelectorAll('button')].filter((node)=>visible(node)&&!name(node)).length,unnamedInputs:[...document.querySelectorAll('input,select,textarea')].filter((node)=>visible(node)&&!name(node)&&!node.closest('[aria-hidden=\\\"true\\\"]')).length,domContentLoadedMs:navigation?Math.round(navigation.domContentLoadedEventEnd):null}; })()");
+  const audit = await evaluate(cdp, buildAccessibilityAuditExpression(390));
+  const timing = await evaluate(cdp, buildNavigationPerformanceExpression());
+  const result = {
+    lang: await evaluate(cdp, "document.documentElement.lang"),
+    viewport: audit.viewport,
+    devicePixelRatio: await evaluate(cdp, "window.devicePixelRatio"),
+    scrollWidth: audit.scrollWidth,
+    unnamedButtons: audit.unnamedButtons,
+    unnamedInputs: audit.unnamedInputs,
+    scrollOwners: audit.scrollOwners,
+    domContentLoadedMs: timing.domContentLoadedEventEnd === null ? null : Math.round(timing.domContentLoadedEventEnd),
+    firstContentfulPaintMs: timing.firstContentfulPaint === null ? null : Math.round(timing.firstContentfulPaint),
+  };
   const failures = [];
   if (result.lang !== "zh-CN") failures.push("html lang=" + JSON.stringify(result.lang));
   if (result.viewport !== 390) failures.push("viewport=" + result.viewport);
   if (result.devicePixelRatio !== 2) failures.push("devicePixelRatio=" + result.devicePixelRatio);
   if (result.scrollWidth > result.viewport + 1) failures.push("horizontal overflow " + result.scrollWidth + "px");
+  if (result.scrollOwners > 1) failures.push(result.scrollOwners + " visible scroll owners; expected at most one");
   if (result.unnamedButtons > 0) failures.push(result.unnamedButtons + " visible buttons without accessible names");
   if (result.unnamedInputs > 0) failures.push(result.unnamedInputs + " visible form controls without accessible names");
   if (result.domContentLoadedMs !== null && result.domContentLoadedMs > 5000) failures.push("DOMContentLoaded " + result.domContentLoadedMs + "ms");
   if (failures.length) throw new Error("Beta browser shell gates failed: " + failures.join("; "));
   return result;
+}
+
+export async function runNavigationPerformanceScenario(cdp) {
+  const authenticated = await evaluate(cdp, "Boolean(document.querySelector(\"button[aria-label='账户']\"))");
+  if (!authenticated) {
+    throw Object.assign(new Error("An authenticated browser profile is required for navigation performance"), {
+      code: "AUTHENTICATED_PROFILE_REQUIRED",
+      gateBlocked: true,
+    });
+  }
+  const destinations = [
+    ["数据库", "databases"],
+    ["知识整理", "knowledge"],
+    ["提醒", "reminders"],
+    ["AI 助手", "ai"],
+  ];
+  const measurements = [];
+  await evaluate(cdp, `(() => {
+    window.__nexusNavigationStart = null;
+    window.__nexusNavigationListener?.();
+    const listener = (event) => {
+      const target = event.target instanceof Element ? event.target.closest('button,[role="button"]') : null;
+      if (target) window.__nexusNavigationStart = performance.now();
+    };
+    window.__nexusNavigationListener = () => document.removeEventListener('click', listener, true);
+    document.addEventListener('click', listener, true);
+    return true;
+  })()`);
+  for (const [label, domain] of destinations) {
+    await getByRole(cdp, "button", label).click();
+    await waitFor(cdp, `document.querySelector('.workspace-domain-surface')?.dataset.domain === ${JSON.stringify(domain)}`, `${label} navigation shell`, 5_000);
+    const shellMs = await evaluate(cdp, "window.__nexusNavigationStart === null ? null : performance.now() - window.__nexusNavigationStart");
+    if (shellMs === null) throw new Error(`${label} navigation did not expose a measurable click timestamp`);
+    measurements.push({ domain, shellMs: Math.round(shellMs) });
+  }
+  await getByRole(cdp, "button", "数据库").click();
+  await waitFor(cdp, "document.querySelector('.workspace-domain-surface')?.dataset.domain === 'databases'", "cached database navigation shell", 5_000);
+  const cachedShellMs = await evaluate(cdp, "window.__nexusNavigationStart === null ? null : performance.now() - window.__nexusNavigationStart");
+  if (cachedShellMs === null) throw new Error("Cached database navigation did not expose a measurable click timestamp");
+  measurements.push({ domain: "databases-cached", shellMs: Math.round(cachedShellMs) });
+  await evaluate(cdp, "window.__nexusNavigationListener?.(); window.__nexusNavigationListener = null; true");
+  const failures = measurements
+    .filter((item) => item.shellMs > NAVIGATION_SHELL_BUDGET_MS)
+    .map((item) => `${item.domain} shell ${item.shellMs}ms > ${NAVIGATION_SHELL_BUDGET_MS}ms`);
+  if (failures.length) throw new Error(`Navigation shell budget failed: ${failures.join("; ")}`);
+  if (measurements.at(-1)?.shellMs > CACHED_PAGE_BUDGET_MS) {
+    throw new Error(`Cached page budget failed: ${measurements.at(-1).shellMs}ms > ${CACHED_PAGE_BUDGET_MS}ms`);
+  }
+  return { measurements, budgets: { navigationShellMs: NAVIGATION_SHELL_BUDGET_MS, cachedPageMs: CACHED_PAGE_BUDGET_MS } };
+}
+
+export async function runAiAssistantScenario(cdp) {
+  const authenticated = await evaluate(cdp, "Boolean(document.querySelector(\"button[aria-label='账户']\"))");
+  if (!authenticated) {
+    throw Object.assign(new Error("An authenticated browser profile is required for the AI assistant flow"), {
+      code: "AUTHENTICATED_PROFILE_REQUIRED",
+      gateBlocked: true,
+    });
+  }
+  await getByRole(cdp, "button", "AI 助手").click();
+  await getByRole(cdp, "heading", "AI 助手").waitFor();
+  const unavailable = await evaluate(cdp, `(() => [...document.querySelectorAll('[role="status"]')].some((node) => /当前不可用|尚未配置/u.test(node.textContent || '')))()`);
+  if (unavailable) {
+    throw Object.assign(new Error("AI provider is unavailable or not configured for the authenticated profile"), {
+      code: "AI_PROVIDER_UNAVAILABLE",
+      gateBlocked: true,
+    });
+  }
+  const input = getByLabel(cdp, "输入问题");
+  await input.fill("请创建一条标题为 AI 浏览器门禁笔记 的笔记，正文写入 smoke test");
+  await getByRole(cdp, "button", "发送").click();
+  await waitFor(cdp, "Boolean(document.querySelector('.ai-action-card'))", "AI action proposal", 35_000);
+  const proposal = await evaluate(cdp, `(() => ({ cards: document.querySelectorAll('.ai-action-card').length, confirmations: [...document.querySelectorAll('.ai-action-card')].filter((node) => /待确认/u.test(node.textContent || '')).length }))()`);
+  if (proposal.confirmations < 1) {
+    throw Object.assign(new Error("AI provider did not return a confirmation-gated action proposal"), {
+      code: "AI_ACTION_PROPOSAL_MISSING",
+      gateBlocked: true,
+    });
+  }
+  await getByRole(cdp, "button", "确认执行").click();
+  await waitFor(cdp, "Boolean(document.querySelector('.ai-chat-action-result, .ai-action-card-confirmed'))", "AI action confirmation result", 35_000);
+  const result = await evaluate(cdp, `(() => ({ cards: document.querySelectorAll('.ai-action-card').length, results: document.querySelectorAll('.ai-chat-action-result').length, history: Boolean(document.querySelector('.ai-action-history-list')) }))()`);
+  return { proposal, result, confirmation: true };
 }
 
 async function runZoomHitTest(cdp) {
@@ -784,6 +960,61 @@ async function stop(browser) {
   ]);
 }
 
+export async function startBrowserSession(url, options = {}) {
+  const browserPath = options.browserPath ?? await findBrowser();
+  const debugPort = port();
+  const temporaryProfile = options.userDataDir ? null : mkdtempSync(join(tmpdir(), "nexus-beta-browser-gate-"));
+  const userDataDir = options.userDataDir
+    ? externalPath(options.userDataDir, PROFILE_ENV, "directory")
+    : temporaryProfile;
+  const browser = spawn(browserPath, [
+    "--remote-debugging-port=" + debugPort,
+    "--user-data-dir=" + userDataDir,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-extensions",
+    "--window-size=390,844",
+    ...(options.headed ? [] : ["--headless=new"]),
+    "about:blank",
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  const errors = [];
+  browser.stderr.on("data", (chunk) => errors.push(String(chunk)));
+  let cdp;
+  let diagnostics;
+  try {
+    await fetchJson("http://127.0.0.1:" + debugPort + "/json/version");
+    const target = await openTarget(debugPort, url);
+    cdp = connect(target.webSocketDebuggerUrl);
+    diagnostics = attachBrowserDiagnostics(cdp);
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    await cdp.send("Network.enable");
+    await cdp.send("Emulation.setDeviceMetricsOverride", MOBILE_LAYOUT_METRICS);
+    return {
+      cdp,
+      debugPort,
+      diagnostics,
+      async close() {
+        diagnostics?.close();
+        cdp?.close();
+        await stop(browser);
+        if (temporaryProfile) {
+          try { rmSync(temporaryProfile, { recursive: true, force: true }); } catch { /* best effort */ }
+        }
+      },
+    };
+  } catch (error) {
+    diagnostics?.close();
+    cdp?.close();
+    await stop(browser);
+    if (temporaryProfile) {
+      try { rmSync(temporaryProfile, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    if (errors.length) error.message += "; browser=" + errors.join("").slice(-500);
+    throw error;
+  }
+}
+
 async function run() {
   const options = parseArgs(process.argv.slice(2));
   const authReady = Boolean(options.userDataDir && options.avatarFile);
@@ -810,10 +1041,12 @@ async function run() {
   const errors = [];
   browser.stderr.on("data", (chunk) => errors.push(String(chunk)));
   let cdp;
+  let diagnostics;
   try {
     await fetchJson("http://127.0.0.1:" + debugPort + "/json/version");
     const target = await openTarget(debugPort, options.url);
     cdp = connect(target.webSocketDebuggerUrl);
+    diagnostics = attachBrowserDiagnostics(cdp);
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     await cdp.send("Network.enable");
@@ -823,13 +1056,18 @@ async function run() {
       await navigateToNewDocument(cdp, options.url);
     }
     const evidence = networkEvidence(cdp);
-    console.log(JSON.stringify({ status: "PASS", scenario: "public-shell", evidence: await runPublicShell(cdp) }));
+    const publicEvidence = await runPublicShell(cdp);
+    if (diagnostics.state.consoleErrors > 0 || diagnostics.state.exceptionCount > 0) {
+      throw new Error("Beta browser runtime diagnostics reported an error");
+    }
+    console.log(JSON.stringify({ status: "PASS", scenario: "public-shell", evidence: { ...publicEvidence, diagnostics: diagnostics.state } }));
     if (options.publicShell) return;
     console.log(JSON.stringify({ status: "PASS", scenario: "authenticated-phase1", evidence: await runAuthenticated(cdp, options, evidence) }));
     if (options.cleanupRecovery) {
       console.log(JSON.stringify({ status: "PASS", scenario: "authenticated-cleanup-recovery", evidence: await runCleanupRecovery(cdp, debugPort, options) }));
     }
   } finally {
+    diagnostics?.close();
     cdp?.close();
     await stop(browser);
     if (temporaryProfile) {
