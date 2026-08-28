@@ -15,6 +15,13 @@ export interface AIChatReadContext {
   selected_database_ids: readonly string[];
 }
 
+function readScopeFingerprint(readContext?: AIChatReadContext) {
+  return JSON.stringify([
+    readContext?.selected_note_ids ?? [],
+    readContext?.selected_database_ids ?? [],
+  ]);
+}
+
 interface AIChatPanelProps {
   client: Pick<ApiClient, "request" | "confirmAiAction" | "rejectAiAction"> & Partial<Pick<ApiClient, "getAiTrustedMode" | "updateAiTrustedMode" | "listAiActionHistory">>;
   workspaceId: string;
@@ -61,6 +68,8 @@ function errorMessage(error: unknown) {
   if (code === "UNAUTHENTICATED" || code === "FORBIDDEN") return "当前工作区没有使用 AI 助手的权限，请重新登录或切换工作区。";
   return "AI 服务暂时不可用，请稍后重试。你的问题仍保留在输入框中。";
 }
+
+const READ_SCOPE_CHANGED_MESSAGE = "AI 读取范围已变化，请确认当前范围后重新发送。";
 
 function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
@@ -126,8 +135,14 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
   const chatControllerRef = useRef<AbortController | null>(null);
   const workspaceIdRef = useRef(workspaceId);
   const requestGenerationRef = useRef(0);
+  const scopeFingerprint = readScopeFingerprint(readContext);
+  const currentScopeFingerprintRef = useRef(scopeFingerprint);
+  const handledScopeFingerprintRef = useRef(scopeFingerprint);
+  const scopeWorkspaceIdRef = useRef(workspaceId);
+  const pendingPromptRef = useRef<string | null>(null);
   const mountedRef = useRef(false);
   workspaceIdRef.current = workspaceId;
+  currentScopeFingerprintRef.current = scopeFingerprint;
 
   useEffect(() => {
     requestGenerationRef.current += 1;
@@ -138,6 +153,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
     setConfiguration(workspaceId ? "checking" : null);
     setConfigurationDetails(null);
     setAllowWorkspaceSearch(false);
+    pendingPromptRef.current = null;
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
@@ -147,8 +163,28 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
   }, [workspaceId]);
 
   useEffect(() => {
+    const workspaceChanged = scopeWorkspaceIdRef.current !== workspaceId;
+    scopeWorkspaceIdRef.current = workspaceId;
+    if (workspaceChanged) {
+      handledScopeFingerprintRef.current = scopeFingerprint;
+      return;
+    }
+    if (handledScopeFingerprintRef.current === scopeFingerprint) return;
+
+    handledScopeFingerprintRef.current = scopeFingerprint;
+    requestGenerationRef.current += 1;
+    const pendingRequest = chatControllerRef.current !== null;
+    const pendingPrompt = pendingPromptRef.current;
+    chatControllerRef.current?.abort();
+    chatControllerRef.current = null;
+    pendingPromptRef.current = null;
+    setEntries([]);
+    setActionStates({});
     setAllowWorkspaceSearch(false);
-  }, [workspaceId, readContext?.selected_note_ids.join("\u001f"), readContext?.selected_database_ids.join("\u001f")]);
+    setError(READ_SCOPE_CHANGED_MESSAGE);
+    if (pendingRequest && pendingPrompt !== null) setDraft(pendingPrompt);
+    setPending(false);
+  }, [scopeFingerprint, workspaceId]);
 
   useEffect(() => {
     if (!workspaceId) {
@@ -208,6 +244,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
     requestGenerationRef.current += 1;
     chatControllerRef.current?.abort();
     chatControllerRef.current = null;
+    pendingPromptRef.current = null;
     setEntries([]);
     setActionStates({});
     setError(null);
@@ -264,10 +301,13 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
     chatControllerRef.current = controller;
     const requestWorkspaceId = workspaceId;
     const requestGeneration = requestGenerationRef.current;
+    const requestScopeFingerprint = scopeFingerprint;
+    pendingPromptRef.current = content;
     const isCurrentRequest = () => mountedRef.current
       && chatControllerRef.current === controller
       && requestGeneration === requestGenerationRef.current
-      && requestWorkspaceId === workspaceIdRef.current;
+      && requestWorkspaceId === workspaceIdRef.current
+      && requestScopeFingerprint === currentScopeFingerprintRef.current;
     try {
       const response = await client.request<AiChatResponse>({
         path: "/api/v2/ai/chat",
@@ -287,6 +327,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
         policy: { timeoutMs: 35_000, retry: 0, idempotencyKey: crypto.randomUUID(), signal: controller.signal },
       });
       if (!isCurrentRequest()) return;
+      pendingPromptRef.current = null;
       const assistantEntry: TranscriptEntry = { id: crypto.randomUUID(), kind: "message", message: { role: "assistant", content: response.message } };
       const proposalEntries = (response.action_proposals ?? []).map((proposal) => {
         setProposalState(proposal);
@@ -301,12 +342,14 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
     } catch (caught) {
       if (controller.signal.aborted || isAbortError(caught)) {
         if (isCurrentRequest()) {
+          pendingPromptRef.current = null;
           setEntries(previousEntries);
           setDraft(content);
         }
         return;
       }
       if (!isCurrentRequest()) return;
+      pendingPromptRef.current = null;
       setEntries(previousEntries);
       if (isAiDisabledError(caught)) {
         setConfiguration("disabled");
@@ -318,6 +361,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
       setDraft(content);
     } finally {
       if (isCurrentRequest()) {
+        pendingPromptRef.current = null;
         chatControllerRef.current = null;
         setPending(false);
       }

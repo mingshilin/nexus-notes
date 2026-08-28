@@ -147,6 +147,114 @@ describe("AIChatPanel", () => {
     expect(screen.getByRole("checkbox", { name: "允许搜索工作区" })).toBeChecked();
   });
 
+  it("invalidates a pending chat when the explicit read scope changes and restores the prompt", async () => {
+    let resolveChat!: (value: { message: string; model: string }) => void;
+    const request = vi.fn((input: { path: string }) => input.path === "/api/v2/ai/chat"
+      ? new Promise<{ message: string; model: string }>((resolve) => { resolveChat = resolve; })
+      : Promise.resolve({ configured: true, source: "server_default" }));
+    const client = { request };
+    const view = render(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a"], selected_database_ids: ["db-a"] }}
+    />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: "允许搜索工作区" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "总结范围 A" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/ai/chat" })));
+    const chatRequest = request.mock.calls.find(([input]) => input.path === "/api/v2/ai/chat")?.[0];
+    const signal = chatRequest?.policy.signal as AbortSignal;
+
+    view.rerender(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-b"], selected_database_ids: ["db-b"] }}
+    />);
+
+    await waitFor(() => expect(signal.aborted).toBe(true));
+    expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("总结范围 A");
+    expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: "允许搜索工作区" })).not.toBeChecked();
+    expect(screen.getByRole("alert")).toHaveTextContent("AI 读取范围已变化，请确认当前范围后重新发送。");
+
+    resolveChat({ message: "范围 A 的晚到回复", model: "beta-model" });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("范围 A 的晚到回复")).not.toBeInTheDocument();
+  });
+
+  it("keeps a pending chat when new arrays contain the same ordered scope ids", async () => {
+    let resolveChat!: (value: { message: string; model: string }) => void;
+    const request = vi.fn((input: { path: string }) => input.path === "/api/v2/ai/chat"
+      ? new Promise<{ message: string; model: string }>((resolve) => { resolveChat = resolve; })
+      : Promise.resolve({ configured: true, source: "server_default" }));
+    const client = { request };
+    const view = render(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a", "note-b"], selected_database_ids: ["db-a"] }}
+    />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "保持当前范围" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/ai/chat" })));
+    const chatRequest = request.mock.calls.find(([input]) => input.path === "/api/v2/ai/chat")?.[0];
+    const signal = chatRequest?.policy.signal as AbortSignal;
+
+    view.rerender(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a", "note-b"], selected_database_ids: ["db-a"] }}
+    />);
+
+    expect(signal.aborted).toBe(false);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    resolveChat({ message: "同一范围回复", model: "beta-model" });
+    expect(await screen.findByText("同一范围回复")).toBeInTheDocument();
+  });
+
+  it("clears completed scope state while preserving an unsent draft", async () => {
+    const request = vi.fn(async (input: { path: string }) => input.path === "/api/v2/ai/chat"
+      ? {
+          message: "范围 A 的回复",
+          model: "beta-model",
+          action_proposals: [{
+            action_id: "scope-a-action",
+            tool: "create_note" as const,
+            summary: "范围 A 的待确认操作",
+            input: { title: "旧范围", content: "旧范围内容" },
+            requires_confirmation: true,
+            expires_at: "2099-08-25T01:00:00.000Z",
+          }],
+        }
+      : { configured: true, source: "server_default" });
+    const client = { request, confirmAiAction: vi.fn(), rejectAiAction: vi.fn() };
+    const view = render(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a"], selected_database_ids: [] }}
+    />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "生成旧范围操作" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText("范围 A 的待确认操作")).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "尚未发送的草稿" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "允许搜索工作区" }));
+
+    view.rerender(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-b"], selected_database_ids: [] }}
+    />);
+
+    await waitFor(() => expect(screen.queryByText("范围 A 的待确认操作")).not.toBeInTheDocument());
+    expect(screen.queryByText("范围 A 的回复")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认执行" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("尚未发送的草稿");
+    expect(screen.getByRole("checkbox", { name: "允许搜索工作区" })).not.toBeChecked();
+    expect(screen.getByRole("alert")).toHaveTextContent("AI 读取范围已变化，请确认当前范围后重新发送。");
+  });
+
   it("clears the transcript when the workspace changes", async () => {
     const client = {
       request: vi.fn(async (input: { path: string }) => input.path === "/api/v2/ai/chat"
