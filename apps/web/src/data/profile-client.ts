@@ -62,6 +62,7 @@ export class ProfileClient {
   private readonly userId?: string;
   private readonly workspaceId: string;
   private readonly queryCache?: WorkspaceQueryCache;
+  private profileCache: CacheEntry<Profile> | null = null;
   private overviewCache: CacheEntry<AccountOverview> | null = null;
   private preferencesCache: CacheEntry<UserPreferences> | null = null;
 
@@ -74,7 +75,15 @@ export class ProfileClient {
   }
 
   getProfile(signal?: AbortSignal): Promise<Profile> {
-    return this.query<unknown>("/api/v2/profile", "profile", signal).then((value) => ProfileSchema.parse(value));
+    const load = (requestSignal?: AbortSignal) => this.query<unknown>("/api/v2/profile", "profile", requestSignal)
+      .then((value) => ProfileSchema.parse(value));
+    const shared = this.shared("profile", load, signal);
+    if (shared) return shared;
+    return this.cached(this.profileCache, 5 * 60_000, async () => {
+      const value = await load(signal);
+      this.profileCache = { value, expiresAt: this.now() + 5 * 60_000 };
+      return value;
+    });
   }
 
   updateProfile(input: UpdateProfileInput, signal?: AbortSignal): Promise<Profile> {
@@ -217,14 +226,14 @@ export class ProfileClient {
   private shared<T>(query: string, load: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal) {
     if (!this.queryCache || !this.userId) return null;
     return this.queryCache.get(
-      { userId: this.userId, workspaceId: this.workspaceId, domain: "account", query },
+      { userId: this.userId, workspaceId: "account", domain: "account", query },
       (requestSignal) => load(requestSignal),
       { ttlMs: 5 * 60_000, signal },
     );
   }
 
   private invalidateAccountCache() {
-    this.queryCache?.invalidate({ userId: this.userId, workspaceId: this.workspaceId, domain: "account" });
+    this.queryCache?.invalidate({ userId: this.userId, workspaceId: "account", domain: "account" });
   }
 
   private query<T>(path: string, dedupeKey: string, signal?: AbortSignal) {
@@ -244,6 +253,7 @@ export class ProfileClient {
       requestClass: "command",
       policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId(), signal },
     }).then((value) => {
+      this.profileCache = null;
       this.overviewCache = null;
       this.preferencesCache = null;
       this.invalidateAccountCache();
