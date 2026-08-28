@@ -50,12 +50,12 @@
 
 | 能力 | 当前状态 | 证据/缺口 |
 | --- | --- | --- |
-| AI 对话页面 | 已实现待验收 | `AIChatPanel` 已连接 `/api/v2/ai/chat` |
+| AI 对话页面 | 已验证 | `AIChatPanel` 已连接 `/api/v2/ai/chat`；系统默认使用 Workers AI，个人 provider 可覆盖并在缺失时回退系统 |
 | AI 配置状态 | 已实现待验收 | `/api/v2/ai/status` 和未配置状态文案 |
 | AI 工具写入确认 | 已验证 | `POST /api/v2/ai/actions/:actionId/confirm` / `reject` 在执行前重新校验 session、workspace membership、role 和 proposal revision；`send_email` 由 Worker 配置的 `EMAIL_FROM` 发出，不使用用户邮箱 |
-| Provider API key 安全 | 依赖配置 | 必须设置 Worker Secret，不能进入前端 bundle 或 Git |
+| Provider API key 安全 | 已验证 | 系统 Workers AI 不需要用户 Key；个人 Key 由 `UserSecretBox` 加密，外部系统 provider Key 仅允许 Worker Secret，均不进入前端 bundle 或 Git |
 | OpenAI-compatible adapter | 已实现待验收 | Worker adapter 已有；需配置真实 provider 后跑 health/chat smoke |
-| 当前笔记总结/改写/提取任务 | 已实现待验收 | `NoteAiActions` 提供摘要、任务提取和标签建议；结果先预览，确认后才写入当前草稿或标签；`live-notes-flow.test.tsx`、`note-ai-actions.test.tsx` 覆盖，仍需真实 provider/browser 验收 |
+| 当前笔记总结/改写/提取任务 | 已实现待验收 | `NoteAiActions` 已移入默认关闭的“笔记信息” Inspector；结果先预览，确认后才写入草稿或标签；单元/集成测试覆盖，仍需有效认证账号的线上 provider/browser 验收 |
 | AI 限流、额度、超时、重试 | 已实现待验收 | 路由有 workspace/IP 限流，服务层有请求体/响应体边界和内部超时，慢 provider 映射为可重试 `AI_PROVIDER_TIMEOUT`；需真实 provider/fault tests |
 
 ## 稳定性与性能

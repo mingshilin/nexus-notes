@@ -2,7 +2,9 @@
 
 更新时间：2026-08-28
 
-AI 助手通过 Worker 代理 OpenAI-compatible Chat Completions API。当前 Preview 的 `AI_ENABLED=false`。浏览器只发送工作区范围内的 conversation，不会读取或自动上传笔记内容；API key 只在 Worker 运行时使用。
+AI 助手支持系统 AI 与用户个人 OpenAI-compatible provider。系统 AI 默认通过 Cloudflare Workers AI 提供，不需要用户 API Key；用户可以选择“我的 AI”并配置个人地址、模型和 Key。浏览器只发送工作区范围内的 conversation，不会读取或自动上传笔记内容；API key 只在 Worker 运行时使用。
+
+在 AI 页面中，“系统 AI”是默认选项；“我的 AI”通过 `/api/v2/ai/provider` 按用户保存选择。该选择跨工作区生效，个人配置缺失时服务端自动回退系统 AI。
 
 ## Local
 
@@ -38,8 +40,8 @@ Provider 需要接受如下请求并返回 `choices[0].message.content`：
 }
 ```
 
-如果配置缺失，`POST /api/v2/ai/chat` 会返回 `AI_NOT_CONFIGURED`，前端保留用户输入并显示可恢复提示，不影响笔记和数据库功能。Task 12 Preview 当前明确保持 `AI_ENABLED=false`，因此线上验收只能验证禁用态与安全边界，不能宣称真实 provider/chat 已通过。
+如果个人配置缺失，用户选择“我的 AI”时会自动回退系统 AI。只有系统 AI 与个人 AI 都不可用时，`POST /api/v2/ai/chat` 才返回 `AI_NOT_CONFIGURED`；前端保留用户输入并显示可恢复提示，不影响笔记和数据库功能。
 
 ## AI Actions
 
-只有在重新配置 provider（URL、model 和 Worker Secret）并通过 AI 确认与审计门禁后，才允许把 `AI_ENABLED` 切为 `true`。任何会写入笔记、提醒、通知或邮件的提案都必须先显示预览并等待用户显式确认；`/api/v2/ai/actions/:actionId/confirm` 在执行前会重新校验 session、workspace membership、role 和 proposal revision，未确认的提案不得直接落库或发信。
+系统 AI 由 `AI_ENABLED=true` 与 Workers AI binding 启用；管理员可以另外配置外部 provider URL、model 和 Worker Secret 覆盖系统来源。任何会写入笔记、提醒、通知或邮件的提案都必须先显示预览并等待用户显式确认；`/api/v2/ai/actions/:actionId/confirm` 在执行前会重新校验 session、workspace membership、role 和 proposal revision，未确认的提案不得直接落库或发信。
