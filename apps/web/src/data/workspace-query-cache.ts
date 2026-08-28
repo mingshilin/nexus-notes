@@ -161,6 +161,19 @@ export class WorkspaceQueryCache {
     }
   }
 
+  /** Seed a related query without disturbing a request that is already newer. */
+  prime<T>(key: WorkspaceCacheKey, value: T, ttlMs: number) {
+    const serializedKey = cacheKey(key);
+    const current = this.entries.get(serializedKey) as CacheEntry<T> | undefined;
+    if (current?.inFlight) return;
+    this.entries.set(serializedKey, {
+      key,
+      hasValue: true,
+      value,
+      expiresAt: this.now() + Math.max(0, ttlMs),
+    });
+  }
+
   clearWorkspace(workspaceId: string) {
     this.invalidate({ workspaceId });
   }

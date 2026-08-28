@@ -136,12 +136,16 @@ export class DatabaseClient {
       requestSignal,
     );
     const shared = this.shared(key, load, options.signal);
-    if (shared) return shared;
+    if (shared) return shared.then((value) => {
+      this.primeBootstrap(value);
+      return value;
+    });
     return this.cached(key, load, options.signal, generation, (value, requestToken) => {
       this.commitCache("databases", value.items, requestToken, generation);
       if (value.bundle) {
         this.commitCache(`database:${value.bundle.database.id}`, value.bundle, requestToken, generation);
       }
+      this.primeBootstrap(value);
     });
   }
 
@@ -460,5 +464,21 @@ export class DatabaseClient {
       load,
       { ttlMs: DATABASE_CACHE_TTL_MS, signal },
     );
+  }
+
+  private primeBootstrap(value: DatabaseBootstrap) {
+    if (!this.queryCache || !this.userId) return;
+    this.queryCache.prime(
+      { userId: this.userId, workspaceId: this.workspaceId, domain: "databases", query: "databases" },
+      value.items,
+      DATABASE_CACHE_TTL_MS,
+    );
+    if (value.bundle) {
+      this.queryCache.prime(
+        { userId: this.userId, workspaceId: this.workspaceId, domain: "databases", query: `database:${value.bundle.database.id}` },
+        value.bundle,
+        DATABASE_CACHE_TTL_MS,
+      );
+    }
   }
 }

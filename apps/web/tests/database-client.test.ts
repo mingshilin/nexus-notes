@@ -65,6 +65,29 @@ describe("DatabaseClient", () => {
     expect(api.request.mock.calls[0]![0].path).toBe("/api/v2/databases/bootstrap?database_id=db-1&limit=25");
   });
 
+  it("primes derived shared database reads from bootstrap without duplicate requests", async () => {
+    const data = await loadData();
+    const database = { id: "db-1", name: "Projects" };
+    const bundle = { database, role: "editor", properties: [], views: [], templates: [] };
+    const bootstrap = {
+      items: [database],
+      selected_database_id: "db-1",
+      bundle,
+      records: { items: [], next_cursor: null },
+    };
+    const api = { request: vi.fn(async ({ path }: { path: string }) => path.includes("/bootstrap")
+      ? bootstrap
+      : path === "/api/v2/databases" ? { items: [database] } : bundle) };
+    const queryCache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const client = new data.DatabaseClient(api, "ws-1", { userId: "user-1", queryCache, now: () => 1_000 });
+
+    await expect(client.bootstrap({ databaseId: "db-1", limit: 50 })).resolves.toBe(bootstrap);
+    await expect(client.listDatabases()).resolves.toEqual([database]);
+    await expect(client.getDatabase("db-1")).resolves.toBe(bundle);
+
+    expect(api.request).toHaveBeenCalledOnce();
+  });
+
   it("serves stale database cache while revalidating and keeps it after an aborted refresh", async () => {
     const data = await loadData();
     let now = 1_000;
