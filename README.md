@@ -78,6 +78,8 @@ For a Preview or local browser gate, use a Chrome profile outside this repositor
 
 The production deployment is [Nexus Notes](https://notes.msl88ljctengxun.xyz/). The independent [Public Beta Preview](https://nexus-notes-public-beta-preview.shilinming9.workers.dev/) remains available for acceptance testing. See [docs/production-cutover-2026-08-26.md](docs/production-cutover-2026-08-26.md) and [docs/public-beta-cutover-runbook.md](docs/public-beta-cutover-runbook.md).
 
+External calendar import is read-only and opt-in. Configure `CALENDAR_OAUTH_REDIRECT_URI` as a non-secret Worker variable and store `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`, `OUTLOOK_CALENDAR_CLIENT_ID`, and `OUTLOOK_CALENDAR_CLIENT_SECRET` with Wrangler Secrets. If a provider is not configured, the UI reports that state and does not start OAuth.
+
 ## Security and Contributions
 
 - Report vulnerabilities through the process in [SECURITY.md](SECURITY.md).

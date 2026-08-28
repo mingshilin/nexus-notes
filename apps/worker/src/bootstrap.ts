@@ -72,6 +72,10 @@ import { ReminderDeliveryConsumer } from "./push/reminder-delivery-consumer";
 import { ReminderOutboxDispatcher } from "./push/reminder-outbox-dispatcher";
 import { ResendReminderEmailSender } from "./push/resend-reminder-email";
 import { WebPushSender } from "./push/web-push-sender";
+import { D1CalendarRepository } from "./calendar/d1-calendar-repository";
+import { CalendarService } from "./calendar/calendar-service";
+import { createGoogleCalendarProvider, createOutlookCalendarProvider } from "./calendar/calendar-providers";
+import { registerCalendarRoutes } from "./calendar/calendar-routes";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -707,6 +711,35 @@ function createPushService(env: BetaWorkerEnv) {
   );
 }
 
+function calendarConfig(env: BetaWorkerEnv, provider: "google" | "outlook") {
+  const redirectUri = env.CALENDAR_OAUTH_REDIRECT_URI?.trim();
+  if (!redirectUri) return undefined;
+  const clientId = provider === "google" ? env.GOOGLE_CALENDAR_CLIENT_ID : env.OUTLOOK_CALENDAR_CLIENT_ID;
+  const clientSecret = provider === "google" ? env.GOOGLE_CALENDAR_CLIENT_SECRET : env.OUTLOOK_CALENDAR_CLIENT_SECRET;
+  if (!clientId?.trim() || !clientSecret?.trim()) return undefined;
+  return { clientId: clientId.trim(), clientSecret: clientSecret.trim(), redirectUri };
+}
+
+function createCalendarService(env: BetaWorkerEnv) {
+  const stateSecret = env.RATE_LIMIT_SECRET ? new SecureTokenService(`calendar-oauth:${env.RATE_LIMIT_SECRET}`) : undefined;
+  const secretBox = env.USER_SECRETS_ENCRYPTION_KEY ? new UserSecretBox(env.USER_SECRETS_ENCRYPTION_KEY) : undefined;
+  return new CalendarService(new D1CalendarRepository(env.DB), {
+    stateToken: stateSecret ? {
+      create: () => stateSecret.createSessionToken(),
+      hash: (value: string) => stateSecret.hash(value),
+    } : undefined,
+    secretBox,
+    configs: {
+      ...(calendarConfig(env, "google") ? { google: calendarConfig(env, "google") } : {}),
+      ...(calendarConfig(env, "outlook") ? { outlook: calendarConfig(env, "outlook") } : {}),
+    },
+    providers: {
+      google: createGoogleCalendarProvider(),
+      outlook: createOutlookCalendarProvider(),
+    },
+  });
+}
+
 function createReminderDeliveryConsumer(env: BetaWorkerEnv) {
   const subscriptions = env.USER_SECRETS_ENCRYPTION_KEY
     ? new D1PushSubscriptionRepository(env.DB, new UserSecretBox(env.USER_SECRETS_ENCRYPTION_KEY))
@@ -790,6 +823,7 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
   registerOperationsRoutes(registry, createOperationsService);
   registerSyncRoutes(registry, createSyncService);
   registerPushRoutes(registry, createPushService);
+  registerCalendarRoutes(registry, createCalendarService);
 
   return {
     async fetch(request: Request, env: BetaWorkerEnv) {

@@ -5,7 +5,7 @@ import type { WorkspaceRoleContract } from "@nexus/contracts";
 import type { KnowledgeClient } from "../../data/knowledge-client";
 import type { DatabaseClient } from "../../data/database-client";
 import type { CollaborationClient } from "../../data/collaboration-client";
-import { loadKnowledgeCalendarPanel, loadKnowledgeGraphPanel, loadKnowledgeSearchPanel } from "../workspace-domain-loader";
+import { loadExternalCalendarPanel, loadKnowledgeCalendarPanel, loadKnowledgeGraphPanel, loadKnowledgeSearchPanel } from "../workspace-domain-loader";
 import type { WorkspaceDomainProps } from "./NotesDomain";
 
 const LazyKnowledgeSearchPanel = lazy(async () => {
@@ -19,6 +19,10 @@ const LazyKnowledgeGraphPanel = lazy(async () => {
 const LazyKnowledgeCalendarPanel = lazy(async () => {
   const module = await loadKnowledgeCalendarPanel();
   return { default: module.KnowledgeCalendarPanel };
+});
+const LazyExternalCalendarPanel = lazy(async () => {
+  const module = await loadExternalCalendarPanel();
+  return { default: module.ExternalCalendarPanel };
 });
 
 export interface KnowledgeDomainSelection {
@@ -36,6 +40,11 @@ export function KnowledgeDomain({ client, selectedEntity }: KnowledgeDomainProps
   const knowledge = "knowledge" in client ? client.knowledge : client;
   const databases = "knowledge" in client ? client.databases : undefined;
   const collaboration = "knowledge" in client ? client.collaboration : undefined;
+  const externalCalendar = "listCalendarConnections" in knowledge
+    && "startCalendarConnection" in knowledge
+    && "listCalendarEvents" in knowledge
+    && "syncCalendarConnection" in knowledge
+    && "disconnectCalendarConnection" in knowledge;
   return (
     <section className="product-domain-page knowledge-domain-page">
       <p className="eyebrow">KNOWLEDGE CENTER</p>
@@ -45,6 +54,7 @@ export function KnowledgeDomain({ client, selectedEntity }: KnowledgeDomainProps
         <LazyKnowledgeSearchPanel client={knowledge} databasesClient={databases} collaborationClient={collaboration} />
         <LazyKnowledgeGraphPanel client={knowledge} />
         <LazyKnowledgeCalendarPanel client={knowledge} />
+        {externalCalendar ? <LazyExternalCalendarPanel client={knowledge} /> : null}
       </Suspense>
       {selectedEntity.recoveryContent}
     </section>

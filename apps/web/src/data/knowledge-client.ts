@@ -8,6 +8,10 @@ import type {
   AttachmentListRequest,
   CalendarFeed,
   CalendarFeedQuery,
+  CalendarConnectionSummary,
+  CalendarConnectResponse,
+  CalendarEvent,
+  CalendarEventsQuery,
   KnowledgeDiagnostic,
   KnowledgeDiagnosticsRequest,
   DeleteReminderInput,
@@ -206,6 +210,50 @@ export class KnowledgeClient {
     return this.query<CalendarFeed>(
       `/api/v2/calendar/feed?${params.toString()}`,
       `calendar-feed:${params.toString()}`,
+      signal,
+    );
+  }
+
+  listCalendarConnections(signal?: AbortSignal) {
+    return this.query<{ items: CalendarConnectionSummary[] }>(
+      "/api/v2/calendar/connections",
+      "calendar:connections",
+      signal,
+    ).then(({ items }) => items);
+  }
+
+  startCalendarConnection(provider: "google" | "outlook") {
+    return this.command<CalendarConnectResponse>(
+      `/api/v2/calendar/connections/${provider}/start`,
+      "POST",
+      undefined,
+    );
+  }
+
+  listCalendarEvents(input: CalendarEventsQuery, signal?: AbortSignal) {
+    const params = new URLSearchParams({ from: input.from, to: input.to });
+    if (input.connection_id) params.set("connection_id", input.connection_id);
+    return this.query<{ items: CalendarEvent[] }>(
+      `/api/v2/calendar/events?${params.toString()}`,
+      `calendar:events:${params.toString()}`,
+      signal,
+    ).then(({ items }) => items);
+  }
+
+  syncCalendarConnection(connectionId: string, input: CalendarEventsQuery, signal?: AbortSignal) {
+    return this.command<{ connection: CalendarConnectionSummary; imported_count: number }>(
+      `/api/v2/calendar/connections/${encodeURIComponent(connectionId)}/sync`,
+      "POST",
+      input,
+      signal,
+    );
+  }
+
+  disconnectCalendarConnection(connectionId: string, signal?: AbortSignal) {
+    return this.command<{ deleted: true }>(
+      `/api/v2/calendar/connections/${encodeURIComponent(connectionId)}`,
+      "DELETE",
+      undefined,
       signal,
     );
   }

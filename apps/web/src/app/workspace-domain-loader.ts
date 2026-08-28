@@ -6,6 +6,7 @@ export const loadDatabaseWorkbench = () => import("../databases/DatabaseWorkbenc
 export const loadKnowledgeSearchPanel = () => import("../knowledge/KnowledgeSearchPanel");
 export const loadKnowledgeGraphPanel = () => import("../knowledge/KnowledgeGraphPanel");
 export const loadKnowledgeCalendarPanel = () => import("../knowledge/KnowledgeCalendarPanel");
+export const loadExternalCalendarPanel = () => import("../knowledge/ExternalCalendarPanel");
 export const loadReminderPanel = () => import("../reminders/ReminderPanel");
 export const loadAccountCenter = () => import("../account/AccountCenter");
 export const loadAIChatPanel = () => import("../ai/AIChatPanel");
@@ -17,6 +18,7 @@ const defaultLoaders: Partial<Record<ProductDomain, DomainModuleLoader>> = {
     loadKnowledgeSearchPanel(),
     loadKnowledgeGraphPanel(),
     loadKnowledgeCalendarPanel(),
+    loadExternalCalendarPanel(),
   ]),
   reminders: loadReminderPanel,
   collaboration: loadCollaborationCenter,

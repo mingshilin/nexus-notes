@@ -158,6 +158,31 @@ describe("KnowledgeClient", () => {
     }));
   });
 
+  it("maps external calendar connection and read-only sync endpoints", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async ({ method, path }: { method?: string; path: string }) => {
+      if (path.endsWith("/start")) return { provider: "google", status: "unconfigured" };
+      if (path.includes("/sync")) return { connection: { id: "connection-1", provider: "google", status: "active", last_synced_at: null, last_error_code: null }, imported_count: 2 };
+      if (path.includes("/connections") && method === "DELETE") return { deleted: true };
+      if (path.includes("/connections")) return { items: [] };
+      return { items: [] };
+    }) };
+    const client = new data.KnowledgeClient(api, "ws-1");
+    await client.listCalendarConnections();
+    await client.startCalendarConnection("google");
+    await client.listCalendarEvents({ from: "2026-08-01", to: "2026-08-31" });
+    await client.syncCalendarConnection("connection-1", { from: "2026-08-01", to: "2026-08-31" });
+    await client.disconnectCalendarConnection("connection-1");
+
+    expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET"])).toEqual([
+      ["/api/v2/calendar/connections", "GET"],
+      ["/api/v2/calendar/connections/google/start", "POST"],
+      ["/api/v2/calendar/events?from=2026-08-01&to=2026-08-31", "GET"],
+      ["/api/v2/calendar/connections/connection-1/sync", "POST"],
+      ["/api/v2/calendar/connections/connection-1", "DELETE"],
+    ]);
+  });
+
   it("maps workspace-scoped attachment filters, retry actions, and diagnostics recovery queries", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async () => ({ items: [], next_cursor: null, queued: [], ineligible: [], duplicate: [], attachment: { id: "attachment-1" }, deleted: true })) };

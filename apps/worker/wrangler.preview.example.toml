@@ -21,8 +21,13 @@ AI_ENABLED = "false"
 AI_CHAT_API_URL = "https://provider.example/v1/chat/completions"
 AI_CHAT_MODEL = "provider-model"
 CORS_ALLOWED_ORIGINS = "https://nexus-notes-public-beta-preview.example.workers.dev"
+CALENDAR_OAUTH_REDIRECT_URI = "https://nexus-notes-public-beta-preview.example.workers.dev/api/v2/calendar/oauth/google/callback"
 DEPLOYMENT_VERSION = "development"
 EMAIL_FROM = "Nexus Notes <noreply@your-verified-domain.example>"
+
+# Optional OAuth secrets. Store these with `wrangler secret put`, never in this file:
+# GOOGLE_CALENDAR_CLIENT_ID, GOOGLE_CALENDAR_CLIENT_SECRET
+# OUTLOOK_CALENDAR_CLIENT_ID, OUTLOOK_CALENDAR_CLIENT_SECRET
 
 [[d1_databases]]
 binding = "DB"

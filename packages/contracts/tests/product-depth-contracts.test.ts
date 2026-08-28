@@ -109,4 +109,21 @@ describe("product depth contracts", () => {
       device_name: "Chrome",
     }).success).toBe(false);
   });
+
+  it("keeps external calendar connections and events bounded", async () => {
+    const api = await contracts();
+    expect(api.CalendarConnectionSummarySchema.parse({
+      id: "calendar-1", provider: "google", status: "active", last_synced_at: null, last_error_code: null,
+    })).toMatchObject({ provider: "google", status: "active" });
+    expect(api.CalendarConnectResponseSchema.parse({ provider: "outlook", status: "unconfigured" })).toEqual({
+      provider: "outlook", status: "unconfigured",
+    });
+    expect(api.CalendarEventsQuerySchema.safeParse({ from: "2026-08-01", to: "2026-08-31" }).success).toBe(true);
+    expect(api.CalendarEventSchema.safeParse({
+      id: "event-1", connection_id: "calendar-1", provider: "google", provider_event_id: "evt-1",
+      title: "Review", starts_at: "2026-08-25T01:00:00.000Z", ends_at: "2026-08-25T02:00:00.000Z",
+      timezone: "Asia/Shanghai", all_day: false, status: "confirmed", updated_at: "2026-08-25T00:00:00.000Z",
+    }).success).toBe(true);
+    expect(api.CalendarEventsQuerySchema.safeParse({ from: "2026-01-01", to: "2026-04-01" }).success).toBe(false);
+  });
 });

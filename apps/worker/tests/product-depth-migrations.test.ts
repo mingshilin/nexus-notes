@@ -31,4 +31,24 @@ describe("product depth additive migrations", () => {
       await test.dispose();
     }
   });
+
+  it("adds isolated calendar OAuth, connection, and event tables", async () => {
+    const test = await createTestD1({ through: 26 });
+    try {
+      const tables = await test.db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('calendar_oauth_states','calendar_connections','calendar_events') ORDER BY name",
+      ).all<{ name: string }>();
+      expect(tables.results?.map((row) => row.name)).toEqual([
+        "calendar_connections", "calendar_events", "calendar_oauth_states",
+      ]);
+      const indexes = await test.db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'calendar_%' ORDER BY name",
+      ).all<{ name: string }>();
+      expect(indexes.results?.map((row) => row.name)).toEqual([
+        "calendar_connections_user_idx", "calendar_events_user_time_idx", "calendar_oauth_states_expiry_idx",
+      ]);
+    } finally {
+      await test.dispose();
+    }
+  });
 });

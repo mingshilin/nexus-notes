@@ -609,6 +609,24 @@ button { color: inherit; }
 .knowledge-calendar-day li { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--border-subtle); border-radius: 12px; padding: 9px 10px; background: rgba(255,255,255,.48); }
 .knowledge-calendar-day li strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .knowledge-calendar-day li small { flex: 0 0 auto; color: hsl(var(--muted-foreground)); font-size: 11px; }
+.knowledge-calendar-external { display: grid; min-width: 0; gap: 12px; margin: 18px 0 8px; padding: 16px; border: 1px solid var(--border-subtle); border-radius: 18px; background: rgba(255,255,255,.34); }
+.knowledge-calendar-feedback { margin: 0; color: var(--nexus-accent); font-size: 12px; line-height: 1.5; }
+.external-calendar-connect-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.external-calendar-connect-actions button, .external-calendar-connections button, .knowledge-calendar-external > .knowledge-calendar-heading > button { min-height: 34px; border: 1px solid var(--border-subtle); border-radius: 10px; padding: 7px 11px; color: var(--nexus-accent); background: rgba(0,122,255,.07); cursor: pointer; font-size: 12px; font-weight: 700; }
+.external-calendar-connect-actions button:disabled, .external-calendar-connections button:disabled, .knowledge-calendar-external button:disabled { cursor: not-allowed; opacity: .5; }
+.external-calendar-connections, .knowledge-calendar-external section ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.external-calendar-connections li, .knowledge-calendar-external section li { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--border-subtle); border-radius: 12px; padding: 9px 10px; background: rgba(255,255,255,.48); }
+.external-calendar-connections li > span, .knowledge-calendar-external section li > span { display: grid; min-width: 0; gap: 3px; }
+.external-calendar-connections li small, .knowledge-calendar-external section li small { color: hsl(var(--muted-foreground)); font-size: 11px; }
+.external-calendar-connections li > div { display: flex; flex: 0 0 auto; gap: 6px; }
+.knowledge-calendar-external section { display: grid; gap: 8px; border-top: 1px solid var(--border-subtle); padding-top: 12px; }
+.knowledge-calendar-external section h3 { margin: 0; font-size: 14px; }
+@media (max-width: 520px) {
+  .knowledge-calendar-external { padding: 12px; }
+  .external-calendar-connections li { align-items: flex-start; flex-direction: column; }
+  .external-calendar-connections li > div { width: 100%; }
+  .external-calendar-connections li > div button { flex: 1; }
+}
 .knowledge-graph-nodes { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
 .knowledge-graph-node { display: grid; min-width: 0; gap: 4px; border: 1px solid var(--border-subtle); border-radius: 12px; padding: 10px; background: rgba(255,255,255,.52); }
 .knowledge-graph-node.current { border-color: rgba(0,122,255,.4); box-shadow: inset 3px 0 var(--nexus-accent); }
