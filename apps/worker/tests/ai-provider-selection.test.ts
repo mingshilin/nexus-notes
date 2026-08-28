@@ -50,6 +50,33 @@ function request(path: string, init: RequestInit = {}) {
 }
 
 describe("AI provider selection", () => {
+  it("uses the Workers AI binding as the default system provider without an API key", async () => {
+    const test = await setup();
+    const run = vi.fn(async () => ({ response: "来自系统 Workers AI" }));
+    const externalFetch = vi.fn();
+    vi.stubGlobal("fetch", externalFetch);
+
+    const chat = await createBetaWorker().fetch(request("/api/v2/ai/chat", {
+      method: "POST",
+      headers: { "x-workspace-id": "ws-1" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "你好" }] }),
+    }), {
+      DB: test.db,
+      ...baseEnv,
+      AI_ENABLED: "true",
+      AI: { run, toMarkdown: vi.fn() },
+    });
+
+    const body = await chat.text();
+    expect(chat.status, body).toBe(200);
+    expect(JSON.parse(body)).toMatchObject({ data: { message: "来自系统 Workers AI" } });
+    expect(run).toHaveBeenCalledWith(
+      "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      expect.objectContaining({ messages: [{ role: "user", content: "你好" }], stream: false }),
+    );
+    expect(externalFetch).not.toHaveBeenCalled();
+  });
+
   it("uses a personal provider while the system AI is disabled", async () => {
     const test = await setup();
     const provider = vi.fn(async () => Response.json({ choices: [{ message: { content: "来自个人 AI" } }] }));

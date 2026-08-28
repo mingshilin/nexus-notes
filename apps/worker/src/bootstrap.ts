@@ -399,11 +399,55 @@ function createOcrExtractor(env: BetaWorkerEnv) {
 
 function createAiChatService(env: BetaWorkerEnv) {
   const aiEnabled = env.AI_ENABLED?.trim().toLowerCase() === "true";
-  const fallback = {
-    apiUrl: env.AI_CHAT_API_URL,
-    apiKey: env.AI_CHAT_API_KEY,
-    model: env.AI_CHAT_MODEL,
-  };
+  const externalConfigured = Boolean(env.AI_CHAT_API_URL?.trim() && env.AI_CHAT_API_KEY?.trim() && env.AI_CHAT_MODEL?.trim());
+  const workersAiModel = externalConfigured
+    ? env.AI_CHAT_MODEL!.trim()
+    : "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+  const workersAiFetch: typeof fetch | undefined = typeof env.AI?.run === "function"
+    ? async (_input, init) => {
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        messages?: unknown;
+        tools?: unknown;
+        stream?: unknown;
+      };
+      const output = await env.AI!.run!(workersAiModel, {
+        messages: request.messages ?? [],
+        tools: request.tools ?? [],
+        stream: false,
+      });
+      const rawToolCalls = Array.isArray(output.tool_calls) ? output.tool_calls : [];
+      const toolCalls = rawToolCalls.map((value, index) => {
+        const call = value && typeof value === "object" ? value as Record<string, unknown> : {};
+        if (call.function && typeof call.function === "object") return call;
+        return {
+          id: typeof call.id === "string" ? call.id : `workers-ai-${index}`,
+          type: "function",
+          function: {
+            name: typeof call.name === "string" ? call.name : "",
+            arguments: typeof call.arguments === "string" ? call.arguments : JSON.stringify(call.arguments ?? {}),
+          },
+        };
+      });
+      return Response.json({
+        choices: [{
+          message: {
+            content: typeof output.response === "string" ? output.response : "",
+            ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+          },
+        }],
+      });
+    }
+    : undefined;
+  const fallback = externalConfigured
+    ? { apiUrl: env.AI_CHAT_API_URL, apiKey: env.AI_CHAT_API_KEY, model: env.AI_CHAT_MODEL }
+    : workersAiFetch
+      ? {
+        apiUrl: "https://workers-ai.binding.invalid/v1/chat/completions",
+        apiKey: "workers-ai-binding",
+        model: workersAiModel,
+        fetchImpl: workersAiFetch,
+      }
+      : { apiUrl: env.AI_CHAT_API_URL, apiKey: env.AI_CHAT_API_KEY, model: env.AI_CHAT_MODEL };
   const personal = env.USER_SECRETS_ENCRYPTION_KEY
     ? new UserAiConfigService(
       new D1AiConfigRepository(env.DB),
