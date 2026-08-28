@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { Note } from "@nexus/contracts";
 import type { NoteListOptions, NotesClient } from "../data/notes-client";
 
@@ -75,6 +75,7 @@ export function useNotesListData(options: NotesListDataOptions): NotesListDataRe
     setCreatingNote,
   } = options;
   const [notes, setNotes] = useState<Note[]>([]);
+  const [notesOwnerWorkspaceId, setNotesOwnerWorkspaceId] = useState(workspaceId);
   const [notesLoading, setNotesLoading] = useState(Boolean(workspaceId));
   const [notesError, setNotesError] = useState<string | null>(null);
   const [notesNextCursor, setNotesNextCursor] = useState<string | null>(null);
@@ -82,20 +83,35 @@ export function useNotesListData(options: NotesListDataOptions): NotesListDataRe
   const pageControllerRef = useRef<AbortController | null>(null);
   const requestVersionRef = useRef(0);
   const workspaceIdRef = useRef(workspaceId);
+  const workspaceGenerationRef = useRef(0);
+
+  useLayoutEffect(() => {
+    if (workspaceIdRef.current === workspaceId) return;
+    workspaceIdRef.current = workspaceId;
+    workspaceGenerationRef.current += 1;
+    requestVersionRef.current += 1;
+    pageControllerRef.current?.abort();
+    pageControllerRef.current = null;
+    setNotesOwnerWorkspaceId(workspaceId);
+    setNotes([]);
+    setNotesNextCursor(null);
+    setNotesPageLoading(false);
+    setNotesLoading(Boolean(workspaceId));
+    setNotesError(null);
+    activeDraftIdRef.current = null;
+    activationInFlight.current = false;
+    userSelectedNote.current = false;
+    setSelectedNoteId(null);
+    setCreatingNote(false);
+  }, [activeDraftIdRef, activationInFlight, setCreatingNote, setSelectedNoteId, userSelectedNote, workspaceId]);
 
   useEffect(() => {
-    const workspaceChanged = workspaceIdRef.current !== workspaceId;
-    workspaceIdRef.current = workspaceId;
     pageControllerRef.current?.abort();
     pageControllerRef.current = null;
     const requestVersion = ++requestVersionRef.current;
+    const workspaceGeneration = workspaceGenerationRef.current;
     setNotesNextCursor(null);
     setNotesPageLoading(false);
-    if (workspaceChanged) {
-      setNotes([]);
-      setSelectedNoteId(null);
-      setCreatingNote(false);
-    }
     if (!workspaceId) {
       setNotes([]);
       setSelectedNoteId(null);
@@ -115,8 +131,12 @@ export function useNotesListData(options: NotesListDataOptions): NotesListDataRe
       signal: controller.signal,
       ...(debouncedNoteSearchQuery ? { query: debouncedNoteSearchQuery } : {}),
     };
+    const requestIsCurrent = () => !controller.signal.aborted
+      && requestVersionRef.current === requestVersion
+      && workspaceGenerationRef.current === workspaceGeneration
+      && workspaceIdRef.current === workspaceId;
     void notesClient.list(requestOptions).then((page) => {
-      if (controller.signal.aborted || requestVersionRef.current !== requestVersion) return;
+      if (!requestIsCurrent()) return;
       const activeNotes = page.items.filter((note) => noteMatchesListView(note, noteListView, todayDate));
       const installedNotes = [...installedNotesRef.current.values()].filter((note) => note.workspace_id === workspaceId
         && noteMatchesListView(note, noteListView, todayDate)
@@ -130,11 +150,11 @@ export function useNotesListData(options: NotesListDataOptions): NotesListDataRe
         setCreatingNote(false);
       }
     }).catch((error: unknown) => {
-      if (requestVersionRef.current === requestVersion && !isAbort(error, controller.signal)) {
+      if (requestIsCurrent() && !isAbort(error, controller.signal)) {
         setNotesError("笔记列表暂时无法加载。你仍可以尝试新建笔记。");
       }
     }).finally(() => {
-      if (!controller.signal.aborted && requestVersionRef.current === requestVersion) setNotesLoading(false);
+      if (requestIsCurrent()) setNotesLoading(false);
     });
 
     return () => {
@@ -146,11 +166,13 @@ export function useNotesListData(options: NotesListDataOptions): NotesListDataRe
   }, [activeDraftIdRef, activationInFlight, debouncedNoteSearchQuery, installedNotesRef, noteFolderFilter, noteListView, notesClient, refreshVersion, setCreatingNote, setSelectedNoteId, userSelectedNote, workspaceId]);
 
   const loadMoreNotes = useCallback(() => {
-    if (!workspaceId || !notesNextCursor || notesLoading || notesPageLoading) return;
+    if (!workspaceId || workspaceIdRef.current !== workspaceId || notesOwnerWorkspaceId !== workspaceId
+      || !notesNextCursor || notesLoading || notesPageLoading) return;
     pageControllerRef.current?.abort();
     const controller = new AbortController();
     pageControllerRef.current = controller;
     const requestVersion = ++requestVersionRef.current;
+    const workspaceGeneration = workspaceGenerationRef.current;
     const todayDate = localDateKey();
     const requestOptions: NoteListOptions = {
       ...optionsForView(noteListView, noteFolderFilter, todayDate),
@@ -158,9 +180,13 @@ export function useNotesListData(options: NotesListDataOptions): NotesListDataRe
       signal: controller.signal,
       ...(debouncedNoteSearchQuery ? { query: debouncedNoteSearchQuery } : {}),
     };
+    const requestIsCurrent = () => !controller.signal.aborted
+      && requestVersionRef.current === requestVersion
+      && workspaceGenerationRef.current === workspaceGeneration
+      && workspaceIdRef.current === workspaceId;
     setNotesPageLoading(true);
     void notesClient.list(requestOptions).then((page) => {
-      if (controller.signal.aborted || requestVersionRef.current !== requestVersion) return;
+      if (!requestIsCurrent()) return;
       setNotes((current) => {
         const byId = new Map(current.map((note) => [note.id, note]));
         page.items.forEach((note) => byId.set(note.id, note));
@@ -168,13 +194,23 @@ export function useNotesListData(options: NotesListDataOptions): NotesListDataRe
       });
       setNotesNextCursor(page.next_cursor);
     }).catch((error: unknown) => {
-      if (requestVersionRef.current === requestVersion && !isAbort(error, controller.signal)) setNotesError("更多笔记暂时无法加载，请重试。");
+      if (requestIsCurrent() && !isAbort(error, controller.signal)) setNotesError("更多笔记暂时无法加载，请重试。");
     }).finally(() => {
-      if (requestVersionRef.current !== requestVersion || controller.signal.aborted) return;
+      if (!requestIsCurrent()) return;
       pageControllerRef.current = null;
       setNotesPageLoading(false);
     });
-  }, [debouncedNoteSearchQuery, noteFolderFilter, noteListView, notesClient, notesLoading, notesNextCursor, notesPageLoading, workspaceId]);
+  }, [debouncedNoteSearchQuery, noteFolderFilter, noteListView, notesClient, notesLoading, notesNextCursor, notesOwnerWorkspaceId, notesPageLoading, workspaceId]);
 
-  return { notes, setNotes, notesLoading, notesError, setNotesError, notesNextCursor, notesPageLoading, loadMoreNotes };
+  const ownsCurrentWorkspace = notesOwnerWorkspaceId === workspaceId;
+  return {
+    notes: ownsCurrentWorkspace ? notes : [],
+    setNotes,
+    notesLoading: ownsCurrentWorkspace ? notesLoading : Boolean(workspaceId),
+    notesError: ownsCurrentWorkspace ? notesError : null,
+    setNotesError,
+    notesNextCursor: ownsCurrentWorkspace ? notesNextCursor : null,
+    notesPageLoading: ownsCurrentWorkspace ? notesPageLoading : false,
+    loadMoreNotes,
+  };
 }

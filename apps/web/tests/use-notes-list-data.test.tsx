@@ -1,7 +1,9 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, render, renderHook, waitFor } from "@testing-library/react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { Note } from "@nexus/contracts";
 import { useNotesListData } from "../src/app/use-notes-list-data";
+import type { NotesClient } from "../src/data/notes-client";
 
 const note = (id: string, title: string, workspaceId = "ws-1"): Note => ({
   id,
@@ -30,6 +32,104 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+interface NotesHarnessInitialState {
+  selectedNoteId: string | null;
+  creatingNote: boolean;
+  activeDraftId: string | null;
+  activationInFlight: boolean;
+  userSelectedNote: boolean;
+}
+
+interface NotesHarnessSnapshot extends NotesHarnessInitialState {
+  notes: Note[];
+  notesLoading: boolean;
+  notesError: string | null;
+  notesNextCursor: string | null;
+  notesPageLoading: boolean;
+}
+
+interface NotesHarnessProps {
+  notesClient: Pick<NotesClient, "list">;
+  workspaceId: string;
+  refreshVersion: number;
+  initialState: NotesHarnessInitialState;
+  onRender(snapshot: NotesHarnessSnapshot): void;
+  onLayout(snapshot: NotesHarnessSnapshot): void;
+}
+
+function NotesHarness({
+  notesClient,
+  workspaceId,
+  refreshVersion,
+  initialState,
+  onRender,
+  onLayout,
+}: NotesHarnessProps) {
+  const [selectedNoteId, setSelectedNoteId] = useState(initialState.selectedNoteId);
+  const [creatingNote, setCreatingNote] = useState(initialState.creatingNote);
+  const installedNotesRef = useRef(new Map<string, Note>());
+  const activeDraftIdRef = useRef(initialState.activeDraftId);
+  const activationInFlight = useRef(initialState.activationInFlight);
+  const userSelectedNote = useRef(initialState.userSelectedNote);
+  const { notes, notesLoading, notesError, notesNextCursor, notesPageLoading } = useNotesListData({
+    notesClient,
+    workspaceId,
+    noteListView: "all",
+    noteFolderFilter: null,
+    debouncedNoteSearchQuery: "",
+    refreshVersion,
+    installedNotesRef,
+    activeDraftIdRef,
+    activationInFlight,
+    userSelectedNote,
+    setSelectedNoteId,
+    setCreatingNote,
+  });
+  const snapshot = {
+    notes: [...notes],
+    notesLoading,
+    notesError,
+    notesNextCursor,
+    notesPageLoading,
+    selectedNoteId,
+    creatingNote,
+    activeDraftId: activeDraftIdRef.current,
+    activationInFlight: activationInFlight.current,
+    userSelectedNote: userSelectedNote.current,
+  } satisfies NotesHarnessSnapshot;
+  onRender(snapshot);
+  useLayoutEffect(() => {
+    onLayout({
+      ...snapshot,
+      activeDraftId: activeDraftIdRef.current,
+      activationInFlight: activationInFlight.current,
+      userSelectedNote: userSelectedNote.current,
+    });
+  }, [
+    onLayout,
+    workspaceId,
+    notes,
+    notesLoading,
+    notesError,
+    notesNextCursor,
+    notesPageLoading,
+    selectedNoteId,
+    creatingNote,
+    activeDraftIdRef.current,
+    activationInFlight.current,
+    userSelectedNote.current,
+  ]);
+  return null;
+}
+
+const workspaceSwitchInitialState: NotesHarnessInitialState = {
+  selectedNoteId: "old-selection",
+  creatingNote: true,
+  activeDraftId: "old-draft",
+  activationInFlight: true,
+  userSelectedNote: true,
+};
 
 describe("useNotesListData", () => {
   it("loads the first page and appends a cursor page with the active filters", async () => {
@@ -253,5 +353,152 @@ describe("useNotesListData", () => {
 
     newRequest.resolve({ items: [note("new-note", "New", "ws-new")], next_cursor: null });
     await waitFor(() => expect(result.current.notes).toHaveLength(1));
+  });
+
+  it("hides old notes in the workspace switch render and resets real selection markers before auto-selecting the new workspace", async () => {
+    const oldRefresh = deferred<{ items: Note[]; next_cursor: string | null }>();
+    const newWorkspace = deferred<{ items: Note[]; next_cursor: string | null }>();
+    const oldNote = note("note-old-real", "Old real workspace", "ws-old");
+    const lateOldNote = note("note-late-real", "Late old real workspace", "ws-old");
+    const newNote = note("note-new-real", "New real workspace", "ws-new");
+    const list = vi.fn()
+      .mockResolvedValueOnce({ items: [oldNote], next_cursor: "old-real-next" })
+      .mockReturnValueOnce(oldRefresh.promise)
+      .mockReturnValueOnce(newWorkspace.promise);
+    const rendered: NotesHarnessSnapshot[] = [];
+    const laidOut: NotesHarnessSnapshot[] = [];
+    const notesClient = { list } as Pick<NotesClient, "list">;
+    const view = render(
+      <NotesHarness
+        notesClient={notesClient}
+        workspaceId="ws-old"
+        refreshVersion={0}
+        initialState={workspaceSwitchInitialState}
+        onRender={(snapshot) => rendered.push(snapshot)}
+        onLayout={(snapshot) => laidOut.push(snapshot)}
+      />,
+    );
+
+    await waitFor(() => expect(rendered.some((snapshot) => snapshot.notes[0]?.id === oldNote.id)).toBe(true));
+
+    view.rerender(
+      <NotesHarness
+        notesClient={notesClient}
+        workspaceId="ws-old"
+        refreshVersion={1}
+        initialState={workspaceSwitchInitialState}
+        onRender={(snapshot) => rendered.push(snapshot)}
+        onLayout={(snapshot) => laidOut.push(snapshot)}
+      />,
+    );
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+
+    const switchRenderStart = rendered.length;
+    const switchLayoutStart = laidOut.length;
+    view.rerender(
+      <NotesHarness
+        notesClient={notesClient}
+        workspaceId="ws-new"
+        refreshVersion={1}
+        initialState={workspaceSwitchInitialState}
+        onRender={(snapshot) => rendered.push(snapshot)}
+        onLayout={(snapshot) => laidOut.push(snapshot)}
+      />,
+    );
+
+    expect(rendered.slice(switchRenderStart)[0]).toEqual(expect.objectContaining({
+      notes: [],
+      notesLoading: true,
+      notesNextCursor: null,
+      notesPageLoading: false,
+    }));
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(laidOut.slice(switchLayoutStart).some((snapshot) => (
+      snapshot.notes.length === 0
+      && snapshot.selectedNoteId === null
+      && snapshot.creatingNote === false
+      && snapshot.activeDraftId === null
+      && snapshot.activationInFlight === false
+      && snapshot.userSelectedNote === false
+    ))).toBe(true));
+
+    oldRefresh.resolve({ items: [lateOldNote], next_cursor: "late-real-next" });
+    await act(async () => { await oldRefresh.promise; });
+    expect(rendered.at(-1)?.notes).toEqual([]);
+    expect(rendered.at(-1)?.notesNextCursor).toBeNull();
+
+    newWorkspace.resolve({ items: [newNote], next_cursor: "new-real-next" });
+    await waitFor(() => expect(rendered.at(-1)?.notes).toEqual([newNote]));
+    expect(rendered.at(-1)).toEqual(expect.objectContaining({
+      selectedNoteId: "note-new-real",
+      creatingNote: false,
+      activeDraftId: null,
+      activationInFlight: false,
+      userSelectedNote: false,
+      notesNextCursor: "new-real-next",
+    }));
+  });
+
+  it("preserves real selection and draft markers through a same-workspace refresh", async () => {
+    const refreshed = deferred<{ items: Note[]; next_cursor: null }>();
+    const first = note("note-refresh-real", "Visible real note");
+    const next = note("note-refresh-new", "Updated real note");
+    const list = vi.fn()
+      .mockResolvedValueOnce({ items: [first], next_cursor: "refresh-real-next" })
+      .mockReturnValueOnce(refreshed.promise);
+    const rendered: NotesHarnessSnapshot[] = [];
+    const laidOut: NotesHarnessSnapshot[] = [];
+    const notesClient = { list } as Pick<NotesClient, "list">;
+    const view = render(
+      <NotesHarness
+        notesClient={notesClient}
+        workspaceId="ws-1"
+        refreshVersion={0}
+        initialState={workspaceSwitchInitialState}
+        onRender={(snapshot) => rendered.push(snapshot)}
+        onLayout={(snapshot) => laidOut.push(snapshot)}
+      />,
+    );
+
+    await waitFor(() => expect(rendered.at(-1)?.notes).toEqual([first]));
+    const beforeRefresh = laidOut.at(-1);
+    expect(beforeRefresh).toEqual(expect.objectContaining({
+      selectedNoteId: "old-selection",
+      creatingNote: true,
+      activeDraftId: "old-draft",
+      activationInFlight: true,
+      userSelectedNote: true,
+    }));
+
+    const refreshRenderStart = rendered.length;
+    view.rerender(
+      <NotesHarness
+        notesClient={notesClient}
+        workspaceId="ws-1"
+        refreshVersion={1}
+        initialState={workspaceSwitchInitialState}
+        onRender={(snapshot) => rendered.push(snapshot)}
+        onLayout={(snapshot) => laidOut.push(snapshot)}
+      />,
+    );
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    expect(rendered.slice(refreshRenderStart).some((snapshot) => (
+      snapshot.notes.length === 1
+      && snapshot.notes[0]?.id === first.id
+      && snapshot.selectedNoteId === "old-selection"
+      && snapshot.activeDraftId === "old-draft"
+      && snapshot.activationInFlight
+      && snapshot.userSelectedNote
+    ))).toBe(true);
+
+    refreshed.resolve({ items: [next], next_cursor: null });
+    await waitFor(() => expect(rendered.at(-1)?.notes).toEqual([next]));
+    expect(rendered.at(-1)).toEqual(expect.objectContaining({
+      selectedNoteId: "old-selection",
+      creatingNote: true,
+      activeDraftId: "old-draft",
+      activationInFlight: true,
+      userSelectedNote: true,
+    }));
   });
 });
