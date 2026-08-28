@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { WorkspaceQueryCache } from "../src/data/workspace-query-cache";
 
 type DataExports = Record<string, any>;
 
@@ -12,6 +13,26 @@ const filters = {
 };
 
 describe("KnowledgeClient", () => {
+  it("shares reminder pages across client instances and invalidates the domain after mutation", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async ({ method }: { method?: string }) => method
+      ? { reminder: { id: "reminder-1" } }
+      : { items: [], next_cursor: null }) };
+    const queryCache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const options = { userId: "user-1", queryCache, createId: () => "operation" };
+    const first = new data.KnowledgeClient(api, "ws-1", options);
+    const second = new data.KnowledgeClient(api, "ws-1", options);
+    const query = { status: "all", query: "review", limit: 25 } as const;
+
+    await first.listReminderPage(query);
+    await second.listReminderPage(query);
+    expect(api.request).toHaveBeenCalledOnce();
+
+    await first.snoozeReminder("reminder-1", { base_revision: 1, minutes: 10 });
+    await second.listReminderPage(query);
+    expect(api.request).toHaveBeenCalledTimes(3);
+  });
+
   it("runs cancellable deduplicated workspace searches with complete filters", async () => {
     const data = await loadData();
     expect(data.KnowledgeClient).toBeTypeOf("function");

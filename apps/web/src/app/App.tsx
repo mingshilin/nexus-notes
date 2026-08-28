@@ -36,6 +36,7 @@ import type { CollaborationCommentTarget, CollaborationShareTarget, Notification
 import { useWorkspaceClients } from "./use-workspace-clients";
 import { useWorkspaceNavigation } from "./use-workspace-navigation";
 import { WorkspaceShell } from "./WorkspaceShell";
+import { clearWorkspaceQueryCache } from "../data/workspace-query-cache";
 import { NotesDomain, type NotesDomainCallbacks, type NotesEditorState, type NotesOverviewState } from "./domains/NotesDomain";
 import { DatabaseDomain, type DatabaseDomainCallbacks, type DatabaseDomainSelection } from "./domains/DatabaseDomain";
 import { KnowledgeDomain } from "./domains/KnowledgeDomain";
@@ -283,7 +284,7 @@ function AuthenticatedWorkspace({
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
   const { activeDomain, requestedDomain, domainPending, navigate: navigateWorkspaceDomain } = useWorkspaceNavigation("notes");
   const [accountSubsection, setAccountSubsection] = useState<AccountSubsection>("overview");
-  const workspaceClients = useWorkspaceClients(apiClient, workspaceId ?? "");
+  const workspaceClients = useWorkspaceClients(apiClient, workspaceId ?? "", user.id);
   const collaborationClient = workspaceClients.collaboration;
   const databaseClient = workspaceClients.databases;
   const knowledgeClient = workspaceClients.knowledge;
@@ -299,6 +300,8 @@ function AuthenticatedWorkspace({
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [notes, setNotes] = useState<Note[]>([]);
   const [notesLoading, setNotesLoading] = useState(Boolean(workspaceId));
+  const [notesNextCursor, setNotesNextCursor] = useState<string | null>(null);
+  const [notesPageLoading, setNotesPageLoading] = useState(false);
   const [notesError, setNotesError] = useState<string | null>(null);
   const [notesRefreshVersion, setNotesRefreshVersion] = useState(0);
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -407,6 +410,8 @@ function AuthenticatedWorkspace({
   const [retryingIds, setRetryingIds] = useState<Set<string>>(new Set());
   const [refreshVersion, setRefreshVersion] = useState(0);
   const requestControllers = useRef(new Set<AbortController>());
+  const notesPageController = useRef<AbortController | null>(null);
+  const notesPageRequestVersion = useRef(0);
   const retryControllers = useRef(new Set<AbortController>());
   const databaseControllers = useRef(new Set<AbortController>());
   const databaseCache = useRef(new NormalizedCache());
@@ -1257,8 +1262,15 @@ function AuthenticatedWorkspace({
   }, []);
 
   useEffect(() => {
+    notesPageController.current?.abort();
+    notesPageController.current = null;
+    notesPageRequestVersion.current += 1;
+    setNotesNextCursor(null);
+    setNotesPageLoading(false);
     if (!workspaceId) {
       setNotes([]);
+      setNotesNextCursor(null);
+      setNotesPageLoading(false);
       setSelectedNoteId(null);
       setCreatingNote(false);
       setNotesLoading(false);
@@ -1268,6 +1280,7 @@ function AuthenticatedWorkspace({
       return undefined;
     }
     const controller = new AbortController();
+    const requestVersion = notesPageRequestVersion.current;
     setNotesLoading(true);
     setNotesError(null);
     const todayDate = localDateKey();
@@ -1289,7 +1302,7 @@ function AuthenticatedWorkspace({
       ? { ...listOptions, query: debouncedNoteSearchQuery }
       : listOptions;
     void notesClient.list(listOptionsWithSearch).then((page) => {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || notesPageRequestVersion.current !== requestVersion) return;
       const activeNotes = page.items.filter((note) => noteMatchesListView(note, noteListView, todayDate));
       const installedNotes = [...installedNotesRef.current.values()]
         .filter((note) => note.workspace_id === workspaceId
@@ -1298,6 +1311,7 @@ function AuthenticatedWorkspace({
           && (noteFolderFilter === null || note.folder_id === noteFolderFilter));
       const byId = new Map([...activeNotes, ...installedNotes].map((note) => [note.id, note]));
       setNotes([...byId.values()]);
+      setNotesNextCursor(page.next_cursor);
       if (!activeDraftIdRef.current && !activationInFlight.current && !userSelectedNote.current) {
         setSelectedNoteId((current) => userSelectedNote.current && current && byId.has(current)
           ? current
@@ -1305,12 +1319,63 @@ function AuthenticatedWorkspace({
         setCreatingNote(false);
       }
     }).catch((error: unknown) => {
-      if (!isAborted(error, controller.signal)) setNotesError("笔记列表暂时无法加载。你仍可以尝试新建笔记。");
+      if (notesPageRequestVersion.current === requestVersion && !isAborted(error, controller.signal)) {
+        setNotesError("笔记列表暂时无法加载。你仍可以尝试新建笔记。");
+      }
     }).finally(() => {
-      if (!controller.signal.aborted) setNotesLoading(false);
+      if (!controller.signal.aborted && notesPageRequestVersion.current === requestVersion) setNotesLoading(false);
     });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      if (notesPageController.current) notesPageController.current.abort();
+      notesPageController.current = null;
+      notesPageRequestVersion.current += 1;
+    };
   }, [apiClient, debouncedNoteSearchQuery, noteFolderFilter, noteListView, notesRefreshVersion, workspaceId]);
+
+  const loadMoreNotes = () => {
+    if (!workspaceId || !notesNextCursor || notesLoading || notesPageLoading) return;
+    notesPageController.current?.abort();
+    const controller = new AbortController();
+    notesPageController.current = controller;
+    const requestVersion = ++notesPageRequestVersion.current;
+    setNotesPageLoading(true);
+    const todayDate = localDateKey();
+    const selectedFolderId = noteListView === "all" ? noteFolderFilter ?? undefined : undefined;
+    const options = noteListView === "inbox"
+      ? { status: "active" as const, folderId: null, limit: 50 }
+      : noteListView === "today"
+        ? { status: "active" as const, dailyDate: todayDate, limit: 50 }
+        : noteListView === "favorites"
+          ? { status: "active" as const, favorite: true, limit: 50 }
+          : noteListView === "pinned"
+            ? { status: "active" as const, pinned: true, limit: 50 }
+            : noteListView === "archived"
+              ? { status: "archived" as const, limit: 50 }
+              : noteListView === "trash"
+                ? { status: "trashed" as const, limit: 50 }
+                : { status: "active" as const, folderId: selectedFolderId, limit: 50 };
+    void notesClient.list({
+      ...options,
+      cursor: notesNextCursor,
+      signal: controller.signal,
+      ...(debouncedNoteSearchQuery ? { query: debouncedNoteSearchQuery } : {}),
+    }).then((page) => {
+      if (controller.signal.aborted || notesPageRequestVersion.current !== requestVersion) return;
+      setNotes((current) => {
+        const byId = new Map(current.map((note) => [note.id, note]));
+        page.items.forEach((note) => byId.set(note.id, note));
+        return [...byId.values()];
+      });
+      setNotesNextCursor(page.next_cursor);
+    }).catch((error: unknown) => {
+      if (notesPageRequestVersion.current === requestVersion && !isAborted(error, controller.signal)) setNotesError("更多笔记暂时无法加载，请重试。");
+    }).finally(() => {
+      if (notesPageRequestVersion.current !== requestVersion || controller.signal.aborted) return;
+      notesPageController.current = null;
+      setNotesPageLoading(false);
+    });
+  };
 
   useEffect(() => {
     if (logoutPending || !workspaceId || notesLoading || activeDraftIdRef.current || userSelectedNote.current) return undefined;
@@ -1821,23 +1886,6 @@ function AuthenticatedWorkspace({
   useEffect(() => {
     setNavigationUser((current) => current.id === user.id && current.email === user.email && current.displayName === user.displayName ? current : user);
   }, [user.displayName, user.email, user.id]);
-  useEffect(() => {
-    const idleWindow = window as Window & {
-      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-      cancelIdleCallback?: (handle: number) => void;
-    };
-    const preload = () => {
-      for (const domain of ["databases", "knowledge", "reminders", "account"] as const) {
-        void preloadWorkspaceDomain(domain).catch(() => undefined);
-      }
-    };
-    const idleHandle = idleWindow.requestIdleCallback?.(preload, { timeout: 2_000 });
-    const timer = idleHandle === undefined ? window.setTimeout(preload, 500) : undefined;
-    return () => {
-      if (timer !== undefined) window.clearTimeout(timer);
-      if (idleHandle !== undefined) idleWindow.cancelIdleCallback?.(idleHandle);
-    };
-  }, []);
   const handleProfileChange = (next: Profile) => {
     setNavigationUser((current) => ({ ...current, email: next.email, displayName: next.display_name || next.email }));
   };
@@ -1909,6 +1957,7 @@ function AuthenticatedWorkspace({
     if (!workspaceId || nextWorkspaceId === workspaceId) return;
     try {
       await draftController.quiesce();
+      clearWorkspaceQueryCache(apiClient, { userId, workspaceId });
       await onWorkspaceChange(nextWorkspaceId);
       abortRecoveryRequests();
       abortRetryRequests();
@@ -1936,7 +1985,10 @@ function AuthenticatedWorkspace({
     onPersonalCenter: () => openAccountSubsection("personal"),
     onNotifications: toggleNotifications,
     onWorkspace: () => openAccountSubsection("workspace"),
-    onLogout,
+    onLogout: () => {
+      clearWorkspaceQueryCache(apiClient, { userId });
+      onLogout();
+    },
   };
   const navigation = <ProductNavigation {...productNavigationProps} mode="rail" />;
   const mobileNavigation = <ProductNavigation {...productNavigationProps} mode="mobile" />;
@@ -2095,6 +2147,11 @@ function AuthenticatedWorkspace({
           <p>{note.content.trim().slice(0, 80) || "空白笔记"}</p>
         </button>
       ))}
+      {notesNextCursor ? (
+        <button className="secondary-create-note note-list-load-more" type="button" disabled={notesPageLoading} onClick={loadMoreNotes}>
+          {notesPageLoading ? "正在加载更多笔记…" : "加载更多笔记"}
+        </button>
+      ) : null}
     </div>
   );
 
@@ -2353,8 +2410,12 @@ function AuthenticatedWorkspace({
     onDeleted,
     onProfileChange: handleProfileChange,
   };
+  const aiReadContext = {
+    selected_note_ids: selectedNoteId ? [selectedNoteId] : [],
+    selected_database_ids: selectedDatabaseId ? [selectedDatabaseId] : [],
+  } as const;
   const accountAndAIDomainSelection: AccountAndAIDomainSelection = activeDomain === "ai"
-    ? { kind: "ai", showStatus: true }
+    ? { kind: "ai", showStatus: true, readContext: aiReadContext }
     : {
         kind: "account",
         workspaces,

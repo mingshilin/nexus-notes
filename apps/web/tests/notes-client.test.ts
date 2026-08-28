@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { WorkspaceQueryCache } from "../src/data/workspace-query-cache";
 
 type DataExports = Record<string, any>;
 
@@ -29,6 +30,25 @@ afterEach(() => {
 });
 
 describe("NotesClient", () => {
+  it("shares list queries across workspace client instances and invalidates after a write", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async ({ method }: { method?: string }) => method
+      ? { note: { ...note, revision: 2 } }
+      : { items: [note], next_cursor: null }) };
+    const queryCache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const options = { userId: "user-1", queryCache, createId: () => "operation" };
+    const first = new data.NotesClient(api, "ws-1", options);
+    const second = new data.NotesClient(api, "ws-1", options);
+
+    await first.list({ status: "active", limit: 50 });
+    await second.list({ status: "active", limit: 50 });
+    expect(api.request).toHaveBeenCalledOnce();
+
+    await first.update("note-1", { base_revision: 1, title: "Updated", source: "manual" });
+    await second.list({ status: "active", limit: 50 });
+    expect(api.request).toHaveBeenCalledTimes(3);
+  });
+
   it("opens or creates a daily note as a non-retryable idempotent command", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async () => ({ note: { ...note, daily_date: "2026-08-23" } })) };

@@ -38,10 +38,13 @@ import type {
 } from "@nexus/contracts";
 
 import type { ApiClient } from "./api-client";
+import type { WorkspaceQueryCache } from "./workspace-query-cache";
 
 export interface DatabaseClientOptions {
-  createId(): string;
-  now(): number;
+  createId?(): string;
+  now?(): number;
+  userId?: string;
+  queryCache?: WorkspaceQueryCache;
 }
 
 export interface DatabaseBundle {
@@ -70,6 +73,8 @@ const DATABASE_CACHE_TTL_MS = 2 * 60_000;
 export class DatabaseClient {
   private readonly createId: () => string;
   private readonly now: () => number;
+  private readonly userId?: string;
+  private readonly queryCache?: WorkspaceQueryCache;
   private readonly cache = new Map<string, DatabaseCacheEntry<unknown>>();
   private readonly latestCacheCommit = new Map<string, number>();
   private cacheGeneration = 0;
@@ -82,29 +87,41 @@ export class DatabaseClient {
   ) {
     this.createId = options.createId ?? (() => crypto.randomUUID());
     this.now = options.now ?? (() => Date.now());
+    this.userId = options.userId;
+    this.queryCache = options.queryCache;
   }
 
   listDatabases(signal?: AbortSignal) {
-    return this.cached("databases", async () => {
-      const { items } = await this.query<{ items: Database[] }>("/api/v2/databases", `databases:${this.workspaceId}`, signal);
-      return items;
-    }, signal);
+    const load = (requestSignal?: AbortSignal) => this.query<{ items: Database[] }>(
+      "/api/v2/databases",
+      `databases:${this.workspaceId}`,
+      requestSignal,
+    ).then(({ items }) => items);
+    const shared = this.shared("databases", load, signal);
+    if (shared) return shared;
+    return this.cached("databases", load, signal);
   }
 
   getDatabase(databaseId: string, signal?: AbortSignal) {
-    return this.cached(`database:${databaseId}`, () => this.query<DatabaseBundle>(
+    const load = (requestSignal?: AbortSignal) => this.query<DatabaseBundle>(
         `/api/v2/databases/${encodeURIComponent(databaseId)}`,
         `database:${this.workspaceId}:${databaseId}`,
-        signal,
-      ), signal);
+        requestSignal,
+      );
+    const shared = this.shared(`database:${databaseId}`, load, signal);
+    if (shared) return shared;
+    return this.cached(`database:${databaseId}`, load, signal);
   }
 
   getStats(databaseId: string, signal?: AbortSignal) {
-    return this.cached(`database-stats:${databaseId}`, () => this.query<DatabaseStats>(
+    const load = (requestSignal?: AbortSignal) => this.query<DatabaseStats>(
       `${this.databasePath(databaseId)}/stats`,
       `database-stats:${this.workspaceId}:${databaseId}`,
-      signal,
-    ), signal);
+      requestSignal,
+    );
+    const shared = this.shared(`database-stats:${databaseId}`, load, signal);
+    if (shared) return shared;
+    return this.cached(`database-stats:${databaseId}`, load, signal);
   }
 
   bootstrap(options: { databaseId?: string; limit?: number; signal?: AbortSignal } = {}) {
@@ -113,16 +130,17 @@ export class DatabaseClient {
     params.set("limit", String(options.limit ?? 50));
     const key = `bootstrap:${options.databaseId ?? "first"}:${options.limit ?? 50}`;
     const generation = this.cacheGeneration;
-    return this.cached(key, async () => {
-      return this.query<DatabaseBootstrap>(
-        `/api/v2/databases/bootstrap?${params}`,
-        `database-bootstrap:${this.workspaceId}:${key}`,
-        options.signal,
-      );
-    }, options.signal, generation, (value, requestToken) => {
-      this.commitCache("databases", value.items, requestToken, generation, options.signal);
+    const load = (requestSignal?: AbortSignal) => this.query<DatabaseBootstrap>(
+      `/api/v2/databases/bootstrap?${params}`,
+      `database-bootstrap:${this.workspaceId}:${key}`,
+      requestSignal,
+    );
+    const shared = this.shared(key, load, options.signal);
+    if (shared) return shared;
+    return this.cached(key, load, options.signal, generation, (value, requestToken) => {
+      this.commitCache("databases", value.items, requestToken, generation);
       if (value.bundle) {
-        this.commitCache(`database:${value.bundle.database.id}`, value.bundle, requestToken, generation, options.signal);
+        this.commitCache(`database:${value.bundle.database.id}`, value.bundle, requestToken, generation);
       }
     });
   }
@@ -354,13 +372,14 @@ export class DatabaseClient {
       this.cacheGeneration += 1;
       this.cache.clear();
       this.latestCacheCommit.clear();
+      this.queryCache?.invalidate({ userId: this.userId, workspaceId: this.workspaceId, domain: "databases" });
       return value;
     });
   }
 
   private cached<T>(
     key: string,
-    load: () => Promise<T>,
+    load: (signal?: AbortSignal) => Promise<T>,
     signal?: AbortSignal,
     generation = this.cacheGeneration,
     onCommit?: (value: T, requestToken: number) => void,
@@ -372,7 +391,7 @@ export class DatabaseClient {
         const requestToken = this.beginCacheRequest(key);
         const refreshPromise = load().then((value) => {
           const active = this.cache.get(key) as DatabaseCacheEntry<T> | undefined;
-          if (active === current && this.commitCache(key, value, requestToken, generation, signal, current)) {
+          if (active === current && this.commitCache(key, value, requestToken, generation, undefined, current)) {
             onCommit?.(value, requestToken);
           }
         }).catch(() => undefined).finally(() => {
@@ -385,7 +404,7 @@ export class DatabaseClient {
       return Promise.resolve(current.value);
     }
     const requestToken = this.beginCacheRequest(key);
-    return load().then((value) => {
+    return load(signal).then((value) => {
       if (this.commitCache(key, value, requestToken, generation, signal)) {
         onCommit?.(value, requestToken);
       }
@@ -432,5 +451,14 @@ export class DatabaseClient {
 
   private headers() {
     return { "x-workspace-id": this.workspaceId };
+  }
+
+  private shared<T>(query: string, load: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal) {
+    if (!this.queryCache || !this.userId) return null;
+    return this.queryCache.get(
+      { userId: this.userId, workspaceId: this.workspaceId, domain: "databases", query },
+      load,
+      { ttlMs: DATABASE_CACHE_TTL_MS, signal },
+    );
   }
 }

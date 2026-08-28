@@ -135,6 +135,7 @@ button { color: inherit; }
 .quick-capture-actions button:disabled { cursor: not-allowed; opacity: .5; }
 .note-empty-state { display: grid; gap: 12px; padding: 16px 0; }
 .note-empty-state p { margin: 0; }
+.note-list-load-more { width: 100% !important; margin-top: 10px; }
 .search-field { display: flex; height: 40px; align-items: center; gap: 8px; margin-bottom: 5px; padding: 0 9px 0 12px; border: 1px solid var(--border-subtle); border-radius: 13px; color: hsl(var(--muted-foreground)); background: rgba(255,255,255,.58); }
 .search-field input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; }
 .search-clear-button { display: inline-grid; width: 26px; height: 26px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 8px; color: hsl(var(--muted-foreground)); background: transparent; cursor: pointer; }
@@ -324,6 +325,11 @@ button { color: inherit; }
 .ai-chat-pending { margin: 0; color: var(--nexus-muted); }
 .ai-chat-config-status { margin: 0; border-radius: 12px; padding: 10px 12px; color: #8a5a00; background: #fff5d6; font-size: 12px; line-height: 1.5; }
 .ai-chat-config-status.ready { color: #176b45; background: rgba(52,199,89,.1); }
+.ai-chat-context { display: grid; gap: 7px; margin: 0; border: 1px solid rgba(0,122,255,.14); border-radius: 14px; padding: 11px 13px; color: hsl(var(--muted-foreground)); background: rgba(0,122,255,.045); }
+.ai-chat-context legend { padding: 0 4px; color: hsl(var(--foreground)); font-size: 12px; font-weight: 750; }
+.ai-chat-context p { margin: 0; font-size: 11px; line-height: 1.5; }
+.ai-chat-context label { display: inline-flex; align-items: center; gap: 7px; color: hsl(var(--foreground)); font-size: 12px; font-weight: 650; }
+.ai-chat-context input { accent-color: var(--nexus-accent); }
 .ai-chat-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; }
 .ai-chat-form textarea { width: 100%; min-height: 82px; resize: vertical; border: 1px solid rgba(15,23,42,.12); border-radius: 16px; padding: 13px 14px; background: rgba(255,255,255,.78); line-height: 1.55; }
 .ai-chat-submit-area { display: grid; justify-items: end; gap: 8px; }

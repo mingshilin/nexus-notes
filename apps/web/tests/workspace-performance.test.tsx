@@ -42,6 +42,7 @@ vi.mock("../src/app/workspace-domain-loader", async (importOriginal) => {
 
 import { App } from "../src/app/App";
 import { useWorkspaceClients } from "../src/app/use-workspace-clients";
+import { clearWorkspaceQueryCache } from "../src/data/workspace-query-cache";
 import { useWorkspaceNavigation } from "../src/app/use-workspace-navigation";
 import { createDomainPreloader } from "../src/app/workspace-domain-loader";
 import { WorkspaceShell } from "../src/app/WorkspaceShell";
@@ -107,6 +108,25 @@ describe("workspace performance foundation", () => {
     }));
   });
 
+  it("reuses workspace queries after a client hook remount and isolates another user", async () => {
+    const request = vi.fn(async () => ({ items: [{ id: "db-1", name: "Projects" }] }));
+    const apiClient = { request } as never;
+    const first = renderHook(() => useWorkspaceClients(apiClient, "ws-1", "user-1"));
+
+    await first.result.current.databases.listDatabases();
+    first.unmount();
+    const remounted = renderHook(() => useWorkspaceClients(apiClient, "ws-1", "user-1"));
+    await remounted.result.current.databases.listDatabases();
+
+    expect(request).toHaveBeenCalledOnce();
+
+    const otherUser = renderHook(() => useWorkspaceClients(apiClient, "ws-1", "user-2"));
+    await otherUser.result.current.databases.listDatabases();
+    expect(request).toHaveBeenCalledTimes(2);
+
+    clearWorkspaceQueryCache(apiClient as object);
+  });
+
   it("deduplicates domain preload work and retries after a failed download", async () => {
     let rejectFirst!: (reason?: unknown) => void;
     const failed = new Promise<unknown>((_resolve, reject) => { rejectFirst = reject; });
@@ -144,6 +164,23 @@ describe("workspace performance foundation", () => {
 
     expect(onPrefetch).toHaveBeenCalledWith("databases");
     expect(onPrefetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not eagerly preload every heavy destination after the workspace mounts", async () => {
+    const authClient = {
+      session: vi.fn(async () => ({
+        user,
+        workspaces: [{ id: "ws-1", name: "Personal", slug: "personal", role: "owner" as const, revision: 1 }],
+        active_workspace_id: "ws-1",
+      })),
+    };
+    const apiClient = { request: vi.fn(async () => ({ items: [], next_cursor: null })) };
+
+    render(<App authClient={authClient as never} apiClient={apiClient as never} turnstileSiteKey="test" />);
+    await screen.findByRole("heading", { name: "Public Beta 重写计划" });
+    await new Promise((resolve) => setTimeout(resolve, 650));
+
+    expect(lazyDomainModules.preloadWorkspaceDomain).not.toHaveBeenCalled();
   });
 
   it("shows the requested page shell instead of retaining a heavy previous domain", () => {

@@ -102,7 +102,7 @@ describe("AI note lifecycle actions", () => {
     });
   });
 
-  it("keeps trusted reminders and notifications confirmation-gated", async () => {
+  it("auto-runs trusted reminders and notifications as low-risk actions", async () => {
     const { orchestrator } = await setup();
     const reminder = await orchestrator.propose(context(), {
       name: "create_reminder",
@@ -113,8 +113,8 @@ describe("AI note lifecycle actions", () => {
       arguments: { title: "Notice", body_text: "Review this" },
     }, { trusted: true });
 
-    expect(reminder.requires_confirmation).toBe(true);
-    expect(notification.requires_confirmation).toBe(true);
+    expect(reminder.requires_confirmation).toBe(false);
+    expect(notification.requires_confirmation).toBe(false);
   });
 
   it("rejects unknown top-level and patch fields instead of silently dropping them", async () => {

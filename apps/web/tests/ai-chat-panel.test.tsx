@@ -99,6 +99,36 @@ describe("AIChatPanel", () => {
     expect(await screen.findByText("先处理最重要的一项。" )).toBeInTheDocument();
   });
 
+  it("sends only the selected note and database context until workspace search is enabled", async () => {
+    const client = {
+      request: vi.fn(async () => ({ message: "已读取当前内容。", model: "beta-model" })),
+    };
+
+    render(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-1"], selected_database_ids: ["db-1"] }}
+    />);
+    expect(screen.getByRole("checkbox", { name: "允许搜索工作区" })).not.toBeChecked();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "总结当前内容" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/ai/chat",
+      body: {
+        messages: [{ role: "user", content: "总结当前内容" }],
+        read_context: {
+          selected_note_ids: ["note-1"],
+          selected_database_ids: ["db-1"],
+          allow_workspace_search: false,
+        },
+      },
+    })));
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "允许搜索工作区" }));
+    expect(screen.getByRole("checkbox", { name: "允许搜索工作区" })).toBeChecked();
+  });
+
   it("clears the transcript when the workspace changes", async () => {
     const client = {
       request: vi.fn(async (input: { path: string }) => input.path === "/api/v2/ai/chat"

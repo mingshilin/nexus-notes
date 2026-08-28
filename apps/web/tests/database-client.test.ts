@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { serializeDatabaseCsv } from "@nexus/domain";
+import { WorkspaceQueryCache } from "../src/data/workspace-query-cache";
 
 async function loadData() {
   return await import("../src/data") as Record<string, any>;
@@ -16,6 +17,26 @@ function deferred<T>() {
 }
 
 describe("DatabaseClient", () => {
+  it("shares workspace database reads across client instances while isolating caller aborts", async () => {
+    const pending = deferred<{ items: Array<{ id: string; name: string }> }>();
+    const api = { request: vi.fn(() => pending.promise) };
+    const cache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const firstClient = new (await loadData()).DatabaseClient(api, "ws-1", { userId: "user-1", queryCache: cache });
+    const secondClient = new (await loadData()).DatabaseClient(api, "ws-1", { userId: "user-1", queryCache: cache });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+
+    const first = firstClient.listDatabases(firstController.signal);
+    const second = secondClient.listDatabases(secondController.signal);
+
+    expect(api.request).toHaveBeenCalledOnce();
+    firstController.abort();
+    pending.resolve({ items: [{ id: "db-1", name: "Projects" }] });
+
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    await expect(second).resolves.toEqual([{ id: "db-1", name: "Projects" }]);
+  });
+
   it("caches a database bootstrap for two minutes and invalidates it after a mutation", async () => {
     const data = await loadData();
     let now = 1_000;

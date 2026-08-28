@@ -27,12 +27,16 @@ import {
 } from "@nexus/contracts";
 import { z } from "zod";
 import type { ApiClient } from "./api-client";
+import type { WorkspaceQueryCache } from "./workspace-query-cache";
 
 type ProfileApi = Pick<ApiClient, "request">;
 
 export interface ProfileClientOptions {
   createId?: () => string;
   now?: () => number;
+  userId?: string;
+  workspaceId?: string;
+  queryCache?: WorkspaceQueryCache;
 }
 
 const AcceptedSchema = z.object({ accepted: z.literal(true) }).strict();
@@ -55,12 +59,18 @@ interface CacheEntry<T> {
 export class ProfileClient {
   private readonly createId: () => string;
   private readonly now: () => number;
+  private readonly userId?: string;
+  private readonly workspaceId: string;
+  private readonly queryCache?: WorkspaceQueryCache;
   private overviewCache: CacheEntry<AccountOverview> | null = null;
   private preferencesCache: CacheEntry<UserPreferences> | null = null;
 
   constructor(private readonly client: ProfileApi, options: ProfileClientOptions = {}) {
     this.createId = options.createId ?? (() => crypto.randomUUID());
     this.now = options.now ?? (() => Date.now());
+    this.userId = options.userId;
+    this.workspaceId = options.workspaceId ?? "account";
+    this.queryCache = options.queryCache;
   }
 
   getProfile(signal?: AbortSignal): Promise<Profile> {
@@ -120,16 +130,30 @@ export class ProfileClient {
   }
 
   getOverview(signal?: AbortSignal) {
+    const load = (requestSignal?: AbortSignal) => this.query<unknown>(
+      "/api/v2/profile/overview",
+      "profile:overview",
+      requestSignal,
+    ).then((value) => AccountOverviewSchema.parse(value));
+    const shared = this.shared("overview", load, signal);
+    if (shared) return shared;
     return this.cached(this.overviewCache, 5 * 60_000, async () => {
-      const value = AccountOverviewSchema.parse(await this.query<unknown>("/api/v2/profile/overview", "profile:overview", signal));
+      const value = await load(signal);
       this.overviewCache = { value, expiresAt: this.now() + 5 * 60_000 };
       return value;
     });
   }
 
   getPreferences(signal?: AbortSignal) {
+    const load = (requestSignal?: AbortSignal) => this.query<unknown>(
+      "/api/v2/profile/preferences",
+      "profile:preferences",
+      requestSignal,
+    ).then((value) => UserPreferencesSchema.parse(value));
+    const shared = this.shared("preferences", load, signal);
+    if (shared) return shared;
     return this.cached(this.preferencesCache, 5 * 60_000, async () => {
-      const value = UserPreferencesSchema.parse(await this.query<unknown>("/api/v2/profile/preferences", "profile:preferences", signal));
+      const value = await load(signal);
       this.preferencesCache = { value, expiresAt: this.now() + 5 * 60_000 };
       return value;
     });
@@ -144,6 +168,7 @@ export class ProfileClient {
     ));
     this.preferencesCache = null;
     this.overviewCache = null;
+    this.invalidateAccountCache();
     return value;
   }
 
@@ -189,6 +214,19 @@ export class ProfileClient {
     return load();
   }
 
+  private shared<T>(query: string, load: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal) {
+    if (!this.queryCache || !this.userId) return null;
+    return this.queryCache.get(
+      { userId: this.userId, workspaceId: this.workspaceId, domain: "account", query },
+      (requestSignal) => load(requestSignal),
+      { ttlMs: 5 * 60_000, signal },
+    );
+  }
+
+  private invalidateAccountCache() {
+    this.queryCache?.invalidate({ userId: this.userId, workspaceId: this.workspaceId, domain: "account" });
+  }
+
   private query<T>(path: string, dedupeKey: string, signal?: AbortSignal) {
     return this.client.request<T>({
       path,
@@ -205,6 +243,11 @@ export class ProfileClient {
       body,
       requestClass: "command",
       policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId(), signal },
+    }).then((value) => {
+      this.overviewCache = null;
+      this.preferencesCache = null;
+      this.invalidateAccountCache();
+      return value;
     });
   }
 }
