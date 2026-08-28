@@ -19,6 +19,8 @@ interface ConnectionRow {
   refresh_token_iv: string;
   refresh_token_key_version: number;
   sync_cursor: string | null;
+  sync_from: string | null;
+  sync_to: string | null;
   last_synced_at: string | null;
   last_error_code: string | null;
   created_at: string;
@@ -37,6 +39,19 @@ interface EventRow {
   all_day: number;
   status: CalendarEvent["status"];
   updated_at: string;
+}
+
+function calendarEventId(connectionId: string, providerEventId: string) {
+  const source = `${connectionId}:${providerEventId}`;
+  const hashes = [2_166_136_261, 2_169_136_261, 2_172_136_261, 2_175_136_261].map((seed) => {
+    let hash = seed;
+    for (const character of source) {
+      hash ^= character.codePointAt(0) ?? 0;
+      hash = Math.imul(hash, 16_777_619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
+  });
+  return `calendar-event-${hashes.join("")}`;
 }
 
 function summary(row: Pick<ConnectionRow, "id" | "provider" | "status" | "last_synced_at" | "last_error_code">): CalendarConnectionSummary {
@@ -60,6 +75,8 @@ function stored(row: ConnectionRow): StoredCalendarConnection {
     refreshTokenIv: row.refresh_token_iv,
     refreshTokenKeyVersion: row.refresh_token_key_version,
     syncCursor: row.sync_cursor,
+    syncFrom: row.sync_from,
+    syncTo: row.sync_to,
     lastSyncedAt: row.last_synced_at,
     lastErrorCode: row.last_error_code,
   };
@@ -123,14 +140,16 @@ export class D1CalendarRepository implements CalendarConnectionRepository {
       `INSERT INTO calendar_connections (
          id, user_id, provider, provider_account_id, status,
          refresh_token_ciphertext, refresh_token_iv, refresh_token_key_version,
-         sync_cursor, last_synced_at, last_error_code, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, NULL, NULL, NULL, ?, ?)
+         sync_cursor, sync_from, sync_to, last_synced_at, last_error_code, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)
        ON CONFLICT(user_id, provider, provider_account_id) DO UPDATE SET
          status = 'active',
          refresh_token_ciphertext = excluded.refresh_token_ciphertext,
          refresh_token_iv = excluded.refresh_token_iv,
          refresh_token_key_version = excluded.refresh_token_key_version,
          sync_cursor = NULL,
+         sync_from = NULL,
+         sync_to = NULL,
          last_synced_at = NULL,
          last_error_code = NULL,
          updated_at = excluded.updated_at
@@ -162,7 +181,7 @@ export class D1CalendarRepository implements CalendarConnectionRepository {
     const row = await this.db.prepare(
       `SELECT id, user_id, provider, provider_account_id, status,
               refresh_token_ciphertext, refresh_token_iv, refresh_token_key_version,
-              sync_cursor, last_synced_at, last_error_code, created_at, updated_at
+              sync_cursor, sync_from, sync_to, last_synced_at, last_error_code, created_at, updated_at
        FROM calendar_connections WHERE user_id = ? AND id = ? LIMIT 1`,
     ).bind(userId, connectionId).first<ConnectionRow>();
     return row ? stored(row) : null;
@@ -171,23 +190,30 @@ export class D1CalendarRepository implements CalendarConnectionRepository {
   async markSync(userId: string, connectionId: string, input: {
     status: "active" | "error";
     syncCursor: string | null;
+    syncFrom: string | null;
+    syncTo: string | null;
     lastSyncedAt: string | null;
     lastErrorCode: string | null;
     now: string;
   }) {
     const row = await this.db.prepare(
       `UPDATE calendar_connections
-       SET status = ?, sync_cursor = ?, last_synced_at = ?, last_error_code = ?, updated_at = ?
+       SET status = ?, sync_cursor = ?, sync_from = ?, sync_to = ?, last_synced_at = ?, last_error_code = ?, updated_at = ?
        WHERE user_id = ? AND id = ?
+         AND ((? = 'active' AND status = 'active') OR (? = 'error' AND status IN ('active', 'error')))
        RETURNING id, provider, status, last_synced_at, last_error_code`,
     ).bind(
       input.status,
       input.syncCursor,
+      input.syncFrom,
+      input.syncTo,
       input.lastSyncedAt,
       input.lastErrorCode,
       input.now,
       userId,
       connectionId,
+      input.status,
+      input.status,
     ).first<Pick<ConnectionRow, "id" | "provider" | "status" | "last_synced_at" | "last_error_code">>();
     return row ? summary(row) : null;
   }
@@ -209,16 +235,20 @@ export class D1CalendarRepository implements CalendarConnectionRepository {
 
   async upsertEvents(userId: string, connectionId: string, events: CalendarEvent[]) {
     const connection = await this.db.prepare(
-      "SELECT provider FROM calendar_connections WHERE id = ? AND user_id = ? LIMIT 1",
+      "SELECT provider FROM calendar_connections WHERE id = ? AND user_id = ? AND status = 'active' LIMIT 1",
     ).bind(connectionId, userId).first<{ provider: CalendarProvider }>();
-    if (!connection) throw new Error("CALENDAR_CONNECTION_NOT_FOUND");
+    if (!connection) return false;
     const rows = events.slice(0, 500);
     for (let offset = 0; offset < rows.length; offset += 100) {
       const statements = rows.slice(offset, offset + 100).map((item) => this.db.prepare(
         `INSERT INTO calendar_events (
            id, connection_id, user_id, provider, provider_event_id, title,
            starts_at, ends_at, timezone, all_day, status, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM calendar_connections c
+           WHERE c.id = ? AND c.user_id = ? AND c.status = 'active'
+         )
          ON CONFLICT(connection_id, provider_event_id) DO UPDATE SET
            title = excluded.title,
            starts_at = excluded.starts_at,
@@ -228,7 +258,7 @@ export class D1CalendarRepository implements CalendarConnectionRepository {
            status = excluded.status,
            updated_at = excluded.updated_at`,
       ).bind(
-        item.id,
+        calendarEventId(connectionId, item.provider_event_id),
         connectionId,
         userId,
         connection.provider,
@@ -240,9 +270,22 @@ export class D1CalendarRepository implements CalendarConnectionRepository {
         item.all_day ? 1 : 0,
         item.status,
         item.updated_at,
+        connectionId,
+        userId,
       ));
       if (statements.length > 0) await this.db.batch(statements);
     }
+    return true;
+  }
+
+  async removeEvents(userId: string, connectionId: string, providerEventIds: string[]) {
+    const ids = [...new Set(providerEventIds)].slice(0, 500);
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => "?").join(", ");
+    await this.db.prepare(
+      `DELETE FROM calendar_events
+       WHERE user_id = ? AND connection_id = ? AND provider_event_id IN (${placeholders})`,
+    ).bind(userId, connectionId, ...ids).run();
   }
 
   async listEvents(userId: string, query: { from: string; to: string; connection_id?: string }) {
@@ -272,7 +315,7 @@ export class D1CalendarRepository implements CalendarConnectionRepository {
       this.db.prepare(
         `UPDATE calendar_connections
          SET status = 'revoked', refresh_token_ciphertext = '', refresh_token_iv = '', sync_cursor = NULL,
-             last_error_code = NULL, updated_at = ?
+             sync_from = NULL, sync_to = NULL, last_error_code = NULL, updated_at = ?
          WHERE user_id = ? AND id = ?`,
       ).bind(now, userId, connectionId),
       this.db.prepare("DELETE FROM calendar_events WHERE user_id = ? AND connection_id = ?").bind(userId, connectionId),

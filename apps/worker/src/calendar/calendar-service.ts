@@ -29,7 +29,7 @@ export interface CalendarProviderClient {
     accessToken: string;
     query: CalendarEventsQuery;
     cursor: string | null;
-  }, signal: AbortSignal): Promise<{ events: CalendarEvent[]; nextCursor: string | null }>;
+  }, signal: AbortSignal): Promise<{ events: CalendarEvent[]; nextCursor: string | null; cancelledEventIds?: string[] }>;
 }
 
 export interface StoredCalendarConnection {
@@ -42,6 +42,8 @@ export interface StoredCalendarConnection {
   refreshTokenIv: string;
   refreshTokenKeyVersion: number;
   syncCursor: string | null;
+  syncFrom: string | null;
+  syncTo: string | null;
   lastSyncedAt: string | null;
   lastErrorCode: string | null;
 }
@@ -69,12 +71,15 @@ export interface CalendarConnectionRepository {
   markSync(userId: string, connectionId: string, input: {
     status: "active" | "error";
     syncCursor: string | null;
+    syncFrom: string | null;
+    syncTo: string | null;
     lastSyncedAt: string | null;
     lastErrorCode: string | null;
     now: string;
   }): Promise<CalendarConnectionSummary | null>;
   updateRefreshToken?(userId: string, connectionId: string, encryptedRefreshToken: EncryptedUserSecret, now: string): Promise<void>;
-  upsertEvents(userId: string, connectionId: string, events: CalendarEvent[]): Promise<void>;
+  upsertEvents(userId: string, connectionId: string, events: CalendarEvent[]): Promise<boolean>;
+  removeEvents?(userId: string, connectionId: string, providerEventIds: string[]): Promise<void>;
   listEvents(userId: string, query: CalendarEventsQuery): Promise<CalendarEvent[]>;
   revokeConnection(userId: string, connectionId: string, now: string): Promise<boolean>;
 }
@@ -232,24 +237,35 @@ export class CalendarService {
         const rotated = await this.secretBox.encrypt(userId, `calendar-refresh-token:${connection.provider}:${connection.providerAccountId}`, access.refreshToken);
         await this.repository.updateRefreshToken(userId, connectionId, rotated, this.now().toISOString());
       }
-      const page = await provider.listEvents({ accessToken: access.accessToken, query, cursor: connection.syncCursor }, signal);
-      await this.repository.upsertEvents(userId, connectionId, page.events);
+      const sameWindow = connection.syncFrom === query.from && connection.syncTo === query.to;
+      const page = await provider.listEvents({ accessToken: access.accessToken, query, cursor: sameWindow ? connection.syncCursor : null }, signal);
+      if (page.cancelledEventIds?.length && this.repository.removeEvents) {
+        await this.repository.removeEvents(userId, connectionId, page.cancelledEventIds);
+      }
+      const accepted = await this.repository.upsertEvents(userId, connectionId, page.events);
+      if (accepted === false) throw new CalendarServiceError("CALENDAR_CONNECTION_REVOKED", "Calendar connection has been revoked", 409);
       const refreshed = await this.repository.markSync(userId, connectionId, {
         status: "active",
         syncCursor: page.nextCursor,
+        syncFrom: query.from,
+        syncTo: query.to,
         lastSyncedAt: this.now().toISOString(),
         lastErrorCode: null,
         now: this.now().toISOString(),
       });
+      if (refreshed === null) throw new CalendarServiceError("CALENDAR_CONNECTION_REVOKED", "Calendar connection has been revoked", 409);
       return { connection: refreshed, importedCount: page.events.length };
-    } catch {
+    } catch (error) {
       await this.repository.markSync(userId, connectionId, {
         status: "error",
         syncCursor: connection.syncCursor,
+        syncFrom: connection.syncFrom,
+        syncTo: connection.syncTo,
         lastSyncedAt: connection.lastSyncedAt,
         lastErrorCode: "CALENDAR_SYNC_FAILED",
         now: this.now().toISOString(),
       });
+      if (error instanceof CalendarServiceError && error.code === "CALENDAR_CONNECTION_REVOKED") throw error;
       throw new CalendarServiceError("CALENDAR_SYNC_FAILED", "Calendar synchronization failed; retry is available", 502, true);
     }
   }

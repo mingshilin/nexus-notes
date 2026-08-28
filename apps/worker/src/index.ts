@@ -120,4 +120,5 @@ export { D1AiConfigRepository } from "./ai/d1-ai-config-repository";
 export { UserAiConfigService, UserAiConfigError, normalizeAiEndpoint } from "./ai/user-ai-config-service";
 export { D1AccountRepository, AccountRepositoryError } from "./account/d1-account-repository";
 export { createBetaWorker } from "./bootstrap";
+export { resolveCalendarConfig } from "./bootstrap";
 export type { BetaWorkerEnv } from "./routes/health";

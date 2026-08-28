@@ -222,11 +222,12 @@ export class KnowledgeClient {
     ).then(({ items }) => items);
   }
 
-  startCalendarConnection(provider: "google" | "outlook") {
+  startCalendarConnection(provider: "google" | "outlook", signal?: AbortSignal) {
     return this.command<CalendarConnectResponse>(
       `/api/v2/calendar/connections/${provider}/start`,
       "POST",
       undefined,
+      signal,
     );
   }
 

@@ -12,7 +12,7 @@ describe("calendar providers", () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(response({ access_token: "access", refresh_token: "refresh" }))
       .mockResolvedValueOnce(response({ sub: "google-account" }))
-      .mockResolvedValueOnce(response({ items: [{ id: "event-1", summary: "Review", start: { dateTime: "2026-08-28T01:00:00Z", timeZone: "UTC" }, end: { dateTime: "2026-08-28T02:00:00Z" }, status: "confirmed" }], nextPageToken: "next" }));
+      .mockResolvedValueOnce(response({ items: [{ id: "event-1", summary: "Review", start: { dateTime: "2026-08-28T01:00:00Z", timeZone: "UTC" }, end: { dateTime: "2026-08-28T02:00:00Z" }, status: "confirmed" }, { id: "cancelled-event", status: "cancelled" }], nextPageToken: "next" }));
     const provider = createGoogleCalendarProvider(fetchImpl);
     const url = provider.authorizationUrl({ clientId: config.clientId, redirectUri: config.redirectUri, state: "raw state" });
     expect(new URL(url).hostname).toBe("accounts.google.com");
@@ -21,6 +21,7 @@ describe("calendar providers", () => {
     expect(exchanged).toMatchObject({ accessToken: "access", refreshToken: "refresh", accountId: "google-account" });
     const page = await provider.listEvents({ accessToken: "access", query: { from: "2026-08-28", to: "2026-08-28" }, cursor: null }, new AbortController().signal);
     expect(page.nextCursor).toBe("google:page:next");
+    expect(page.cancelledEventIds).toEqual(["cancelled-event"]);
     expect(page.events[0]).toMatchObject({ provider: "google", provider_event_id: "event-1", title: "Review", all_day: false, status: "confirmed" });
     expect(fetchImpl.mock.calls.every(([input]) => new URL(String(input)).hostname.endsWith("googleapis.com") || new URL(String(input)).hostname === "accounts.google.com")).toBe(true);
   });

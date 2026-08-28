@@ -711,9 +711,23 @@ function createPushService(env: BetaWorkerEnv) {
   );
 }
 
-function calendarConfig(env: BetaWorkerEnv, provider: "google" | "outlook") {
-  const redirectUri = env.CALENDAR_OAUTH_REDIRECT_URI?.trim();
+export function resolveCalendarConfig(env: Pick<BetaWorkerEnv, "APP_BASE_URL" | "CALENDAR_OAUTH_REDIRECT_URI" | "GOOGLE_CALENDAR_REDIRECT_URI" | "OUTLOOK_CALENDAR_REDIRECT_URI" | "GOOGLE_CALENDAR_CLIENT_ID" | "GOOGLE_CALENDAR_CLIENT_SECRET" | "OUTLOOK_CALENDAR_CLIENT_ID" | "OUTLOOK_CALENDAR_CLIENT_SECRET">, provider: "google" | "outlook") {
+  const providerRedirect = provider === "google" ? env.GOOGLE_CALENDAR_REDIRECT_URI : env.OUTLOOK_CALENDAR_REDIRECT_URI;
+  const legacyRedirect = env.CALENDAR_OAUTH_REDIRECT_URI?.trim();
+  let redirectUri = providerRedirect?.trim();
+  if (!redirectUri && legacyRedirect) {
+    try {
+      redirectUri = new URL(legacyRedirect).pathname.endsWith(`/api/v2/calendar/oauth/${provider}/callback`) ? legacyRedirect : undefined;
+    } catch {
+      redirectUri = undefined;
+    }
+  }
   if (!redirectUri) return undefined;
+  try {
+    if (new URL(redirectUri).origin !== new URL(env.APP_BASE_URL).origin) return undefined;
+  } catch {
+    return undefined;
+  }
   const clientId = provider === "google" ? env.GOOGLE_CALENDAR_CLIENT_ID : env.OUTLOOK_CALENDAR_CLIENT_ID;
   const clientSecret = provider === "google" ? env.GOOGLE_CALENDAR_CLIENT_SECRET : env.OUTLOOK_CALENDAR_CLIENT_SECRET;
   if (!clientId?.trim() || !clientSecret?.trim()) return undefined;
@@ -723,6 +737,8 @@ function calendarConfig(env: BetaWorkerEnv, provider: "google" | "outlook") {
 function createCalendarService(env: BetaWorkerEnv) {
   const stateSecret = env.RATE_LIMIT_SECRET ? new SecureTokenService(`calendar-oauth:${env.RATE_LIMIT_SECRET}`) : undefined;
   const secretBox = env.USER_SECRETS_ENCRYPTION_KEY ? new UserSecretBox(env.USER_SECRETS_ENCRYPTION_KEY) : undefined;
+  const googleConfig = resolveCalendarConfig(env, "google");
+  const outlookConfig = resolveCalendarConfig(env, "outlook");
   return new CalendarService(new D1CalendarRepository(env.DB), {
     stateToken: stateSecret ? {
       create: () => stateSecret.createSessionToken(),
@@ -730,8 +746,8 @@ function createCalendarService(env: BetaWorkerEnv) {
     } : undefined,
     secretBox,
     configs: {
-      ...(calendarConfig(env, "google") ? { google: calendarConfig(env, "google") } : {}),
-      ...(calendarConfig(env, "outlook") ? { outlook: calendarConfig(env, "outlook") } : {}),
+      ...(googleConfig ? { google: googleConfig } : {}),
+      ...(outlookConfig ? { outlook: outlookConfig } : {}),
     },
     providers: {
       google: createGoogleCalendarProvider(),

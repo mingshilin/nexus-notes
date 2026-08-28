@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CalendarConnectionSummary, CalendarEvent, CalendarEventsQuery } from "@nexus/contracts";
 
 import type { KnowledgeClient } from "../data/knowledge-client";
@@ -36,51 +36,110 @@ export function ExternalCalendarPanel({ client }: { client: ExternalCalendarClie
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const range = useMemo(currentRange, []);
+  const mountedRef = useRef(true);
+  const loadControllerRef = useRef<AbortController | null>(null);
+  const actionControllerRef = useRef<AbortController | null>(null);
+  const loadSequenceRef = useRef(0);
+  const actionSequenceRef = useRef(0);
 
-  const load = () => {
+  const load = useCallback(() => {
+    const sequence = ++loadSequenceRef.current;
+    loadControllerRef.current?.abort();
+    const controller = new AbortController();
+    loadControllerRef.current = controller;
     setLoading(true);
     setError(null);
-    void Promise.all([client.listCalendarConnections(), client.listCalendarEvents(range)]).then(([nextConnections, nextEvents]) => {
+    void Promise.all([
+      client.listCalendarConnections(controller.signal),
+      client.listCalendarEvents(range, controller.signal),
+    ]).then(([nextConnections, nextEvents]) => {
+      if (controller.signal.aborted || !mountedRef.current || sequence !== loadSequenceRef.current) return;
       setConnections(nextConnections);
       setEvents(nextEvents);
-    }).catch(() => setError("外部日历状态暂时无法加载，请重试。"))
-      .finally(() => setLoading(false));
-  };
+    }).catch(() => {
+      if (!controller.signal.aborted && mountedRef.current && sequence === loadSequenceRef.current) setError("外部日历状态暂时无法加载，请重试。");
+    }).finally(() => {
+      if (!controller.signal.aborted && mountedRef.current && sequence === loadSequenceRef.current) setLoading(false);
+    });
+  }, [client, range]);
 
-  useEffect(() => { load(); }, [client]);
+  useEffect(() => {
+    mountedRef.current = true;
+    setPendingProvider(null);
+    setPendingConnection(null);
+    setError(null);
+    setFeedback(null);
+    setConnections([]);
+    setEvents([]);
+    load();
+    return () => {
+      mountedRef.current = false;
+      loadControllerRef.current?.abort();
+      actionControllerRef.current?.abort();
+    };
+  }, [load]);
+
+  const beginAction = useCallback(() => {
+    actionControllerRef.current?.abort();
+    const controller = new AbortController();
+    actionControllerRef.current = controller;
+    const sequence = ++actionSequenceRef.current;
+    return { controller, sequence };
+  }, []);
+
+  const isCurrentAction = useCallback((controller: AbortController, sequence: number) => (
+    mountedRef.current && !controller.signal.aborted && actionControllerRef.current === controller && sequence === actionSequenceRef.current
+  ), []);
 
   const connect = (provider: "google" | "outlook") => {
+    const { controller, sequence } = beginAction();
     setPendingProvider(provider);
     setError(null);
-    void client.startCalendarConnection(provider).then((result) => {
+    void client.startCalendarConnection(provider, controller.signal).then((result) => {
+      if (!isCurrentAction(controller, sequence)) return;
       if (result.status === "unconfigured" || !result.authorization_url) {
         setFeedback(`${providerLabel(provider)}尚未配置，请联系管理员完成 OAuth 配置。`);
         return;
       }
       window.location.assign(result.authorization_url);
-    }).catch(() => setError(`${providerLabel(provider)}连接暂时无法开始。`))
-      .finally(() => setPendingProvider(null));
+    }).catch(() => {
+      if (isCurrentAction(controller, sequence)) setError(`${providerLabel(provider)}连接暂时无法开始。`);
+    }).finally(() => {
+      if (isCurrentAction(controller, sequence)) setPendingProvider(null);
+    });
   };
 
   const sync = (connection: CalendarConnectionSummary) => {
+    const { controller, sequence } = beginAction();
     setPendingConnection(connection.id);
     setError(null);
-    void client.syncCalendarConnection(connection.id, range).then((result) => {
+    void client.syncCalendarConnection(connection.id, range, controller.signal).then((result) => {
+      if (!isCurrentAction(controller, sequence)) return [];
       setConnections((current) => current.map((item) => item.id === connection.id ? result.connection : item));
       setFeedback(`已导入 ${result.imported_count} 条日历事件。外部日历为只读导入，不会修改原日历。`);
-      return client.listCalendarEvents(range);
-    }).then(setEvents).catch(() => setError("日历同步失败，可稍后重试。"))
-      .finally(() => setPendingConnection(null));
+      return client.listCalendarEvents(range, controller.signal);
+    }).then((nextEvents) => {
+      if (isCurrentAction(controller, sequence)) setEvents(nextEvents);
+    }).catch(() => {
+      if (isCurrentAction(controller, sequence)) setError("日历同步失败，可稍后重试。");
+    }).finally(() => {
+      if (isCurrentAction(controller, sequence)) setPendingConnection(null);
+    });
   };
 
   const disconnect = (connection: CalendarConnectionSummary) => {
+    const { controller, sequence } = beginAction();
     setPendingConnection(connection.id);
-    void client.disconnectCalendarConnection(connection.id).then(() => {
+    void client.disconnectCalendarConnection(connection.id, controller.signal).then(() => {
+      if (!isCurrentAction(controller, sequence)) return;
       setConnections((current) => current.map((item) => item.id === connection.id ? { ...item, status: "revoked", last_synced_at: null, last_error_code: null } : item));
       setEvents((current) => current.filter((event) => event.connection_id !== connection.id));
       setFeedback(`${providerLabel(connection.provider)}已断开。`);
-    }).catch(() => setError("断开日历失败，请重试。"))
-      .finally(() => setPendingConnection(null));
+    }).catch(() => {
+      if (isCurrentAction(controller, sequence)) setError("断开日历失败，请重试。");
+    }).finally(() => {
+      if (isCurrentAction(controller, sequence)) setPendingConnection(null);
+    });
   };
 
   return (

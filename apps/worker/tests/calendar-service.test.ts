@@ -27,8 +27,14 @@ function repository(): CalendarConnectionRepository & {
     }),
     listConnections: vi.fn(async (userId: string) => value.connections.filter((item) => item.userId === userId).map((item) => ({ id: item.id, provider: item.provider, status: "active", last_synced_at: null, last_error_code: null }))),
     getConnection: vi.fn(async (userId: string, id: string) => value.connections.find((item) => item.userId === userId && item.id === id) ?? null),
-    markSync: vi.fn(async () => undefined),
+    markSync: vi.fn(async (userId: string, connectionId: string, input: { status: string; syncCursor: string | null; syncFrom: string | null; syncTo: string | null; lastSyncedAt: string | null; lastErrorCode: string | null }) => {
+      const connection = value.connections.find((item) => item.userId === userId && item.id === connectionId);
+      if (!connection) return null;
+      Object.assign(connection, { status: input.status, syncCursor: input.syncCursor, syncFrom: input.syncFrom, syncTo: input.syncTo, lastSyncedAt: input.lastSyncedAt, lastErrorCode: input.lastErrorCode });
+      return { id: connectionId, provider: connection.provider, status: input.status, last_synced_at: input.lastSyncedAt, last_error_code: input.lastErrorCode };
+    }),
     upsertEvents: vi.fn(async (items: CalendarEvent[]) => { value.events = items; }),
+    removeEvents: vi.fn(async () => undefined),
     listEvents: vi.fn(async (userId: string, query: CalendarEventsQuery) => value.events.filter((item) => item.starts_at.slice(0, 10) >= query.from && item.starts_at.slice(0, 10) <= query.to && value.connections.some((connection) => connection.id === item.connection_id && connection.userId === userId))),
     updateRefreshToken: vi.fn(async () => undefined),
     revokeConnection: vi.fn(async () => true),
@@ -119,6 +125,44 @@ describe("CalendarService", () => {
     await expect(service.syncConnection("user-1", "connection-revoked", { from: "2026-08-28", to: "2026-08-28" })).rejects.toMatchObject({ code: "CALENDAR_CONNECTION_REVOKED", status: 409 });
     expect(google.refreshAccessToken).not.toHaveBeenCalled();
     await expect(service.listEvents("user-1", { from: "2026-08-28", to: "2026-08-28" })).resolves.toEqual([]);
+  });
+
+  it("resets a stored cursor when the requested window changes", async () => {
+    const repo = repository();
+    const google = provider();
+    google.refreshAccessToken = vi.fn(async () => ({ accessToken: "access" }));
+    google.listEvents = vi.fn(async ({ cursor }) => ({ events: [], nextCursor: cursor ? "next-2" : "next-1" }));
+    const service = new CalendarService(repo, {
+      now: () => new Date(now),
+      secretBox: new UserSecretBox("calendar-secret-with-at-least-32-characters"),
+      providers: { google },
+      configs: { google: { clientId: "client-1", clientSecret: "client-secret", redirectUri: "https://notes.example/calendar/callback" } },
+    });
+    const box = new UserSecretBox("calendar-secret-with-at-least-32-characters");
+    const encrypted = await box.encrypt("user-1", "calendar-refresh-token:google:account-1", "refresh");
+    repo.connections.push({ id: "connection-1", userId: "user-1", provider: "google", providerAccountId: "account-1", status: "active", refreshTokenCiphertext: encrypted.ciphertext, refreshTokenIv: encrypted.iv, refreshTokenKeyVersion: encrypted.keyVersion, syncCursor: "google:sync:old", syncFrom: "2026-08-01", syncTo: "2026-08-31", lastSyncedAt: null });
+    await service.syncConnection("user-1", "connection-1", { from: "2026-08-01", to: "2026-08-31" });
+    await service.syncConnection("user-1", "connection-1", { from: "2026-09-01", to: "2026-09-30" });
+    expect(google.listEvents).toHaveBeenNthCalledWith(1, expect.objectContaining({ cursor: "google:sync:old" }), expect.any(AbortSignal));
+    expect(google.listEvents).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: null }), expect.any(AbortSignal));
+  });
+
+  it("removes provider cancellation tombstones instead of retaining stale events", async () => {
+    const repo = repository();
+    const google = provider();
+    google.refreshAccessToken = vi.fn(async () => ({ accessToken: "access" }));
+    google.listEvents = vi.fn(async () => ({ events: [], nextCursor: null, cancelledEventIds: ["provider-event-cancelled"] }));
+    const service = new CalendarService(repo, {
+      now: () => new Date(now),
+      secretBox: new UserSecretBox("calendar-secret-with-at-least-32-characters"),
+      providers: { google },
+      configs: { google: { clientId: "client-1", clientSecret: "client-secret", redirectUri: "https://notes.example/calendar/callback" } },
+    });
+    const box = new UserSecretBox("calendar-secret-with-at-least-32-characters");
+    const encrypted = await box.encrypt("user-1", "calendar-refresh-token:google:account-1", "refresh");
+    repo.connections.push({ id: "connection-1", userId: "user-1", provider: "google", providerAccountId: "account-1", status: "active", refreshTokenCiphertext: encrypted.ciphertext, refreshTokenIv: encrypted.iv, refreshTokenKeyVersion: encrypted.keyVersion, syncCursor: null, syncFrom: null, syncTo: null, lastSyncedAt: null });
+    await service.syncConnection("user-1", "connection-1", { from: "2026-08-28", to: "2026-08-28" });
+    expect(repo.removeEvents).toHaveBeenCalledWith("user-1", "connection-1", ["provider-event-cancelled"]);
   });
 
   it("encrypts and persists a rotated refresh token without exposing it", async () => {

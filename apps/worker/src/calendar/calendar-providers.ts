@@ -320,11 +320,23 @@ class HttpCalendarProvider implements CalendarProviderClient {
     const raw = await this.getJson(eventsUrl, input.accessToken, signal);
     const values = this.provider === "google" ? raw.items : raw.value;
     const items = Array.isArray(values) ? values : [];
-    const events = items
-      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
-      .map((item) => this.provider === "google" ? googleEvent("google", item) : outlookEvent("outlook", item))
-      .filter((item): item is CalendarEvent => item !== null)
-      .slice(0, 500);
+    const cancelledEventIds: string[] = [];
+    const events: CalendarEvent[] = [];
+    for (const value of items) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const item = value as Record<string, unknown>;
+      const providerEventId = stringValue(item.id, 512);
+      const cancelled = this.provider === "google"
+        ? item.status === "cancelled"
+        : item.isCancelled === true;
+      if (cancelled) {
+        if (providerEventId) cancelledEventIds.push(providerEventId);
+        continue;
+      }
+      const normalized = this.provider === "google" ? googleEvent("google", item) : outlookEvent("outlook", item);
+      if (normalized) events.push(normalized);
+      if (events.length >= 500) break;
+    }
     const nextCursor = this.provider === "google"
       ? stringValue(raw.nextPageToken, 4096)
         ? `google:page:${stringValue(raw.nextPageToken, 4096)}`
@@ -333,7 +345,7 @@ class HttpCalendarProvider implements CalendarProviderClient {
           : null
       : trustedNextLink(raw["@odata.nextLink"], this.endpoints.host)
         ?? trustedNextLink(raw["@odata.deltaLink"], this.endpoints.host);
-    return { events, nextCursor };
+    return { events, nextCursor, cancelledEventIds };
   }
 
   private async accountId(accessToken: string, signal: AbortSignal) {
