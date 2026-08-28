@@ -58,9 +58,9 @@ npm run test:a11y -- --url=https://nexus-notes-public-beta-preview.shilinming9.w
 
 ## 生产操作记录
 
-- 已执行生产 Beta D1 additive migrations `0017` 至 `0024`，并通过外部备份恢复演练和线上外键检查。
-- 已部署生产 Worker `modern-notes-saas` 版本 `1c5198ff-7671-4e97-9c1a-1e9dc3c131cc` 到 `https://notes.msl88ljctengxun.xyz/`，旧版本 `03d67b5b-0e32-4210-94df-6a34097a8ad7` 保留回滚。
-- 已推送 GitHub 分支并创建 <https://github.com/mingshilin/nexus-notes/pull/10>；PR 当前等待 `verify` CI，尚未合并。
-- 生产 secret 未轮换，现有 secret 仅通过 Cloudflare Secret 保留；AI 仍为 `AI_ENABLED=false`，真实 provider 未配置。
+- 已执行生产 Beta D1 additive migrations `0017` 至 `0025`，并通过外部备份恢复演练和线上外键检查。
+- 已部署生产 Worker `modern-notes-saas` 版本 `4cff06b5-0807-410f-b4f8-7ca1cb639014` 到 `https://notes.msl88ljctengxun.xyz/`，旧版本 `1c5198ff-7671-4e97-9c1a-1e9dc3c131cc` 保留回滚。
+- 已推送 GitHub 分支并创建 PR #10、PR #12；两者均已通过 CI 并合并到 `main`，最新主分支提交为 `2f2dca2`。
+- 生产 secret 未轮换，现有 secret 仅通过 Cloudflare Secret 保留；系统 AI 已由 Workers AI 启用，个人 provider 可由用户自行配置。
 
-仍未完成的发布动作是 PR 合并和 `v1.1.0` tag；它们必须等 CI 绿灯后执行。本文件记录的是已发生的操作，不替代 GitHub 或 Cloudflare 的实际状态。
+当前仍需补充的是有效认证账号下的真实 AI/editor 浏览器验收；既有测试账号返回 401，且没有外部 authenticated Chrome profile，因此该门禁保持 BLOCKED，不视为上线失败或通过。
