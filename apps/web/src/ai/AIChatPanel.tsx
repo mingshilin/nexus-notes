@@ -119,7 +119,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [configuration, setConfiguration] = useState<AIConfigurationState>(() => showStatus && workspaceId ? "checking" : null);
+  const [configuration, setConfiguration] = useState<AIConfigurationState>(() => workspaceId ? "checking" : null);
   const [configurationDetails, setConfigurationDetails] = useState<AiUserConfigSummary | null>(null);
   const [allowWorkspaceSearch, setAllowWorkspaceSearch] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -135,7 +135,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
     setActionStates({});
     setDraft("");
     setError(null);
-    setConfiguration(showStatus && workspaceId ? "checking" : null);
+    setConfiguration(workspaceId ? "checking" : null);
     setConfigurationDetails(null);
     setAllowWorkspaceSearch(false);
     mountedRef.current = true;
@@ -151,7 +151,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
   }, [workspaceId, readContext?.selected_note_ids.join("\u001f"), readContext?.selected_database_ids.join("\u001f")]);
 
   useEffect(() => {
-    if (!showStatus || !workspaceId) {
+    if (!workspaceId) {
       setConfiguration(null);
       return undefined;
     }
@@ -173,7 +173,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
       }
     });
     return () => controller.abort();
-  }, [client, showStatus, workspaceId]);
+  }, [client, workspaceId]);
 
   useEffect(() => {
     setActionStates((current) => expireActionStates(entries, current));
@@ -381,8 +381,8 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
         {entries.length > 0 ? <button type="button" onClick={clearConversation}>清空对话</button> : null}
         <span className="ai-chat-mark" aria-hidden="true"><Bot size={22} /></span>
       </div>
-      {configuration === "unconfigured" ? <p className="ai-chat-config-status" role="status">AI 尚未配置。你可以在下方添加自己的 OpenAI-compatible provider，API Key 不会以明文返回。</p> : null}
-      {configuration === "configured" ? <p className="ai-chat-config-status ready" role="status">AI 服务已连接，可以开始对话。</p> : null}
+      {showStatus && configuration === "unconfigured" ? <p className="ai-chat-config-status" role="status">AI 尚未配置。你可以在下方添加自己的 OpenAI-compatible provider，API Key 不会以明文返回。</p> : null}
+      {showStatus && configuration === "configured" ? <p className="ai-chat-config-status ready" role="status">AI 服务已连接，可以开始对话。</p> : null}
       {configuration === "checking" ? (
         <p className="ai-chat-config-status" role="status">正在检查 AI 服务状态…</p>
       ) : configuration === "disabled" ? (
