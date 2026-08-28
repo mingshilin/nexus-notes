@@ -18,7 +18,7 @@ afterEach(async () => {
 
 describe("AI trusted chat route", () => {
   it("executes a trusted create_note action without returning a confirmation proposal", async () => {
-    const test = await createTestD1({ through: 22 });
+    const test = await createTestD1();
     disposals.push(test.dispose);
     await seedTenants(test.db);
     const tokenHash = await new SecureTokenService(`auth:${rateLimitSecret}`).hash(sessionToken);
@@ -77,8 +77,8 @@ describe("AI trusted chat route", () => {
     ).first()).resolves.toEqual({ title: "路线图", content: "第一步" });
   });
 
-  it("keeps AI disabled when the Worker explicitly sets AI_ENABLED=false", async () => {
-    const test = await createTestD1({ through: 22 });
+  it("keeps system AI disabled while personal configuration remains available", async () => {
+    const test = await createTestD1();
     disposals.push(test.dispose);
     await seedTenants(test.db);
     const tokenHash = await new SecureTokenService(`auth:${rateLimitSecret}`).hash(sessionToken);
@@ -121,10 +121,10 @@ describe("AI trusted chat route", () => {
     const statusResponse = await createBetaWorker().fetch(new Request("https://beta.test/api/v2/ai/status", {
       headers: { cookie: `nexus_session=${sessionToken}`, "x-workspace-id": "ws-1" },
     }), env);
-    expect(statusResponse.status).toBe(503);
+    expect(statusResponse.status).toBe(200);
     await expect(statusResponse.json()).resolves.toMatchObject({
-      success: false,
-      error: { code: "SERVER_NOT_CONFIGURED" },
+      success: true,
+      data: { configured: false, selected_source: "system", personal_configured: false, system_configured: false },
     });
     const configBody = { base_url: "https://api.example.test/v1", model: "beta-model", api_key: "personal-secret-key-123456" };
     const saveResponse = await createBetaWorker().fetch(new Request("https://beta.test/api/v2/ai/config", {
@@ -132,19 +132,19 @@ describe("AI trusted chat route", () => {
       headers: { "content-type": "application/json", cookie: `nexus_session=${sessionToken}` },
       body: JSON.stringify({ ...configBody, base_revision: null }),
     }), env);
-    expect(saveResponse.status).toBe(503);
+    expect(saveResponse.status).toBe(200);
     const testConfigResponse = await createBetaWorker().fetch(new Request("https://beta.test/api/v2/ai/config/test", {
       method: "POST",
       headers: { "content-type": "application/json", cookie: `nexus_session=${sessionToken}` },
       body: JSON.stringify(configBody),
     }), env);
-    expect(testConfigResponse.status).toBe(503);
+    expect(testConfigResponse.status).toBe(200);
     const deleteResponse = await createBetaWorker().fetch(new Request("https://beta.test/api/v2/ai/config", {
       method: "DELETE",
       headers: { "content-type": "application/json", cookie: `nexus_session=${sessionToken}` },
       body: JSON.stringify({ base_revision: 1 }),
     }), env);
-    expect(deleteResponse.status).toBe(503);
+    expect(deleteResponse.status).toBe(200);
     const rejectResponse = await createBetaWorker().fetch(new Request("https://beta.test/api/v2/ai/actions/action-disabled/reject", {
       method: "POST",
       headers: {
@@ -154,7 +154,7 @@ describe("AI trusted chat route", () => {
       },
       body: JSON.stringify({ action_id: "action-disabled", base_revision: 1 }),
     }), env);
-    expect(rejectResponse.status).toBe(503);
+    expect(rejectResponse.status).toBe(404);
   });
 
   it("replays a committed note mutation before the proposal completion write", async () => {

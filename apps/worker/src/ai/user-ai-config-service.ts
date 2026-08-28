@@ -1,7 +1,7 @@
-import type { AiChatResponse, AiUserConfigSummary, DeleteAiUserConfigInput, TestAiUserConfigInput, UpsertAiUserConfigInput } from "@nexus/contracts";
+import type { AiChatResponse, AiProviderPreference, AiUserConfigSummary, DeleteAiUserConfigInput, TestAiUserConfigInput, UpdateAiProviderPreferenceInput, UpsertAiUserConfigInput } from "@nexus/contracts";
 import type { UserSecretBox } from "../security/user-secret-box";
 import { AiChatService } from "./ai-chat-service";
-import type { D1AiConfigRepository, StoredAiConfig } from "./d1-ai-config-repository";
+import type { AiProviderSource, D1AiConfigRepository, StoredAiConfig } from "./d1-ai-config-repository";
 
 export class UserAiConfigError extends Error {
   readonly retryable = false;
@@ -65,6 +65,22 @@ export class UserAiConfigService {
   async status(userId: string): Promise<AiUserConfigSummary> {
     const row = await this.repository.get(userId);
     return row ? summary(row) : { configured: false, source: "unconfigured" };
+  }
+
+  async getProviderPreference(userId: string): Promise<AiProviderPreference> {
+    const preference = await this.repository.getProviderPreference(userId);
+    return { source: preference.source, revision: preference.revision };
+  }
+
+  async updateProviderPreference(userId: string, input: UpdateAiProviderPreferenceInput) {
+    const updated = await this.repository.updateProviderPreference(
+      userId,
+      input.source as AiProviderSource,
+      input.base_revision,
+      this.clock().toISOString(),
+    );
+    if (!updated) throw new UserAiConfigError("AI_PROVIDER_CONFLICT", "AI provider selection changed before it could be saved", 409);
+    return { source: updated.source, revision: updated.revision };
   }
 
   async save(userId: string, input: UpsertAiUserConfigInput) {

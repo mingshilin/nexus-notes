@@ -230,6 +230,10 @@ export type UpdateAiTrustedModeInput = z.infer<typeof UpdateAiTrustedModeInputSc
 export const AiUserConfigSummarySchema = z.object({
   configured: z.boolean(),
   source: z.enum(["personal", "server_default", "unconfigured"]),
+  selected_source: z.enum(["system", "personal"]).optional(),
+  personal_configured: z.boolean().optional(),
+  system_configured: z.boolean().optional(),
+  fallback: z.boolean().optional(),
   base_url: AiBaseUrlSchema.optional(),
   model: AiModelSchema.optional(),
   key_hint: z.string().min(1).max(32).optional(),
@@ -251,6 +255,16 @@ export const TestAiUserConfigInputSchema = z.object({
 }).strict();
 
 export const DeleteAiUserConfigInputSchema = z.object({
+  base_revision: PositiveRevisionSchema,
+}).strict();
+
+export const AiProviderPreferenceSchema = z.object({
+  source: z.enum(["system", "personal"]),
+  revision: PositiveRevisionSchema,
+}).strict();
+
+export const UpdateAiProviderPreferenceInputSchema = z.object({
+  source: z.enum(["system", "personal"]),
   base_revision: PositiveRevisionSchema,
 }).strict();
 
@@ -508,3 +522,5 @@ export type AiUserConfigSummary = z.infer<typeof AiUserConfigSummarySchema>;
 export type UpsertAiUserConfigInput = z.infer<typeof UpsertAiUserConfigInputSchema>;
 export type TestAiUserConfigInput = z.infer<typeof TestAiUserConfigInputSchema>;
 export type DeleteAiUserConfigInput = z.infer<typeof DeleteAiUserConfigInputSchema>;
+export type AiProviderPreference = z.infer<typeof AiProviderPreferenceSchema>;
+export type UpdateAiProviderPreferenceInput = z.infer<typeof UpdateAiProviderPreferenceInputSchema>;

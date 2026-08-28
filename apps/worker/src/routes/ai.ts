@@ -9,6 +9,7 @@ import {
   DeleteAiUserConfigInputSchema,
   TestAiUserConfigInputSchema,
   UpdateAiTrustedModeInputSchema,
+  UpdateAiProviderPreferenceInputSchema,
   UpsertAiUserConfigInputSchema,
   type AiChatInput,
   type AiChatResponse,
@@ -16,9 +17,11 @@ import {
   type AiActionHistoryItem,
   type AiTrustedMode,
   type AiStatus,
+  type AiProviderPreference,
   type DeleteAiUserConfigInput,
   type TestAiUserConfigInput,
   type UpdateAiTrustedModeInput,
+  type UpdateAiProviderPreferenceInput,
   type UpsertAiUserConfigInput,
   type WorkspaceContext,
 } from "@nexus/contracts";
@@ -31,6 +34,8 @@ interface AiRegistry<TEnv> {
 export interface AiChatRouteService {
   chat(input: AiChatInput, signal: AbortSignal, userId?: string, workspace?: WorkspaceContext): Promise<AiChatResponse>;
   status?(userId?: string): AiStatus | { configured: boolean } | Promise<AiStatus | { configured: boolean }>;
+  getProviderPreference?(userId: string): Promise<AiProviderPreference>;
+  updateProviderPreference?(userId: string, input: UpdateAiProviderPreferenceInput): Promise<AiProviderPreference>;
   getConfig?(userId: string): Promise<AiStatus>;
   saveConfig?(userId: string, input: UpsertAiUserConfigInput, requestId: string): Promise<AiStatus>;
   testConfig?(userId: string, input: TestAiUserConfigInput, signal: AbortSignal, requestId: string): Promise<unknown>;
@@ -66,6 +71,25 @@ function required<T>(value: T | undefined): T {
 }
 
 export function registerAiRoutes<TEnv>(registry: AiRegistry<TEnv>, createService: (env: TEnv) => AiChatRouteService) {
+  registry.register({
+    method: "GET", path: "/api/v2/ai/provider", auth: "session",
+    rateLimit: { bucket: "ip", limit: 30, windowSeconds: 60 },
+    handler: async ({ env, principal }) => {
+      const preference = createService(env).getProviderPreference;
+      if (!preference) throw new AiConfigurationRouteError("AI provider selection is unavailable");
+      return { data: await preference(principal!.userId) };
+    },
+  });
+  registry.register({
+    method: "PATCH", path: "/api/v2/ai/provider", auth: "session",
+    rateLimit: { bucket: "ip", limit: 20, windowSeconds: 60 },
+    body: UpdateAiProviderPreferenceInputSchema,
+    handler: async ({ env, principal, body }) => {
+      const update = createService(env).updateProviderPreference;
+      if (!update) throw new AiConfigurationRouteError("AI provider selection is unavailable");
+      return { data: await update(principal!.userId, body) };
+    },
+  });
   registry.register({
     method: "GET",
     path: "/api/v2/ai/status",
