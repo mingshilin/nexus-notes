@@ -40,6 +40,7 @@ import { clearWorkspaceQueryCache } from "../data/workspace-query-cache";
 import { localDateKey, noteMatchesListView, useNotesListData, type NoteListView } from "./use-notes-list-data";
 import { useDatabaseWorkspaceData } from "./use-database-workspace-data";
 import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
+import { useNoteInspectorData } from "./use-note-inspector-data";
 import { NotesDomain, type NotesDomainCallbacks, type NotesEditorState, type NotesOverviewState } from "./domains/NotesDomain";
 import { DatabaseDomain, type DatabaseDomainCallbacks, type DatabaseDomainSelection } from "./domains/DatabaseDomain";
 import { KnowledgeDomain } from "./domains/KnowledgeDomain";
@@ -276,21 +277,9 @@ function AuthenticatedWorkspace({
   const [unreadCount, setUnreadCount] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [notesRefreshVersion, setNotesRefreshVersion] = useState(0);
-  const [folders, setFolders] = useState<Folder[]>([]);
-  const [folderLoading, setFolderLoading] = useState(Boolean(workspaceId));
   const [noteFolderFilter, setNoteFolderFilter] = useState<string | null>(null);
   const [noteSearchQuery, setNoteSearchQuery] = useState("");
   const [debouncedNoteSearchQuery, setDebouncedNoteSearchQuery] = useState("");
-  const [tags, setTags] = useState<Tag[]>([]);
-  const [noteTagIds, setNoteTagIds] = useState<Record<string, string[]>>({});
-  const [noteTagsLoading, setNoteTagsLoading] = useState(false);
-  const [noteTagsSaving, setNoteTagsSaving] = useState(false);
-  const [noteTagsError, setNoteTagsError] = useState<string | null>(null);
-  const [linkedNoteIds, setLinkedNoteIds] = useState<string[]>([]);
-  const [backlinks, setBacklinks] = useState<NoteLink[]>([]);
-  const [noteLinksLoading, setNoteLinksLoading] = useState(false);
-  const [noteLinksSaving, setNoteLinksSaving] = useState(false);
-  const [noteLinksError, setNoteLinksError] = useState<string | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [workspaceModal, setWorkspaceModal] = useState<WorkspaceModal | null>(null);
   const createCenterOpen = workspaceModal === "create";
@@ -330,17 +319,9 @@ function AuthenticatedWorkspace({
   const [editorMode, setEditorMode] = useState<"edit" | "preview">("edit");
   const [draftFolderId, setDraftFolderId] = useState<string | null>(null);
   const [draftDatabaseId, setDraftDatabaseId] = useState<string | null>(null);
-  const [noteDatabases, setNoteDatabases] = useState<Database[]>([]);
-  const [noteDatabasesLoading, setNoteDatabasesLoading] = useState(false);
-  const [noteDatabasesError, setNoteDatabasesError] = useState<string | null>(null);
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteMessage, setNoteMessage] = useState<string | null>(null);
   const [noteError, setNoteError] = useState<string | null>(null);
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [noteRevisions, setNoteRevisions] = useState<NoteRevision[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState<string | null>(null);
-  const [historyRefreshVersion, setHistoryRefreshVersion] = useState(0);
   const [restoringRevision, setRestoringRevision] = useState<number | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
@@ -365,7 +346,6 @@ function AuthenticatedWorkspace({
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
   const notificationOpenerRef = useRef<HTMLElement | null>(null);
   const notificationTargetController = useRef<AbortController | null>(null);
-  const historyController = useRef<AbortController | null>(null);
   const noteListViewRef = useRef<NoteListView>(noteListView);
   const [draftController] = useState(() => {
     return new NoteDraftController(localStore);
@@ -469,6 +449,44 @@ function AuthenticatedWorkspace({
     workspaceId,
     initialFilters: { mimeType: "", ocrStatus: "" },
   });
+  const {
+    folders,
+    setFolders,
+    folderLoading,
+    tags,
+    noteTagIds,
+    noteTagsLoading,
+    noteTagsSaving,
+    noteTagsError,
+    setNoteTagsError,
+    linkedNoteIds,
+    backlinks,
+    noteLinksLoading,
+    noteLinksSaving,
+    noteLinksError,
+    noteDatabases,
+    noteDatabasesLoading,
+    noteDatabasesError,
+    historyOpen,
+    setHistoryOpen,
+    noteRevisions,
+    historyLoading,
+    historyError,
+    setHistoryError,
+    resetHistory,
+    refreshHistory,
+    createTag: createInspectorTag,
+    saveTags: saveInspectorTags,
+    saveLinks: saveInspectorLinks,
+    abortRequests: abortInspectorRequests,
+  } = useNoteInspectorData({
+    knowledgeClient,
+    databaseClient,
+    notesClient,
+    workspaceId,
+    selectedNoteId,
+    creatingNote,
+  });
   const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
   const workbenchMode = useWorkbenchMode();
   permanentDeletePendingRef.current = permanentDeletePending;
@@ -535,48 +553,6 @@ function AuthenticatedWorkspace({
   });
 
   useEffect(() => {
-    if (!workspaceId) {
-      setFolders([]);
-      setFolderLoading(false);
-      setNoteFolderFilter(null);
-      return undefined;
-    }
-    const controller = new AbortController();
-    setFolderLoading(true);
-    void knowledgeClient.listFolders(controller.signal).then((items) => {
-      if (!controller.signal.aborted) setFolders(items);
-    }).catch(() => {
-      if (!controller.signal.aborted) setFolders([]);
-    }).finally(() => {
-      if (!controller.signal.aborted) setFolderLoading(false);
-    });
-    return () => controller.abort();
-  }, [knowledgeClient, workspaceId]);
-
-  useEffect(() => {
-    if (!workspaceId || !selectedNoteId || creatingNote) {
-      setLinkedNoteIds([]);
-      setBacklinks([]);
-      setNoteLinksLoading(false);
-      setNoteLinksError(null);
-      return undefined;
-    }
-    const controller = new AbortController();
-    setNoteLinksLoading(true);
-    setNoteLinksError(null);
-    void Promise.all([knowledgeClient.listNoteLinks(selectedNoteId, controller.signal), knowledgeClient.listBacklinks(selectedNoteId, controller.signal)]).then(([links, incoming]) => {
-      if (controller.signal.aborted) return;
-      setLinkedNoteIds(links.map((link) => link.target_note_id));
-      setBacklinks(incoming);
-    }).catch(() => {
-      if (!controller.signal.aborted) setNoteLinksError("笔记链接暂时无法加载，当前内容不受影响。请重试。");
-    }).finally(() => {
-      if (!controller.signal.aborted) setNoteLinksLoading(false);
-    });
-    return () => controller.abort();
-  }, [creatingNote, knowledgeClient, selectedNoteId, workspaceId]);
-
-  useEffect(() => {
     const timer = window.setTimeout(() => {
       setDebouncedNoteSearchQuery(noteSearchQuery.trim().slice(0, 500));
     }, 250);
@@ -588,22 +564,6 @@ function AuthenticatedWorkspace({
     setNoteSearchQuery("");
     setDebouncedNoteSearchQuery("");
   }, [workspaceId]);
-
-  useEffect(() => {
-    if (!workspaceId) {
-      setTags([]);
-      setNoteTagIds({});
-      setNoteTagsError(null);
-      return undefined;
-    }
-    const controller = new AbortController();
-    void knowledgeClient.listTags(controller.signal).then((items) => {
-      if (!controller.signal.aborted) setTags(items);
-    }).catch(() => {
-      if (!controller.signal.aborted) setTags([]);
-    });
-    return () => controller.abort();
-  }, [knowledgeClient, workspaceId]);
 
   const closePermanentDeleteDialog = (focusTarget: "origin" | "fallback" = "origin") => {
     permanentDeleteFocusTargetRef.current = focusTarget;
@@ -687,7 +647,7 @@ function AuthenticatedWorkspace({
     activationInFlight.current = true;
     userSelectedNote.current = true;
     setFeatureMapOpen(false);
-    setHistoryOpen(false);
+    resetHistory();
     setEditorMode("edit");
     setNoteConflict(null);
     setResolvingConflict(false);
@@ -721,10 +681,8 @@ function AuthenticatedWorkspace({
 
   const selectNote = (note: Note) => {
     setFeatureMapOpen(false);
-    setHistoryOpen(false);
+    resetHistory();
     setEditorMode("edit");
-    setNoteRevisions([]);
-    setHistoryError(null);
     setNoteConflict(null);
     setResolvingConflict(false);
     activeDraftIdRef.current = null;
@@ -765,7 +723,7 @@ function AuthenticatedWorkspace({
       draftTitleRef.current = saved.title;
       draftContentRef.current = saved.content;
       setNoteMessage(`已恢复版本 ${revision.revision}`);
-      setHistoryOpen(false);
+      resetHistory();
       setEditorMode("edit");
     }).catch((error: unknown) => {
       const code = error instanceof ApiClientError ? error.code : "";
@@ -866,9 +824,7 @@ function AuthenticatedWorkspace({
     if (!workspaceId || role === "viewer") throw new Error("当前工作区没有标签编辑权限。");
     setNoteTagsError(null);
     try {
-      const created = await knowledgeClient.createTag({ name, color: "" });
-      setTags((current) => current.some((tag) => tag.id === created.id) ? current : [...current, created].sort((left, right) => left.name.localeCompare(right.name)));
-      return created;
+      return await createInspectorTag(name);
     } catch (error) {
       setNoteTagsError("创建标签失败，请重试。标签名称仍保留在输入框中。");
       throw error;
@@ -878,18 +834,8 @@ function AuthenticatedWorkspace({
   const updateSelectedNoteTags = (nextTagIds: string[]) => {
     if (logoutPending || !workspaceId || !selectedNoteId || creatingNote || role === "viewer" || selectedNote?.status === "trashed" || noteTagsSaving) return;
     const noteId = selectedNoteId;
-    const previousTagIds = noteTagIds[noteId] ?? [];
-    setNoteTagIds((current) => ({ ...current, [noteId]: nextTagIds }));
-    setNoteTagsSaving(true);
-    setNoteTagsError(null);
-    void knowledgeClient.setNoteTags(noteId, { tag_ids: nextTagIds }).then(() => {
-      if (mountedRef.current && selectedNoteId === noteId) setNoteMessage("标签已保存");
-    }).catch(() => {
-      if (!mountedRef.current) return;
-      setNoteTagIds((current) => ({ ...current, [noteId]: previousTagIds }));
-      setNoteTagsError("标签保存失败，请重试。当前选择已恢复。");
-    }).finally(() => {
-      if (mountedRef.current) setNoteTagsSaving(false);
+    void saveInspectorTags(noteId, nextTagIds).then((saved) => {
+      if (saved && mountedRef.current && selectedNoteId === noteId) setNoteMessage("标签已保存");
     });
   };
 
@@ -917,24 +863,17 @@ function AuthenticatedWorkspace({
       const tag = existing ?? await createNoteTag(name.trim());
       if (!nextIds.includes(tag.id)) nextIds.push(tag.id);
     }
-    await knowledgeClient.setNoteTags(noteId, { tag_ids: nextIds });
-    setNoteTagIds((current) => ({ ...current, [noteId]: nextIds }));
+    const saved = await saveInspectorTags(noteId, nextIds);
+    if (!saved) return;
     setNoteMessage("AI 标签建议已应用");
     setNoteTagsError(null);
   };
 
   const saveSelectedNoteLinks = async (targetNoteIds: string[]) => {
     if (logoutPending || !workspaceId || !selectedNoteId || creatingNote || role === "viewer" || noteLinksSaving) return;
-    setNoteLinksSaving(true);
-    setNoteLinksError(null);
-    try {
-      await knowledgeClient.setNoteLinks(selectedNoteId, { target_note_ids: targetNoteIds });
-      setLinkedNoteIds([...targetNoteIds]);
+    const saved = await saveInspectorLinks(selectedNoteId, targetNoteIds);
+    if (saved) {
       setNoteMessage("笔记链接已保存");
-    } catch {
-      setNoteLinksError("笔记链接保存失败，请重试。当前选择已保留。");
-    } finally {
-      setNoteLinksSaving(false);
     }
   };
 
@@ -1289,71 +1228,6 @@ function AuthenticatedWorkspace({
   }, [creatingNote, selectedNote]);
 
   useEffect(() => {
-    if (!workspaceId || !selectedNoteId || creatingNote) {
-      setNoteDatabasesLoading(false);
-      setNoteDatabasesError(null);
-      return undefined;
-    }
-    const controller = new AbortController();
-    setNoteDatabasesLoading(true);
-    setNoteDatabasesError(null);
-    void databaseClient.listDatabases(controller.signal).then((items) => {
-      if (!controller.signal.aborted) setNoteDatabases(items);
-    }).catch((error: unknown) => {
-      if (!isAborted(error, controller.signal)) {
-        setNoteDatabases([]);
-        setNoteDatabasesError("数据库列表暂时无法加载。保存笔记不受影响，可稍后重试。");
-      }
-    }).finally(() => {
-      if (!controller.signal.aborted) setNoteDatabasesLoading(false);
-    });
-    return () => controller.abort();
-  }, [creatingNote, databaseClient, selectedNoteId, workspaceId]);
-
-  useEffect(() => {
-    if (!workspaceId || !selectedNoteId || creatingNote) {
-      setNoteTagsLoading(false);
-      setNoteTagsError(null);
-      return undefined;
-    }
-    const controller = new AbortController();
-    setNoteTagsLoading(true);
-    setNoteTagsError(null);
-    void knowledgeClient.listNoteTags(selectedNoteId, controller.signal).then((items) => {
-      if (controller.signal.aborted) return;
-      setNoteTagIds((current) => ({ ...current, [selectedNoteId]: items.map((tag) => tag.id) }));
-    }).catch(() => {
-      if (!controller.signal.aborted) setNoteTagsError("标签暂时无法加载，保持当前选择后可重试。");
-    }).finally(() => {
-      if (!controller.signal.aborted) setNoteTagsLoading(false);
-    });
-    return () => controller.abort();
-  }, [apiClient, creatingNote, selectedNoteId, workspaceId]);
-
-  useEffect(() => {
-    historyController.current?.abort();
-    if (!historyOpen || !workspaceId || !selectedNoteId || creatingNote) {
-      setHistoryLoading(false);
-      return undefined;
-    }
-    const controller = new AbortController();
-    historyController.current = controller;
-    setHistoryLoading(true);
-    setHistoryError(null);
-    void notesClient.listRevisions(selectedNoteId, controller.signal).then((items) => {
-      if (!controller.signal.aborted) setNoteRevisions(items);
-    }).catch(() => {
-      if (!controller.signal.aborted) setHistoryError("版本历史暂时无法加载，当前内容不受影响。请重试。");
-    }).finally(() => {
-      if (!controller.signal.aborted) setHistoryLoading(false);
-    });
-    return () => {
-      controller.abort();
-      if (historyController.current === controller) historyController.current = null;
-    };
-  }, [apiClient, creatingNote, historyOpen, historyRefreshVersion, selectedNoteId, workspaceId]);
-
-  useEffect(() => {
     if (!workspaceId || !collaborationEnabled) {
       setUnreadCount(0);
       return undefined;
@@ -1381,8 +1255,8 @@ function AuthenticatedWorkspace({
 
   useEffect(() => () => {
     notificationTargetController.current?.abort();
-    historyController.current?.abort();
-  }, []);
+    abortInspectorRequests();
+  }, [abortInspectorRequests]);
 
   const createDatabaseFromName = (name: string) => {
     if (!workspaceId || !name.trim() || creatingFirstDatabase) return;
@@ -1654,6 +1528,7 @@ function AuthenticatedWorkspace({
       await onWorkspaceChange(nextWorkspaceId);
       abortRecoveryRequests();
       abortDatabaseRequests();
+      abortInspectorRequests();
       notificationTargetController.current?.abort();
     } catch (error) {
       draftController.resume();
@@ -1962,7 +1837,7 @@ function AuthenticatedWorkspace({
     onChangeStatus: changeSelectedNoteStatus,
     onOpenPermanentDelete: openPermanentDelete,
     onToggleHistory: () => setHistoryOpen((open) => !open),
-    onRetryHistory: () => setHistoryRefreshVersion((version) => version + 1),
+    onRetryHistory: refreshHistory,
     onRestoreRevision: restoreSelectedRevision,
     onUploadAttachment: (file) => uploadAttachment(file, true),
   };
