@@ -42,11 +42,12 @@ export interface KnowledgeRepository {
   }): Promise<SavedSearch>;
   deleteSavedSearch(workspaceId: string, userId: string, savedSearchId: string): Promise<void>;
   listFolders(workspaceId: string): Promise<Folder[]>;
-  createFolder(workspaceId: string, input: CreateFolderInput, now: string): Promise<Folder | null>;
+  createFolder(workspaceId: string, input: CreateFolderInput, now: string, targetId?: string): Promise<Folder | null>;
   listTags(workspaceId: string): Promise<Tag[]>;
   listNoteTags(workspaceId: string, noteId: string): Promise<Tag[]>;
   createTag(workspaceId: string, input: CreateTagInput, now: string): Promise<Tag>;
   setNoteTags(workspaceId: string, noteId: string, tagIds: string[], now: string): Promise<void>;
+  setNoteTagsBatch(workspaceId: string, noteIds: string[], tagIds: string[], now: string): Promise<{ entity_ids: string[] }>;
   setNoteLinks(workspaceId: string, noteId: string, targetNoteIds: string[], now: string): Promise<void>;
   listNoteLinks(workspaceId: string, noteId: string): Promise<NoteLink[]>;
   listBacklinks(workspaceId: string, noteId: string): Promise<NoteLink[]>;
@@ -143,7 +144,7 @@ export class KnowledgeService {
   }
 
   async createFolder(context: KnowledgeActorContext, input: CreateFolderInput) {
-    const folder = await this.repository.createFolder(context.workspaceId, input, this.clock().toISOString());
+    const folder = await this.repository.createFolder(context.workspaceId, input, this.clock().toISOString(), context.targetId);
     if (!folder) {
       throw new KnowledgeServiceError("FOLDER_PARENT_NOT_FOUND", "Parent folder not found", 404);
     }
@@ -164,6 +165,10 @@ export class KnowledgeService {
 
   setNoteTags(context: KnowledgeActorContext, noteId: string, input: SetNoteTagsInput) {
     return this.repository.setNoteTags(context.workspaceId, noteId, input.tag_ids, this.clock().toISOString());
+  }
+
+  setNoteTagsBatch(context: KnowledgeActorContext, noteIds: string[], input: SetNoteTagsInput) {
+    return this.repository.setNoteTagsBatch(context.workspaceId, noteIds, input.tag_ids, this.clock().toISOString());
   }
 
   setNoteLinks(context: KnowledgeActorContext, noteId: string, input: SetNoteLinksInput) {

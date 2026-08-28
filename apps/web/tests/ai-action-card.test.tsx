@@ -174,4 +174,27 @@ describe("AIActionCard", () => {
     expect(screen.getByText("更新笔记")).toBeInTheDocument();
     expect(screen.getByText("目标笔记")).toBeInTheDocument();
   });
+
+  it("renders bounded database action scope without serializing field values", () => {
+    render(
+      <AIActionCard
+        proposal={{
+          action_id: "action-db-1",
+          tool: "create_database_record",
+          summary: "创建数据库记录待确认",
+          input: { database_id: "db-1", base_revision: 2, values: { "prop-title": "private value" } },
+          requires_confirmation: true,
+          expires_at: "2099-08-25T01:00:00.000Z",
+        }}
+        status="proposed"
+        onConfirm={vi.fn()}
+        onReject={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("创建数据库记录")).toBeInTheDocument();
+    expect(screen.getByText("db-1")).toBeInTheDocument();
+    expect(screen.getByText("prop-title")).toBeInTheDocument();
+    expect(screen.queryByText("private value")).not.toBeInTheDocument();
+  });
 });

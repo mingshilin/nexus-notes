@@ -28,6 +28,16 @@ function summaryForTool(tool: StoredAiActionProposal["tool"]) {
       return "恢复笔记待确认";
     case "delete_note":
       return "移入回收站待确认";
+    case "create_folder":
+      return "创建文件夹待确认";
+    case "apply_tag":
+      return "整理笔记标签待确认";
+    case "create_database_record":
+      return "创建数据库记录待确认";
+    case "update_database_record":
+      return "更新数据库记录待确认";
+    case "apply_template":
+      return "应用数据库模板待确认";
   }
 }
 
@@ -104,6 +114,16 @@ function parseStoredProposal(row: ProposalRow): StoredAiActionProposal {
     case "restore_note":
       return { ...base, tool: validated.tool, input: validated.input };
     case "delete_note":
+      return { ...base, tool: validated.tool, input: validated.input };
+    case "create_folder":
+      return { ...base, tool: validated.tool, input: validated.input };
+    case "apply_tag":
+      return { ...base, tool: validated.tool, input: validated.input };
+    case "create_database_record":
+      return { ...base, tool: validated.tool, input: validated.input };
+    case "update_database_record":
+      return { ...base, tool: validated.tool, input: validated.input };
+    case "apply_template":
       return { ...base, tool: validated.tool, input: validated.input };
   }
 }

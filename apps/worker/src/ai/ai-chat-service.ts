@@ -218,6 +218,81 @@ const ACTION_TOOL_DEFINITIONS = [
       }, ["target_note_id", "base_revision"]),
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "create_folder",
+      description: "Propose creating a workspace folder. This action always requires confirmation.",
+      parameters: actionToolParameters({
+        name: { type: "string", minLength: 1, maxLength: 120 },
+        parent_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+        position: { type: "integer", minimum: 0 },
+      }, ["name"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "apply_tag",
+      description: "Propose applying a tag set to selected workspace notes. Batch targets are bounded to 100 notes and always require confirmation.",
+      parameters: actionToolParameters({
+        target_note_ids: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } },
+        tag_ids: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } },
+      }, ["target_note_ids", "tag_ids"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_database_record",
+      description: "Propose creating a typed record in a selected database. Field types and permissions are enforced by the server.",
+      parameters: actionToolParameters({
+        database_id: { type: "string", minLength: 1 },
+        base_revision: { type: "integer", minimum: 1 },
+        note_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+        values: { type: "object", additionalProperties: true },
+      }, ["database_id", "base_revision"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_database_record",
+      description: "Propose updating typed fields on a selected database record. The current record revision is required.",
+      parameters: actionToolParameters({
+        database_id: { type: "string", minLength: 1 },
+        record_id: { type: "string", minLength: 1 },
+        base_revision: { type: "integer", minimum: 1 },
+        values: { type: "object", minProperties: 1, additionalProperties: true },
+      }, ["database_id", "record_id", "base_revision", "values"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "apply_template",
+      description: "Propose applying a database template to selected records. The operation is atomic, bounded to 100 records, and always requires confirmation.",
+      parameters: actionToolParameters({
+        database_id: { type: "string", minLength: 1 },
+        template_id: { type: "string", minLength: 1 },
+        base_revision: { type: "integer", minimum: 1 },
+        records: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              record_id: { type: "string", minLength: 1 },
+              base_revision: { type: "integer", minimum: 1 },
+            },
+            required: ["record_id", "base_revision"],
+          },
+        },
+      }, ["database_id", "template_id", "base_revision", "records"]),
+    },
+  },
 ] as const;
 
 const MAX_CUMULATIVE_READ_RESULT_BYTES = 64 * 1024;

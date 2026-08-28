@@ -56,6 +56,16 @@ function titleForTool(proposal: AiActionProposal) {
       return "恢复笔记";
     case "delete_note":
       return "删除笔记";
+    case "create_folder":
+      return "创建文件夹";
+    case "apply_tag":
+      return "整理标签";
+    case "create_database_record":
+      return "创建数据库记录";
+    case "update_database_record":
+      return "更新数据库记录";
+    case "apply_template":
+      return "应用数据库模板";
   }
   const exhaustiveTool: never = tool;
   return `AI 操作(${exhaustiveTool})`;
@@ -117,6 +127,36 @@ function detailsForProposal(proposal: AiActionProposal) {
         ["目标笔记", proposal.input.target_note_id],
         ["基准版本", String(proposal.input.base_revision)],
         ["操作", "移入回收站"],
+      ] as const;
+    case "create_folder":
+      return [
+        ["文件夹名称", proposal.input.name],
+        ["父文件夹", proposal.input.parent_id ?? "根目录"],
+      ] as const;
+    case "apply_tag":
+      return [
+        ["目标笔记", `${proposal.input.target_note_ids.length} 条`],
+        ["标签", proposal.input.tag_ids.join("、")],
+      ] as const;
+    case "create_database_record":
+      return [
+        ["目标数据库", proposal.input.database_id],
+        ["数据库版本", String(proposal.input.base_revision)],
+        ["写入字段", Object.keys(proposal.input.values).join("、") || "无"],
+      ] as const;
+    case "update_database_record":
+      return [
+        ["目标数据库", proposal.input.database_id],
+        ["目标记录", proposal.input.record_id],
+        ["基准版本", String(proposal.input.base_revision)],
+        ["更新字段", Object.keys(proposal.input.values).join("、")],
+      ] as const;
+    case "apply_template":
+      return [
+        ["目标数据库", proposal.input.database_id],
+        ["模板", proposal.input.template_id],
+        ["模板版本", String(proposal.input.base_revision)],
+        ["目标记录", `${proposal.input.records.length} 条`],
       ] as const;
   }
   const exhaustiveTool: never = tool;

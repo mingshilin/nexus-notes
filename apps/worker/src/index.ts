@@ -100,6 +100,17 @@ export type {
 } from "./ai/ai-tool-model";
 export { D1AiToolRepository } from "./ai/ai-tool-repository";
 export { AiToolOrchestrator } from "./ai/ai-tool-orchestrator";
+export {
+  AiOrganizationTools,
+  isAiOrganizationTool,
+  normalizeAiOrganizationInput,
+} from "./ai/ai-organization-tools";
+export type {
+  AiOrganizationExecutionMeta,
+  AiOrganizationInput,
+  AiOrganizationServices,
+  AiOrganizationToolName,
+} from "./ai/ai-organization-tools";
 export { UserSecretBox } from "./security/user-secret-box";
 export { D1AiConfigRepository } from "./ai/d1-ai-config-repository";
 export { UserAiConfigService, UserAiConfigError, normalizeAiEndpoint } from "./ai/user-ai-config-service";

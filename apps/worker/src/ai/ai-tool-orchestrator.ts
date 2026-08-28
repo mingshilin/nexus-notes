@@ -11,6 +11,7 @@ import {
   type StoredAiActionProposal,
 } from "./ai-tool-model";
 import { validateAiActionProposal } from "./ai-tool-model";
+import { isAiOrganizationTool, normalizeAiOrganizationInput, type AiOrganizationTools } from "./ai-organization-tools";
 
 interface AiToolOrchestratorDependencies {
   repository: AiToolRepositoryPort;
@@ -57,6 +58,7 @@ interface AiToolExecutionDependencies {
       now: string;
     }): Promise<{ id: string; action_id: string; to_email: string; subject: string; body_text: string }>;
   };
+  organization?: AiOrganizationTools;
   queue?: {
     send(message: QueueJob): Promise<unknown>;
   };
@@ -105,6 +107,16 @@ function summaryForTool(tool: StoredAiActionProposal["tool"]) {
       return "恢复笔记待确认";
     case "delete_note":
       return "移入回收站待确认";
+    case "create_folder":
+      return "创建文件夹待确认";
+    case "apply_tag":
+      return "整理笔记标签待确认";
+    case "create_database_record":
+      return "创建数据库记录待确认";
+    case "update_database_record":
+      return "更新数据库记录待确认";
+    case "apply_template":
+      return "应用数据库模板待确认";
   }
 }
 
@@ -141,6 +153,13 @@ function requiredCapability(tool: StoredAiActionProposal["tool"]) {
       return "notifications.write";
     case "send_email":
       return "email.write";
+    case "create_folder":
+    case "apply_tag":
+      return "notes.write";
+    case "create_database_record":
+    case "update_database_record":
+    case "apply_template":
+      return "databases.write";
   }
 }
 
@@ -160,6 +179,13 @@ function normalizedInput(name: string, raw: unknown): { tool: ReturnType<typeof 
     throw new AiToolError("AI_ACTION_TOOL_INVALID", "AI tool arguments must be an object", 400);
   }
   const argumentsObject = raw;
+  if (isAiOrganizationTool(tool)) {
+    try {
+      return normalizeAiOrganizationInput(tool, argumentsObject);
+    } catch {
+      throw new AiToolError("AI_ACTION_TOOL_INVALID", "AI organization tool input is invalid", 400);
+    }
+  }
   const commonKeys = ["workspace_id"] as const;
   const allowedKeys = tool === "create_note"
     ? [...commonKeys, "title", "content", "folder_id", "database_id", "daily_date"]
@@ -231,6 +257,7 @@ export class AiToolOrchestrator {
       const normalized = normalizedInput(toolCall.name, toolCall.arguments);
       assertActionPermission(actor, normalized.tool);
       const target = ["update_note", "move_note", "archive_note", "restore_note", "delete_note"].includes(normalized.tool)
+        || isAiOrganizationTool(normalized.tool) && normalized.tool !== "create_folder"
         ? "selected" as const
         : "workspace" as const;
       let requiresConfirmation: boolean;
@@ -407,6 +434,23 @@ export class AiToolOrchestrator {
           executionResult = noteResult(proposal.action_id, note, proposal.input.target_note_id);
           break;
         }
+        case "create_folder":
+        case "apply_tag":
+        case "create_database_record":
+        case "update_database_record":
+        case "apply_template": {
+          if (!dependencies.organization) {
+            throw new AiToolError("AI_ACTION_ORGANIZATION_UNAVAILABLE", "AI organization actions are unavailable", 503);
+          }
+          const value = await dependencies.organization.execute(
+            actor,
+            proposal.tool,
+            proposal.input,
+            { actionId: proposal.action_id, ...(requestId ? { requestId } : {}) },
+          );
+          executionResult = organizationResult(proposal.action_id, proposal.tool, value);
+          break;
+        }
         case "create_reminder":
           await dependencies.knowledgeService.createReminder(
             { workspaceId: actor.workspaceId, userId: actor.userId, targetId: aiActionTargetId("create_reminder", proposal.action_id) },
@@ -469,12 +513,24 @@ export class AiToolOrchestrator {
           : new AiToolError("AI_ACTION_EXECUTION_FAILED", "AI action execution failed", 500);
       const isNoteConflict = actionError.status === 409
         && ["NOTE_CONFLICT", "AI_ACTION_NOTE_CONFLICT", "DAILY_NOTE_CONFLICT", "NOTE_IDEMPOTENCY_CONFLICT"].includes(actionError.code);
+      const isOrganizationConflict = actionError.status === 409 && isAiOrganizationTool(proposal.tool);
+      const isConflict = isNoteConflict || isOrganizationConflict;
       const errorRecord = {
-        code: isNoteConflict ? "AI_ACTION_NOTE_CONFLICT" : actionError.code,
-        message: isNoteConflict ? "The note changed before the AI action could be executed" : "AI action execution failed",
+        code: isNoteConflict
+          ? "AI_ACTION_NOTE_CONFLICT"
+          : isOrganizationConflict
+            ? proposal.tool === "update_database_record" || proposal.tool === "apply_template"
+              ? "AI_ACTION_DATABASE_CONFLICT"
+              : "AI_ACTION_ORGANIZATION_CONFLICT"
+            : actionError.code,
+        message: isNoteConflict
+          ? "The note changed before the AI action could be executed"
+          : isOrganizationConflict
+            ? "The organization target changed before the AI action could be executed"
+            : "AI action execution failed",
         status: actionError.status,
       };
-      const mark = isNoteConflict ? this.dependencies.repository.markConflict.bind(this.dependencies.repository) : this.dependencies.repository.markFailed.bind(this.dependencies.repository);
+      const mark = isConflict ? this.dependencies.repository.markConflict.bind(this.dependencies.repository) : this.dependencies.repository.markFailed.bind(this.dependencies.repository);
       const stored = await mark({
         userId: actor.userId,
         workspaceId: actor.workspaceId,
@@ -489,7 +545,7 @@ export class AiToolOrchestrator {
         if (current?.status === "conflict" || current?.status === "failed") return storedExecutionResult(current);
         throw new AiToolError("AI_ACTION_CONFLICT", "AI action proposal changed before failure could be recorded", 409);
       }
-      return isNoteConflict
+      return isConflict
         ? { action_id: proposal.action_id, status: "conflict", error: errorRecord }
         : { action_id: proposal.action_id, status: "failed", error: errorRecord };
     }
@@ -550,6 +606,35 @@ function noteResult(actionId: string, value: unknown, fallbackEntityId: string):
     status: "executed",
     entity_id: typeof note.id === "string" ? note.id : fallbackEntityId,
     ...(typeof note.revision === "number" ? { revision: note.revision } : {}),
+  };
+}
+
+function organizationResult(actionId: string, tool: StoredAiActionProposal["tool"], value: unknown): AiActionExecutionResult {
+  const result = value && typeof value === "object" ? value as {
+    id?: unknown;
+    revision?: unknown;
+    entity_ids?: unknown;
+    items?: unknown;
+  } : {};
+  const entityIds = Array.isArray(result.entity_ids)
+    ? result.entity_ids.filter((id): id is string => typeof id === "string")
+    : undefined;
+  const items = Array.isArray(result.items) ? result.items : [];
+  const firstItem = items[0] && typeof items[0] === "object" ? items[0] as { id?: unknown; revision?: unknown } : undefined;
+  const entityId = typeof result.id === "string"
+    ? result.id
+    : typeof firstItem?.id === "string"
+      ? firstItem.id
+      : tool === "apply_tag" ? entityIds?.[0] : undefined;
+  const revision = typeof result.revision === "number"
+    ? result.revision
+    : typeof firstItem?.revision === "number" ? firstItem.revision : undefined;
+  return {
+    action_id: actionId,
+    status: "executed",
+    ...(entityId ? { entity_id: entityId } : {}),
+    ...(entityIds?.length ? { entity_ids: entityIds } : {}),
+    ...(revision !== undefined ? { revision } : {}),
   };
 }
 

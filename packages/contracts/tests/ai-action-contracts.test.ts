@@ -190,4 +190,29 @@ describe("AI action contracts", () => {
       error: { code: "AI_ACTION_IN_PROGRESS", message: "仍在执行", status: 409 },
     })).toMatchObject({ retryable: true });
   });
+
+  it("validates bounded organization and database action inputs", () => {
+    expect(AiActionInputSchema.parse({
+      tool: "apply_tag",
+      input: { target_note_ids: ["note-1", "note-1"], tag_ids: ["tag-1"] },
+    })).toEqual({
+      tool: "apply_tag",
+      input: { target_note_ids: ["note-1"], tag_ids: ["tag-1"] },
+    });
+    expect(AiActionInputSchema.parse({
+      tool: "create_database_record",
+      input: { database_id: "db-1", base_revision: 2, values: { "prop-1": 3 } },
+    })).toBeDefined();
+    expect(AiActionInputSchema.parse({
+      tool: "apply_template",
+      input: { database_id: "db-1", template_id: "template-1", base_revision: 4, records: [{ record_id: "record-1", base_revision: 2 }] },
+    })).toBeDefined();
+    expect(() => AiActionInputSchema.parse({
+      tool: "apply_template",
+      input: {
+        database_id: "db-1", template_id: "template-1", base_revision: 4,
+        records: Array.from({ length: 101 }, (_, index) => ({ record_id: `record-${index}`, base_revision: 1 })),
+      },
+    })).toThrow();
+  });
 });

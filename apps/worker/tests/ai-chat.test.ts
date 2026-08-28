@@ -75,6 +75,11 @@ describe("AI chat proxy", () => {
         "archive_note",
         "restore_note",
         "delete_note",
+        "create_folder",
+        "apply_tag",
+        "create_database_record",
+        "update_database_record",
+        "apply_template",
       ]);
       expect(JSON.stringify(body)).not.toContain("server-only-key");
       return Response.json({

@@ -62,21 +62,46 @@ function isRecordRevisionGuardError(error: unknown) {
   return isUniqueGuardError(error, "workspaces.id");
 }
 
+function stableDatabaseJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableDatabaseJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableDatabaseJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
 export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
-  async createRecord(context: WorkspaceContext, databaseId: string, input: CreateDatabaseRecordInput) {
+  async createRecord(context: WorkspaceContext, databaseId: string, input: CreateDatabaseRecordInput, expectedDatabaseRevision?: number) {
     const fields = await this.access.fields(context, databaseId, "write");
+    if (expectedDatabaseRevision !== undefined) assertRevision(fields.database.revision, expectedDatabaseRevision);
     const values = this.normalize(fields.properties, input.values ?? {}, fields.writable);
     const referenceCollector = this.referenceCollector(fields.properties);
     referenceCollector.add(values);
     const references = referenceCollector.items();
     await this.validateReferenceItems(context, references);
     const now = this.now();
+    const targetId = (context as WorkspaceContext & { targetId?: string }).targetId;
+    if (targetId) {
+      const replay = await this.createReplay(context, databaseId, targetId, input.note_id ?? null, values, fields.readable);
+      if (replay) return replay;
+    }
     const record: DatabaseRecord = {
-      id: this.id(), workspace_id: context.workspaceId, database_id: databaseId,
+      id: targetId ?? this.id(), workspace_id: context.workspaceId, database_id: databaseId,
       note_id: input.note_id ?? null, values, created_by: context.userId, updated_by: context.userId,
       revision: 1, created_at: now, updated_at: now,
     };
-    const operation = this.beginOperation("database_record.create", context.workspaceId, record.id, "1 = 1");
+    const operation = this.beginOperation(
+      "database_record.create",
+      context.workspaceId,
+      record.id,
+      expectedDatabaseRevision === undefined
+        ? "1 = 1"
+        : "EXISTS (SELECT 1 FROM databases WHERE workspace_id = ? AND id = ? AND revision = ?)",
+      expectedDatabaseRevision === undefined ? [] : [context.workspaceId, databaseId, expectedDatabaseRevision],
+    );
     const statements = [...operation.statements, ...this.referenceGuards(context, references), ...this.createRecordStatements(record)];
     if (record.note_id) {
       const note = await this.db.prepare(
@@ -110,10 +135,38 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     } catch (error) {
       const referenceFailure = this.referenceGuardFailure(error, references);
       if (referenceFailure) throw referenceFailure;
+      if (this.isOperationGuardError(error)) {
+        throw new DatabaseRepositoryError("REVISION_CONFLICT", "Entity revision changed", 409);
+      }
+      if (targetId && isUniqueGuardError(error, "database_records.id")) {
+        const replay = await this.createReplay(context, databaseId, targetId, input.note_id ?? null, values, fields.readable);
+        if (replay) return replay;
+      }
       throw error;
     }
     await this.notifyPresence(context.workspaceId, "database_record", record.id, record.revision);
     return record;
+  }
+
+  private async createReplay(
+    context: WorkspaceContext,
+    databaseId: string,
+    recordId: string,
+    noteId: string | null,
+    values: Record<string, unknown>,
+    readable: ReadonlySet<string>,
+  ) {
+    const rows = await this.recordRows(context.workspaceId, databaseId, [recordId]);
+    if (rows.length === 0) return null;
+    const [record] = await this.materialize(rows, readable);
+    if (record
+      && record.revision === 1
+      && record.created_by === context.userId
+      && record.note_id === noteId
+      && stableDatabaseJson(record.values) === stableDatabaseJson(values)) {
+      return record;
+    }
+    throw new DatabaseRepositoryError("IDEMPOTENCY_CONFLICT", "Record creation idempotency conflict", 409);
   }
 
   async getRecord(context: WorkspaceContext, databaseId: string, recordId: string, signal?: AbortSignal) {
@@ -226,7 +279,12 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     return { id: recordId };
   }
 
-  async bulkEditRecords(context: WorkspaceContext, databaseId: string, input: BulkEditRecordsInput) {
+  async bulkEditRecords(
+    context: WorkspaceContext,
+    databaseId: string,
+    input: BulkEditRecordsInput,
+    options: { guards?: () => D1PreparedStatement[] } = {},
+  ) {
     const fields = await this.access.fields(context, databaseId, "write");
     const recordIds = input.mutations.map((mutation) => mutation.record_id);
     if (new Set(recordIds).size !== recordIds.length) {
@@ -264,7 +322,11 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     const valueRows = prepared.flatMap((item) => Object.entries(item.values).map(([property_id, value]) => ({
       id: this.id(), record_id: item.mutation.record_id, property_id, value_json: JSON.stringify(value),
     })));
-    const statements: D1PreparedStatement[] = [...(operation?.statements ?? []), revisionGuard(this.db, context, databaseId, expected)];
+    const statements: D1PreparedStatement[] = [
+      ...(operation?.statements ?? []),
+      ...(options.guards?.() ?? []),
+      revisionGuard(this.db, context, databaseId, expected),
+    ];
     statements.push(...this.referenceGuards(context, references));
     statements.push(this.db.prepare(
       `UPDATE database_records SET updated_by = ?, revision = revision + 1, updated_at = ?
@@ -298,6 +360,7 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
         operation ? this.operationCondition(operation.operationId) : undefined,
       ));
     }
+    statements.push(...(options.guards?.() ?? []));
     statements.push(...this.referenceGuards(context, references));
     if (operation) statements.push(this.operationCleanup(operation.operationId));
     try {

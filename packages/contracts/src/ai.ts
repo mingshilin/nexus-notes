@@ -189,6 +189,11 @@ export const AiActionToolNameSchema = z.enum([
   "archive_note",
   "restore_note",
   "delete_note",
+  "create_folder",
+  "apply_tag",
+  "create_database_record",
+  "update_database_record",
+  "apply_template",
 ]);
 export type AiActionToolName = z.infer<typeof AiActionToolNameSchema>;
 
@@ -268,6 +273,8 @@ const AiActionSummarySchema = z.string().trim().min(1).max(280);
 const AiActionReasonSchema = z.string().trim().min(1).max(500);
 const NoteTitleSchema = z.string().trim().max(160);
 const NoteContentSchema = z.string().max(20_000);
+const OrganizationIdsSchema = z.array(EntityIdSchema).min(1).max(100).transform((ids) => [...new Set(ids)]);
+const OrganizationValuesSchema = z.record(EntityIdSchema, z.unknown());
 
 export const AiActionStatusSchema = z.enum(["proposed", "confirmed", "executing", "rejected", "expired", "executed", "failed", "conflict"]);
 export type AiActionStatus = z.infer<typeof AiActionStatusSchema>;
@@ -336,6 +343,71 @@ export const DeleteNoteActionInputSchema = NoteActionTargetSchema.extend({
   patch: z.object({ status: z.literal("trashed") }).strict(),
 }).strict();
 
+export const CreateFolderActionInputSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  parent_id: EntityIdSchema.nullable().optional(),
+  position: z.number().int().min(0).optional(),
+}).strict();
+
+export const ApplyTagActionInputSchema = z.object({
+  target_note_ids: OrganizationIdsSchema.optional(),
+  target_note_id: EntityIdSchema.optional(),
+  tag_ids: OrganizationIdsSchema,
+}).strict().superRefine((input, context) => {
+  if (!input.target_note_ids && !input.target_note_id) {
+    context.addIssue({ code: "custom", path: ["target_note_ids"], message: "At least one target note is required" });
+  }
+  if (input.target_note_ids && input.target_note_id) {
+    context.addIssue({ code: "custom", path: ["target_note_id"], message: "Use target_note_ids or target_note_id, not both" });
+  }
+}).transform((input) => ({
+  target_note_ids: input.target_note_ids ?? [input.target_note_id!],
+  tag_ids: input.tag_ids,
+}));
+
+export const CreateDatabaseRecordActionInputSchema = z.object({
+  database_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+  note_id: EntityIdSchema.nullable().optional(),
+  values: OrganizationValuesSchema.default({}),
+}).strict();
+
+export const UpdateDatabaseRecordActionInputSchema = z.object({
+  database_id: EntityIdSchema,
+  record_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+  values: OrganizationValuesSchema.refine((values) => Object.keys(values).length > 0, "At least one value must change"),
+}).strict();
+
+export const ApplyTemplateActionInputSchema = z.object({
+  database_id: EntityIdSchema,
+  template_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+  records: z.array(z.object({
+    record_id: EntityIdSchema,
+    base_revision: PositiveRevisionSchema,
+  }).strict()).min(1).max(100),
+}).strict().superRefine((input, context) => {
+  if (new Set(input.records.map((record) => record.record_id)).size !== input.records.length) {
+    context.addIssue({ code: "custom", path: ["records"], message: "A record may only appear once per action" });
+  }
+});
+
+export type CreateFolderActionInput = z.infer<typeof CreateFolderActionInputSchema>;
+export type ApplyTagActionInput = z.infer<typeof ApplyTagActionInputSchema>;
+export type CreateDatabaseRecordActionInput = z.infer<typeof CreateDatabaseRecordActionInputSchema>;
+export type UpdateDatabaseRecordActionInput = z.infer<typeof UpdateDatabaseRecordActionInputSchema>;
+export type ApplyTemplateActionInput = z.infer<typeof ApplyTemplateActionInputSchema>;
+
+export const AiOrganizationToolNameSchema = z.enum([
+  "create_folder",
+  "apply_tag",
+  "create_database_record",
+  "update_database_record",
+  "apply_template",
+]);
+export type AiOrganizationToolName = z.infer<typeof AiOrganizationToolNameSchema>;
+
 export const AiActionInputSchema = z.discriminatedUnion("tool", [
   z.object({ tool: z.literal("create_note"), input: CreateNoteActionInputSchema }).strict(),
   z.object({ tool: z.literal("create_reminder"), input: CreateReminderActionInputSchema }).strict(),
@@ -346,6 +418,11 @@ export const AiActionInputSchema = z.discriminatedUnion("tool", [
   z.object({ tool: z.literal("archive_note"), input: ArchiveNoteActionInputSchema }).strict(),
   z.object({ tool: z.literal("restore_note"), input: RestoreNoteActionInputSchema }).strict(),
   z.object({ tool: z.literal("delete_note"), input: DeleteNoteActionInputSchema }).strict(),
+  z.object({ tool: z.literal("create_folder"), input: CreateFolderActionInputSchema }).strict(),
+  z.object({ tool: z.literal("apply_tag"), input: ApplyTagActionInputSchema }).strict(),
+  z.object({ tool: z.literal("create_database_record"), input: CreateDatabaseRecordActionInputSchema }).strict(),
+  z.object({ tool: z.literal("update_database_record"), input: UpdateDatabaseRecordActionInputSchema }).strict(),
+  z.object({ tool: z.literal("apply_template"), input: ApplyTemplateActionInputSchema }).strict(),
 ]).superRefine((value, context) => {
   const result = BoundedJsonSchema.safeParse(value.input);
   if (!result.success) {
@@ -362,6 +439,7 @@ export const AiActionExecutionResultSchema = z.object({
   status: z.enum(["executed", "failed", "conflict"]),
   retryable: z.boolean().optional(),
   entity_id: EntityIdSchema.optional(),
+  entity_ids: z.array(EntityIdSchema).max(100).optional(),
   revision: PositiveRevisionSchema.optional(),
   error: z.object({
     code: z.string().trim().min(1).max(128),

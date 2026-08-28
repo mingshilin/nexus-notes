@@ -54,6 +54,7 @@ import { AiEmailOutboxDispatcher } from "./ai/ai-email-outbox-dispatcher";
 import { AiEmailConsumer } from "./ai/ai-email-consumer";
 import { AiToolOrchestrator } from "./ai/ai-tool-orchestrator";
 import { AiToolError, aiActionTargetId, type StoredAiActionProposal } from "./ai/ai-tool-model";
+import { AiOrganizationTools } from "./ai/ai-organization-tools";
 import { AiReadTools } from "./ai/ai-read-tools";
 import { registerAiRoutes } from "./routes/ai";
 import { registerAccountRoutes } from "./routes/account";
@@ -288,6 +289,7 @@ function createKnowledgeService(env: BetaWorkerEnv) {
     listNoteTags: (...args) => taxonomy.listNoteTags(...args),
     createTag: (...args) => taxonomy.createTag(...args),
     setNoteTags: (...args) => taxonomy.setNoteTags(...args),
+    setNoteTagsBatch: (...args) => taxonomy.setNoteTagsBatch(...args),
     setNoteLinks: (...args) => taxonomy.setNoteLinks(...args),
     listNoteLinks: (...args) => taxonomy.listNoteLinks(...args),
     listBacklinks: (...args) => taxonomy.listBacklinks(...args),
@@ -437,6 +439,10 @@ function createAiActionService(env: BetaWorkerEnv) {
   const noteService = createNoteService(env);
   const knowledgeService = createKnowledgeService(env);
   const databaseRepository = createDatabaseRepository(env);
+  const organization = new AiOrganizationTools({
+    knowledge: knowledgeService,
+    databases: databaseRepository,
+  });
   const readTools = new AiReadTools({
     notes: noteService,
     knowledge: knowledgeService,
@@ -452,6 +458,7 @@ function createAiActionService(env: BetaWorkerEnv) {
     knowledgeService,
     collaborationRepository,
     emailOutboxRepository,
+    organization,
     queue,
   };
   const orchestrator = new AiToolOrchestrator({

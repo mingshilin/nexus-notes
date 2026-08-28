@@ -37,6 +37,7 @@ describe("AI chat tool protocol", () => {
         "search_notes", "get_note", "list_reminders", "search_databases", "get_database_record",
         "create_note", "create_reminder", "create_notification", "send_email",
         "update_note", "move_note", "archive_note", "restore_note", "delete_note",
+        "create_folder", "apply_tag", "create_database_record", "update_database_record", "apply_template",
       ]);
       const searchNotesTool = body.tools.find((tool: { function: { name: string } }) => tool.function.name === "search_notes");
       expect(searchNotesTool.function.description).toContain("same query and selected-note scope");
@@ -95,6 +96,7 @@ describe("AI chat tool protocol", () => {
       expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
         "create_note", "create_reminder", "create_notification", "send_email",
         "update_note", "move_note", "archive_note", "restore_note", "delete_note",
+        "create_folder", "apply_tag", "create_database_record", "update_database_record", "apply_template",
       ]);
       return Response.json({ choices: [{ message: { content: "ok", tool_calls: [{ id: "read-1", type: "function", function: { name: "search_notes", arguments: "{}" } }] } }] });
     });
@@ -227,7 +229,7 @@ describe("AI chat tool protocol", () => {
         stream: false,
         tool_choice: "auto",
       });
-      expect(body.tools).toHaveLength(9);
+      expect(body.tools).toHaveLength(14);
       expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
         "create_note",
         "create_reminder",
@@ -238,6 +240,11 @@ describe("AI chat tool protocol", () => {
         "archive_note",
         "restore_note",
         "delete_note",
+        "create_folder",
+        "apply_tag",
+        "create_database_record",
+        "update_database_record",
+        "apply_template",
       ]);
       expect(JSON.stringify(body)).not.toContain("server-only-key");
       return Response.json({ choices: [{ message: { content: "先列出三个最重要的任务。" } }] });
