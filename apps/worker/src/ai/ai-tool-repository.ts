@@ -1,4 +1,4 @@
-import { AiActionExecutionResultSchema, type AiActionExecutionResult, type AiActionStatus } from "@nexus/contracts";
+import { AI_TOOL_CATALOG, AiActionExecutionResultSchema, type AiActionExecutionResult, type AiActionHistoryItem, type AiActionStatus, type AiTrustedMode, type UpdateAiTrustedModeInput } from "@nexus/contracts";
 
 import {
   type AiToolRepositoryPort,
@@ -67,6 +67,8 @@ interface ProposalRow {
 const proposalColumns = `id, user_id, workspace_id, tool, input_json, status,
   requires_confirmation, idempotency_key, revision, expires_at, created_at, updated_at,
   result_json, error_code, error_message, error_status, execution_claim_token, execution_lease_until`;
+
+const riskByTool = new Map(AI_TOOL_CATALOG.map((entry) => [entry.name, entry.risk]));
 
 function parseStoredProposal(row: ProposalRow): StoredAiActionProposal {
   const validated = validateAiActionProposal(
@@ -150,6 +152,65 @@ export class D1AiToolRepository implements AiToolRepositoryPort {
        LIMIT 1`,
     ).bind(userId, workspaceId, actionId).first<ProposalRow>();
     return row ? parseStoredProposal(row) : null;
+  }
+
+  async getTrustedMode(workspaceId: string): Promise<AiTrustedMode> {
+    const row = await this.db.prepare(
+      "SELECT enabled, expires_at, revision FROM ai_trusted_modes WHERE workspace_id = ? LIMIT 1",
+    ).bind(workspaceId).first<{ enabled: number; expires_at: string | null; revision: number }>();
+    return row
+      ? { workspace_id: workspaceId, enabled: Boolean(row.enabled), expires_at: row.expires_at, revision: row.revision }
+      : { workspace_id: workspaceId, enabled: false, expires_at: null, revision: 1 };
+  }
+
+  async updateTrustedMode(workspaceId: string, input: UpdateAiTrustedModeInput): Promise<AiTrustedMode | null> {
+    const row = await this.db.prepare(
+      `INSERT INTO ai_trusted_modes (workspace_id, enabled, expires_at, revision)
+       SELECT ?, ?, ?, 2
+       WHERE ? = 1 AND EXISTS (SELECT 1 FROM workspaces WHERE id = ?)
+       ON CONFLICT(workspace_id) DO UPDATE SET
+         enabled = excluded.enabled,
+         expires_at = excluded.expires_at,
+         revision = ai_trusted_modes.revision + 1
+       WHERE ai_trusted_modes.revision = ?
+       RETURNING enabled, expires_at, revision`,
+    ).bind(
+      workspaceId,
+      Number(input.enabled),
+      input.expires_at,
+      input.base_revision,
+      workspaceId,
+      input.base_revision,
+    ).first<{ enabled: number; expires_at: string | null; revision: number }>();
+    return row
+      ? { workspace_id: workspaceId, enabled: Boolean(row.enabled), expires_at: row.expires_at, revision: row.revision }
+      : null;
+  }
+
+  async listActionHistory(userId: string, workspaceId: string, limit: number): Promise<AiActionHistoryItem[]> {
+    const rows = await this.db.prepare(
+      `SELECT id, tool, status, error_code, created_at, updated_at
+       FROM ai_action_proposals
+       WHERE user_id = ? AND workspace_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`,
+    ).bind(userId, workspaceId, Math.max(1, Math.min(limit, 50))).all<{
+      id: string;
+      tool: StoredAiActionProposal["tool"];
+      status: AiActionStatus;
+      error_code: string | null;
+      created_at: string;
+      updated_at: string;
+    }>();
+    return (rows.results ?? []).map((row) => ({
+      action_id: row.id,
+      tool: row.tool,
+      risk: riskByTool.get(row.tool)!,
+      status: row.status,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      ...(row.error_code ? { error_code: row.error_code } : {}),
+    }));
   }
 
   async insertProposal(input: InsertProposalInput) {

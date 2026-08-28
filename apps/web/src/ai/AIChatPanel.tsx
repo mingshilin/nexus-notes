@@ -3,13 +3,15 @@ import { Bot, Send, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { ApiClient } from "../data/api-client";
 import { AIConfigPanel } from "./AIConfigPanel";
+import { AIActionHistoryPanel, type ActionHistoryClient } from "./AIActionHistoryPanel";
+import { AITrustedModePanel, type TrustedModeClient } from "./AITrustedModePanel";
 import { AIActionCard, type AIActionCardStatus } from "./AIActionCard";
 
 const QUICK_PROMPTS = ["制定今日计划", "整理我的任务", "如何改进这篇笔记"] as const;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 interface AIChatPanelProps {
-  client: Pick<ApiClient, "request" | "confirmAiAction" | "rejectAiAction">;
+  client: Pick<ApiClient, "request" | "confirmAiAction" | "rejectAiAction"> & Partial<Pick<ApiClient, "getAiTrustedMode" | "updateAiTrustedMode" | "listAiActionHistory">>;
   workspaceId: string;
   showStatus?: boolean;
 }
@@ -359,6 +361,8 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
       ) : (
         <>
           {showStatus ? <AIConfigPanel client={client} /> : null}
+          {showStatus && workspaceId && typeof client.getAiTrustedMode === "function" && typeof client.updateAiTrustedMode === "function" ? <AITrustedModePanel client={client as TrustedModeClient} workspaceId={workspaceId} /> : null}
+          {showStatus && workspaceId && typeof client.listAiActionHistory === "function" ? <AIActionHistoryPanel client={client as ActionHistoryClient} workspaceId={workspaceId} /> : null}
           {!workspaceId ? <p role="status">未选择工作区，无法使用 AI 助手。</p> : null}
           <div className="ai-chat-messages" aria-live="polite">
             {entries.length === 0 ? (

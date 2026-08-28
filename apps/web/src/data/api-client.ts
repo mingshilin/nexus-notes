@@ -2,6 +2,8 @@ import type {
   ApiErrorPayload,
   ApiResponse,
   AiActionExecutionResult,
+  AiActionHistoryResponse,
+  AiTrustedMode,
   RequestClass,
   RequestPolicy,
 } from "@nexus/contracts";
@@ -254,6 +256,36 @@ export class ApiClient {
       body: { action_id: actionId, base_revision: baseRevision },
       requestClass: "command",
       policy: { timeoutMs: 12_000, retry: 0, idempotencyKey: crypto.randomUUID() },
+    });
+  }
+
+  getAiTrustedMode(workspaceId: string, signal?: AbortSignal) {
+    return this.request<AiTrustedMode>({
+      path: "/api/v2/ai/trusted-mode",
+      headers: { "x-workspace-id": workspaceId },
+      requestClass: "query",
+      policy: { timeoutMs: 8_000, retry: 1, dedupeKey: `ai-trusted-mode:${workspaceId}`, signal },
+    });
+  }
+
+  updateAiTrustedMode(workspaceId: string, input: Pick<AiTrustedMode, "enabled" | "expires_at"> & { base_revision: number }) {
+    return this.request<AiTrustedMode>({
+      path: "/api/v2/ai/trusted-mode",
+      method: "PATCH",
+      headers: { "x-workspace-id": workspaceId },
+      body: input,
+      requestClass: "command",
+      policy: { timeoutMs: 12_000, retry: 0, idempotencyKey: crypto.randomUUID() },
+    });
+  }
+
+  listAiActionHistory(workspaceId: string, limit = 20, signal?: AbortSignal) {
+    const query = new URLSearchParams({ limit: String(limit) });
+    return this.request<AiActionHistoryResponse>({
+      path: `/api/v2/ai/actions/history?${query.toString()}`,
+      headers: { "x-workspace-id": workspaceId },
+      requestClass: "query",
+      policy: { timeoutMs: 8_000, retry: 1, dedupeKey: `ai-action-history:${workspaceId}:${limit}`, signal },
     });
   }
 

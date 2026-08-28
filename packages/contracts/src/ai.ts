@@ -280,6 +280,27 @@ const OrganizationValuesSchema = z.record(EntityIdSchema, z.unknown());
 export const AiActionStatusSchema = z.enum(["proposed", "confirmed", "executing", "rejected", "expired", "executed", "failed", "conflict"]);
 export type AiActionStatus = z.infer<typeof AiActionStatusSchema>;
 
+export const AiActionHistoryItemSchema = z.object({
+  action_id: EntityIdSchema,
+  tool: AiActionToolNameSchema,
+  risk: AiToolRiskSchema,
+  status: AiActionStatusSchema,
+  created_at: TimestampSchema,
+  updated_at: TimestampSchema,
+  error_code: z.string().trim().min(1).max(128).optional(),
+}).strict();
+export type AiActionHistoryItem = z.infer<typeof AiActionHistoryItemSchema>;
+
+export const AiActionHistoryResponseSchema = z.object({
+  items: z.array(AiActionHistoryItemSchema).max(50),
+}).strict();
+export type AiActionHistoryResponse = z.infer<typeof AiActionHistoryResponseSchema>;
+
+export const AiActionHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+}).strict();
+export type AiActionHistoryQuery = z.infer<typeof AiActionHistoryQuerySchema>;
+
 export const CreateNoteActionInputSchema = z.object({
   title: NoteTitleSchema.default(""),
   content: NoteContentSchema.default(""),

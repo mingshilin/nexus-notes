@@ -528,7 +528,7 @@ describe("AccountCenter", () => {
   it("implements the account-tab ARIA and keyboard contract without resetting panels", async () => {
     renderCenter();
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.map((tab) => tab.textContent)).toEqual(["总览", "个人资料", "安全", "工作区", "偏好与通知", "数据与隐私"]);
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["总览", "个人资料", "安全", "工作区", "偏好与通知", "数据与隐私", "AI 控制"]);
     expect(tabs[1]).toHaveAttribute("aria-controls", "account-panel-profile");
     expect(tabs[1]).toHaveAttribute("aria-selected", "true");
     expect(tabs[1]).toHaveAttribute("tabindex", "0");
@@ -537,8 +537,8 @@ describe("AccountCenter", () => {
     fireEvent.keyDown(tabs[1]!, { key: "ArrowRight" });
     expect(tabs[2]).toHaveFocus();
     fireEvent.keyDown(tabs[2]!, { key: "End" });
-    expect(tabs[5]).toHaveFocus();
-    fireEvent.keyDown(tabs[5]!, { key: "Home" });
+    expect(tabs[6]).toHaveFocus();
+    fireEvent.keyDown(tabs[6]!, { key: "Home" });
     expect(tabs[0]).toHaveFocus();
     fireEvent.click(tabs[3]!);
     expect(screen.getByRole("heading", { name: "工作区" })).toBeInTheDocument();

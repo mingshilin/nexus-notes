@@ -1,5 +1,5 @@
-import { isAiTrustedModeActive, normalizeEmail } from "@nexus/domain";
-import { CreateJobInputSchema, FeedbackInputSchema, type AiActionExecutionResult, type OperationsStatus, type WorkspaceContext } from "@nexus/contracts";
+import { isAiTrustedModeActive, normalizeEmail, normalizeAiTrustedModeExpiry } from "@nexus/domain";
+import { CreateJobInputSchema, FeedbackInputSchema, type AiActionExecutionResult, type OperationsStatus, type UpdateAiTrustedModeInput, type WorkspaceContext } from "@nexus/contracts";
 import { AuthService } from "./auth/auth-service";
 import { SecureTokenService, WebCryptoPasswordHasher } from "./auth/crypto";
 import { D1AuthRepository } from "./auth/d1-auth-repository";
@@ -519,6 +519,23 @@ function createAiActionService(env: BetaWorkerEnv) {
   });
   return {
     ...chat,
+    async getTrustedMode(workspaceId: string) {
+      return repository.getTrustedMode(workspaceId);
+    },
+    async updateTrustedMode(workspaceId: string, input: UpdateAiTrustedModeInput, _requestId: string) {
+      if (input.enabled && env.AI_ENABLED?.trim().toLowerCase() !== "true") {
+        throw new ConfigurationError("AI service is disabled");
+      }
+      const expiresAt = normalizeAiTrustedModeExpiry(input.enabled, new Date(), input.expires_at);
+      const updated = await repository.updateTrustedMode(workspaceId, { ...input, expires_at: expiresAt });
+      if (!updated) {
+        throw new AiToolError("AI_TRUSTED_MODE_CONFLICT", "Trusted mode changed before this update could be saved", 409);
+      }
+      return updated;
+    },
+    async listActionHistory(userId: string, workspaceId: string, limit: number) {
+      return repository.listActionHistory(userId, workspaceId, limit);
+    },
     async chat(input: Parameters<AiChatService["chat"]>[0], signal: AbortSignal, userId?: string, workspace?: WorkspaceContext) {
       if (env.AI_ENABLED?.trim().toLowerCase() !== "true") {
         throw new ConfigurationError("AI service is disabled");

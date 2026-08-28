@@ -49,6 +49,7 @@ export function AccountAndAIDomain({ client, workspaceId, selectedEntity, callba
     <Suspense fallback={<p className="database-empty" role="status">正在加载账户中心…</p>}>
       <LazyAccountCenter
         client={client.profile}
+        ai={client.api}
         collaboration={client.collaboration}
         operations={client.operations}
         workspaces={selectedEntity.workspaces}

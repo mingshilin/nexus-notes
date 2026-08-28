@@ -1,17 +1,24 @@
 import {
+  AiActionHistoryQuerySchema,
+  AiActionHistoryResponseSchema,
   AiActionConfirmSchema,
   AiActionRejectSchema,
   AiActionExecutionResultSchema,
   AiChatInputSchema,
+  AiTrustedModeSchema,
   DeleteAiUserConfigInputSchema,
   TestAiUserConfigInputSchema,
+  UpdateAiTrustedModeInputSchema,
   UpsertAiUserConfigInputSchema,
   type AiChatInput,
   type AiChatResponse,
   type AiActionExecutionResult,
+  type AiActionHistoryItem,
+  type AiTrustedMode,
   type AiStatus,
   type DeleteAiUserConfigInput,
   type TestAiUserConfigInput,
+  type UpdateAiTrustedModeInput,
   type UpsertAiUserConfigInput,
   type WorkspaceContext,
 } from "@nexus/contracts";
@@ -42,6 +49,9 @@ export interface AiChatRouteService {
     baseRevision: number,
     requestId: string,
   ): Promise<{ rejected: true }>;
+  getTrustedMode?(workspaceId: string): Promise<AiTrustedMode>;
+  updateTrustedMode?(workspaceId: string, input: UpdateAiTrustedModeInput, requestId: string): Promise<AiTrustedMode>;
+  listActionHistory?(userId: string, workspaceId: string, limit: number): Promise<AiActionHistoryItem[]>;
 }
 
 class AiConfigurationRouteError extends Error {
@@ -91,6 +101,55 @@ export function registerAiRoutes<TEnv>(registry: AiRegistry<TEnv>, createService
     handler: async ({ env, principal, body, requestId }) => ({
       data: await required(createService(env).deleteConfig)(principal!.userId, body, requestId),
     }),
+  });
+  registry.register({
+    method: "GET",
+    path: "/api/v2/ai/trusted-mode",
+    auth: "workspace",
+    minimumRole: "viewer",
+    rateLimit: { bucket: "account", limit: 30, windowSeconds: 60 },
+    handler: async ({ env, workspace }) => ({
+      data: AiTrustedModeSchema.parse(await required(createService(env).getTrustedMode)(workspace!.workspaceId)),
+    }),
+  });
+  registry.register({
+    method: "PATCH",
+    path: "/api/v2/ai/trusted-mode",
+    auth: "workspace",
+    minimumRole: "editor",
+    rateLimit: { bucket: "account", limit: 20, windowSeconds: 60 },
+    body: UpdateAiTrustedModeInputSchema,
+    handler: async ({ env, workspace, body, requestId }) => ({
+      data: AiTrustedModeSchema.parse(
+        await required(createService(env).updateTrustedMode)(workspace!.workspaceId, body, requestId),
+      ),
+    }),
+  });
+  registry.register({
+    method: "GET",
+    path: "/api/v2/ai/actions/history",
+    auth: "workspace",
+    minimumRole: "viewer",
+    rateLimit: { bucket: "account", limit: 30, windowSeconds: 60 },
+    handler: async ({ env, principal, workspace, request }) => {
+      const parsed = AiActionHistoryQuerySchema.safeParse({
+        limit: new URL(request.url).searchParams.get("limit") ?? undefined,
+      });
+      if (!parsed.success) {
+        throw Object.assign(new Error("AI action history query is invalid"), {
+          code: "INVALID_QUERY", status: 400, retryable: false,
+        });
+      }
+      return {
+        data: AiActionHistoryResponseSchema.parse({
+          items: await required(createService(env).listActionHistory)(
+            principal!.userId,
+            workspace!.workspaceId,
+            parsed.data.limit,
+          ),
+        }),
+      };
+    },
   });
   registry.register({
     method: "POST",
