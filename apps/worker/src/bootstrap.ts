@@ -414,38 +414,59 @@ function createAiChatService(env: BetaWorkerEnv) {
     if (!personal) throw new ConfigurationError("User secret encryption is not configured");
     return personal;
   };
-  const assertAiEnabled = () => {
-    if (!aiEnabled) throw new ConfigurationError("AI service is disabled");
-  };
   const fallbackStatus = () => new AiChatService(fallback).status();
+  const resolveProvider = async (userId?: string) => {
+    const preference = userId && personal
+      ? await personal.getProviderPreference(userId)
+      : { source: "system" as const, revision: 1 };
+    const personalProvider = userId && personal && preference.source === "personal"
+      ? await personal.resolve(userId)
+      : null;
+    if (personalProvider) return { ...personalProvider, source: "personal" as const, selectedSource: preference.source };
+    if (aiEnabled) return { ...fallback, source: "server_default" as const, selectedSource: preference.source };
+    return null;
+  };
   return {
     async status(userId?: string) {
-      if (!aiEnabled) throw new ConfigurationError("AI service is disabled");
-      if (personal && userId) {
-        const status = await personal.status(userId);
-        if (status.configured) return status;
-      }
-      const status = fallbackStatus();
-      return { ...status, source: status.configured ? "server_default" as const : "unconfigured" as const };
+      const preference = userId && personal
+        ? await personal.getProviderPreference(userId)
+        : { source: "system" as const, revision: 1 };
+      const personalStatus = personal && userId
+        ? await personal.status(userId)
+        : { configured: false, source: "unconfigured" as const };
+      const fallback = fallbackStatus();
+      const systemConfigured = aiEnabled && fallback.configured;
+      const personalConfigured = personalStatus.configured;
+      const effective = preference.source === "personal" && personalConfigured
+        ? personalStatus
+        : systemConfigured
+          ? { ...fallback, source: "server_default" as const }
+          : { configured: false, source: "unconfigured" as const };
+      return {
+        ...effective,
+        selected_source: preference.source,
+        personal_configured: personalConfigured,
+        system_configured: systemConfigured,
+        fallback: preference.source === "personal" && !personalConfigured && systemConfigured,
+      };
     },
     async getConfig(userId: string) {
-      if (!aiEnabled) throw new ConfigurationError("AI service is disabled");
-      const status = personal ? await personal.status(userId) : { configured: false, source: "unconfigured" as const };
-      if (status.configured) return status;
-      const fallbackConfigured = fallbackStatus().configured;
-      return fallbackConfigured ? { configured: true, source: "server_default" as const } : status;
+      return personal ? personal.status(userId) : { configured: false, source: "unconfigured" as const };
     },
     saveConfig(userId: string, input: Parameters<UserAiConfigService["saveConfig"]>[1], requestId: string) {
-      assertAiEnabled();
       return requirePersonal().saveConfig(userId, input, requestId);
     },
     testConfig(userId: string, input: Parameters<UserAiConfigService["testConfig"]>[1], signal: AbortSignal, requestId: string) {
-      assertAiEnabled();
       return requirePersonal().testConfig(userId, input, signal, requestId);
     },
     deleteConfig(userId: string, input: Parameters<UserAiConfigService["deleteConfig"]>[1], requestId: string) {
-      assertAiEnabled();
       return requirePersonal().deleteConfig(userId, input, requestId);
+    },
+    getProviderPreference(userId: string) {
+      return requirePersonal().getProviderPreference(userId);
+    },
+    updateProviderPreference(userId: string, input: Parameters<UserAiConfigService["updateProviderPreference"]>[1]) {
+      return requirePersonal().updateProviderPreference(userId, input);
     },
     async chat(
       input: Parameters<AiChatService["chat"]>[0],
@@ -453,9 +474,9 @@ function createAiChatService(env: BetaWorkerEnv) {
       userId?: string,
       options?: Parameters<AiChatService["chat"]>[2],
     ) {
-      if (!aiEnabled) throw new ConfigurationError("AI service is disabled");
-      const resolved = personal && userId ? await personal.resolve(userId) : null;
-      return new AiChatService(resolved ?? fallback).chat(input, signal, options);
+      const resolved = await resolveProvider(userId);
+      if (!resolved) throw new ConfigurationError("AI service is disabled");
+      return new AiChatService(resolved).chat(input, signal, options);
     },
   };
 }
@@ -537,9 +558,6 @@ function createAiActionService(env: BetaWorkerEnv) {
       return repository.listActionHistory(userId, workspaceId, limit);
     },
     async chat(input: Parameters<AiChatService["chat"]>[0], signal: AbortSignal, userId?: string, workspace?: WorkspaceContext) {
-      if (env.AI_ENABLED?.trim().toLowerCase() !== "true") {
-        throw new ConfigurationError("AI service is disabled");
-      }
       const actor = userId && workspace ? {
         workspaceId: workspace.workspaceId,
         userId,
@@ -575,9 +593,6 @@ function createAiActionService(env: BetaWorkerEnv) {
       } : undefined);
     },
     async confirmAction(userId: string, workspace: WorkspaceContext, actionId: string, baseRevision: number, requestId: string) {
-      if (env.AI_ENABLED?.trim().toLowerCase() !== "true") {
-        throw new ConfigurationError("AI service is disabled");
-      }
       const actor = { workspaceId: workspace.workspaceId, userId, role: workspace.role, capabilities: workspace.capabilities };
       try {
         await orchestrator.confirm(actor, actionId, baseRevision);
@@ -599,9 +614,6 @@ function createAiActionService(env: BetaWorkerEnv) {
       });
     },
     async rejectAction(userId: string, workspace: WorkspaceContext, actionId: string, baseRevision: number, requestId: string) {
-      if (env.AI_ENABLED?.trim().toLowerCase() !== "true") {
-        throw new ConfigurationError("AI service is disabled");
-      }
       const actor = { workspaceId: workspace.workspaceId, userId, role: workspace.role, capabilities: workspace.capabilities };
       return orchestrator.reject(actor, actionId, baseRevision);
     },

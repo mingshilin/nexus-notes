@@ -8,6 +8,8 @@ describe("AI chat proxy", () => {
     registerAiRoutes({ register(definition: typeof definitions[number]) { definitions.push(definition); } }, () => new AiChatService({}));
 
     expect(definitions.map(({ method, path, auth }) => ({ method, path, auth }))).toEqual([
+      { method: "GET", path: "/api/v2/ai/provider", auth: "session" },
+      { method: "PATCH", path: "/api/v2/ai/provider", auth: "session" },
       { method: "GET", path: "/api/v2/ai/status", auth: "workspace" },
       { method: "GET", path: "/api/v2/ai/config", auth: "session" },
       { method: "PUT", path: "/api/v2/ai/config", auth: "session" },
@@ -20,7 +22,7 @@ describe("AI chat proxy", () => {
       { method: "POST", path: "/api/v2/ai/actions/:actionId/reject", auth: "workspace" },
       { method: "POST", path: "/api/v2/ai/chat", auth: "workspace" },
     ]);
-    expect(definitions[0]).toEqual(expect.objectContaining({ minimumRole: "viewer" }));
+    expect(definitions.find(({ path }) => path === "/api/v2/ai/status")).toEqual(expect.objectContaining({ minimumRole: "viewer" }));
     expect(definitions.at(-1)).toEqual(expect.objectContaining({
       minimumRole: "viewer",
       rateLimit: { bucket: "ip", limit: 30, windowSeconds: 60 },
