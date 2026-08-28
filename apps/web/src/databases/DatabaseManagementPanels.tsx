@@ -130,10 +130,12 @@ export function DatabaseCsvManager({
   properties,
   mappings,
   preview,
+  previewError,
   disabled,
   onCsvChange,
   onMappingChange,
   onPreview,
+  onRetry,
   onImport,
   onExport,
 }: {
@@ -141,10 +143,12 @@ export function DatabaseCsvManager({
   properties: readonly DatabaseProperty[];
   mappings: Readonly<Record<string, string>>;
   preview: CsvPreview | null;
+  previewError?: string | null;
   disabled: boolean;
   onCsvChange(value: string): void;
   onMappingChange(header: string, propertyId: string): void;
   onPreview(): void;
+  onRetry?(): void;
   onImport(): void;
   onExport(): void;
 }) {
@@ -170,6 +174,10 @@ export function DatabaseCsvManager({
         <button type="button" disabled={disabled || !preview || preview.errors.length > 0} onClick={onImport}>确认导入</button>
         <button type="button" disabled={disabled || properties.length === 0} onClick={onExport}>导出当前视图 CSV</button>
       </div>
+      {previewError ? <div className="database-csv-preview-error" role="alert">
+        <p>{previewError}</p>
+        {onRetry ? <button type="button" disabled={disabled} onClick={onRetry}>重试 CSV 预览</button> : null}
+      </div> : null}
       {preview ? <section className="database-csv-preview" aria-label="CSV 预览">
         <p>共 {preview.total_rows} 行，预览 {preview.rows.length} 行。</p>
         {preview.errors.length ? <ul className="database-csv-errors">{preview.errors.map((error) =>
