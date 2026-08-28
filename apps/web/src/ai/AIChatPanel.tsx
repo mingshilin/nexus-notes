@@ -10,10 +10,16 @@ import { AIActionCard, type AIActionCardStatus } from "./AIActionCard";
 const QUICK_PROMPTS = ["制定今日计划", "整理我的任务", "如何改进这篇笔记"] as const;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
+export interface AIChatReadContext {
+  selected_note_ids: readonly string[];
+  selected_database_ids: readonly string[];
+}
+
 interface AIChatPanelProps {
   client: Pick<ApiClient, "request" | "confirmAiAction" | "rejectAiAction"> & Partial<Pick<ApiClient, "getAiTrustedMode" | "updateAiTrustedMode" | "listAiActionHistory">>;
   workspaceId: string;
   showStatus?: boolean;
+  readContext?: AIChatReadContext;
 }
 
 type TranscriptEntry =
@@ -107,7 +113,7 @@ function actionResultText(result: AiActionExecutionResult) {
 
 type AIConfigurationState = "checking" | "configured" | "unconfigured" | "disabled" | null;
 
-export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatPanelProps) {
+export function AIChatPanel({ client, workspaceId, showStatus = false, readContext }: AIChatPanelProps) {
   const [entries, setEntries] = useState<TranscriptEntry[]>([]);
   const [actionStates, setActionStates] = useState<Record<string, ActionState>>({});
   const [draft, setDraft] = useState("");
@@ -115,6 +121,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
   const [error, setError] = useState<string | null>(null);
   const [configuration, setConfiguration] = useState<AIConfigurationState>(() => showStatus && workspaceId ? "checking" : null);
   const [configurationDetails, setConfigurationDetails] = useState<AiUserConfigSummary | null>(null);
+  const [allowWorkspaceSearch, setAllowWorkspaceSearch] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const chatControllerRef = useRef<AbortController | null>(null);
   const workspaceIdRef = useRef(workspaceId);
@@ -130,6 +137,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
     setError(null);
     setConfiguration(showStatus && workspaceId ? "checking" : null);
     setConfigurationDetails(null);
+    setAllowWorkspaceSearch(false);
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
@@ -137,6 +145,10 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
       chatControllerRef.current = null;
     };
   }, [workspaceId]);
+
+  useEffect(() => {
+    setAllowWorkspaceSearch(false);
+  }, [workspaceId, readContext?.selected_note_ids.join("\u001f"), readContext?.selected_database_ids.join("\u001f")]);
 
   useEffect(() => {
     if (!showStatus || !workspaceId) {
@@ -261,7 +273,16 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
         path: "/api/v2/ai/chat",
         method: "POST",
         headers: { "x-workspace-id": workspaceId },
-        body: { messages: requestMessages },
+        body: {
+          messages: requestMessages,
+          ...(readContext ? {
+            read_context: {
+              selected_note_ids: [...readContext.selected_note_ids],
+              selected_database_ids: [...readContext.selected_database_ids],
+              allow_workspace_search: allowWorkspaceSearch,
+            },
+          } : {}),
+        },
         requestClass: "command",
         policy: { timeoutMs: 35_000, retry: 0, idempotencyKey: crypto.randomUUID(), signal: controller.signal },
       });
@@ -372,6 +393,17 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
           {showStatus && workspaceId && typeof client.getAiTrustedMode === "function" && typeof client.updateAiTrustedMode === "function" ? <AITrustedModePanel client={client as TrustedModeClient} workspaceId={workspaceId} /> : null}
           {showStatus && workspaceId && typeof client.listAiActionHistory === "function" ? <AIActionHistoryPanel client={client as ActionHistoryClient} workspaceId={workspaceId} /> : null}
           {!workspaceId ? <p role="status">未选择工作区，无法使用 AI 助手。</p> : null}
+          {readContext ? (
+            <fieldset className="ai-chat-context">
+              <legend>AI 读取范围</legend>
+              <p>
+                {readContext.selected_note_ids.length > 0 || readContext.selected_database_ids.length > 0
+                  ? `当前已选择 ${readContext.selected_note_ids.length} 篇笔记、${readContext.selected_database_ids.length} 个数据库。`
+                  : "当前没有选中的笔记或数据库。"}
+              </p>
+              <label><input type="checkbox" aria-label="允许搜索工作区" checked={allowWorkspaceSearch} onChange={(event) => setAllowWorkspaceSearch(event.target.checked)} />允许搜索工作区</label>
+            </fieldset>
+          ) : null}
           <div className="ai-chat-messages" aria-live="polite">
             {entries.length === 0 ? (
               <div className="ai-chat-empty">
