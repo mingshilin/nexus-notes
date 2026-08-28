@@ -123,6 +123,17 @@ const ACTION_TOOL_DEFINITIONS = [
   {
     type: "function",
     function: {
+      name: "complete_reminder",
+      description: "Propose marking a reminder complete. The reminder ID and current revision are required.",
+      parameters: actionToolParameters({
+        reminder_id: { type: "string", minLength: 1 },
+        base_revision: { type: "integer", minimum: 1 },
+      }, ["reminder_id", "base_revision"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "create_notification",
       description: "Propose creating a notification.",
       parameters: actionToolParameters({
@@ -140,6 +151,7 @@ const ACTION_TOOL_DEFINITIONS = [
         to_email: { type: "string" },
         subject: { type: "string" },
         body_text: { type: "string" },
+        recipient_scope: { type: "string", enum: ["self", "workspace_member", "external"] },
       }),
     },
   },

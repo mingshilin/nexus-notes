@@ -35,7 +35,7 @@ describe("AI chat tool protocol", () => {
       const body = JSON.parse(String(init?.body));
       expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
         "search_notes", "get_note", "list_reminders", "search_databases", "get_database_record",
-        "create_note", "create_reminder", "create_notification", "send_email",
+        "create_note", "create_reminder", "complete_reminder", "create_notification", "send_email",
         "update_note", "move_note", "archive_note", "restore_note", "delete_note",
         "create_folder", "apply_tag", "create_database_record", "update_database_record", "apply_template",
       ]);
@@ -94,7 +94,7 @@ describe("AI chat tool protocol", () => {
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
       expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
-        "create_note", "create_reminder", "create_notification", "send_email",
+        "create_note", "create_reminder", "complete_reminder", "create_notification", "send_email",
         "update_note", "move_note", "archive_note", "restore_note", "delete_note",
         "create_folder", "apply_tag", "create_database_record", "update_database_record", "apply_template",
       ]);
@@ -229,10 +229,11 @@ describe("AI chat tool protocol", () => {
         stream: false,
         tool_choice: "auto",
       });
-      expect(body.tools).toHaveLength(14);
+      expect(body.tools).toHaveLength(15);
       expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
         "create_note",
         "create_reminder",
+        "complete_reminder",
         "create_notification",
         "send_email",
         "update_note",

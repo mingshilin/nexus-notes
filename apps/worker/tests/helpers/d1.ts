@@ -27,6 +27,7 @@ export const migrationPaths = [
   "../../migrations/0021_ai_trusted_mode.sql",
   "../../migrations/0022_ai_note_actions.sql",
   "../../migrations/0023_ai_organization_actions.sql",
+  "../../migrations/0024_ai_reminder_actions.sql",
 ];
 
 export function splitMigration(sql: string) {

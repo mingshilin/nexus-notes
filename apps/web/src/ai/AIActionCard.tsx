@@ -3,6 +3,19 @@ import { useEffect, useRef } from "react";
 
 const EMAIL_BODY_PREVIEW_LIMIT = 240;
 
+function recipientScopeLabel(scope: "self" | "workspace_member" | "external" | undefined) {
+  switch (scope) {
+    case "self":
+      return "本人邮箱";
+    case "workspace_member":
+      return "工作区成员";
+    case "external":
+      return "外部收件人";
+    default:
+      return "未声明范围（兼容旧提案）";
+  }
+}
+
 function describeUpdateNotePatch(patch: Extract<AiActionProposal, { tool: "update_note" }>["input"]["patch"]) {
   const fields: string[] = [];
   if (patch.title !== undefined) fields.push(`标题：${patch.title || "未命名笔记"}`);
@@ -42,6 +55,8 @@ function titleForTool(proposal: AiActionProposal) {
       return "创建笔记";
     case "create_reminder":
       return "创建提醒";
+    case "complete_reminder":
+      return "完成提醒";
     case "create_notification":
       return "创建通知";
     case "send_email":
@@ -85,6 +100,12 @@ function detailsForProposal(proposal: AiActionProposal) {
         ["提醒时间", proposal.input.remind_at],
         ["时区", proposal.input.timezone || "UTC"],
       ] as const;
+    case "complete_reminder":
+      return [
+        ["目标提醒", proposal.input.reminder_id],
+        ["基准版本", String(proposal.input.base_revision)],
+        ["操作", "标记为已完成"],
+      ] as const;
     case "create_notification":
       return [
         ["标题", proposal.input.title],
@@ -92,6 +113,7 @@ function detailsForProposal(proposal: AiActionProposal) {
       ] as const;
     case "send_email":
       return [
+        ["收件人范围", recipientScopeLabel(proposal.input.recipient_scope)],
         ["收件人", proposal.input.to_email],
         ["主题", proposal.input.subject],
         ["正文", proposal.input.body_text.length > EMAIL_BODY_PREVIEW_LIMIT

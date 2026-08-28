@@ -30,7 +30,7 @@ describe("AI policy contracts", () => {
 
   it("keeps the current action proposal allowlist separate from the complete catalog", () => {
     expect(AiActionToolNameSchema.options).toEqual([
-      "create_note", "create_reminder", "create_notification", "send_email",
+      "create_note", "create_reminder", "complete_reminder", "create_notification", "send_email",
       "update_note", "move_note", "archive_note", "restore_note", "delete_note",
       "create_folder", "apply_tag", "create_database_record", "update_database_record", "apply_template",
     ]);

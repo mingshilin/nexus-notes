@@ -12,6 +12,7 @@ function emailProposal(overrides: Partial<AiActionProposal> = {}): AiActionPropo
       to_email: "user@example.test",
       subject: "项目更新",
       body_text: "这里是邮件正文。",
+      recipient_scope: "external",
     },
     requires_confirmation: true,
     expires_at: "2099-08-25T01:00:00.000Z",
@@ -56,6 +57,7 @@ describe("AIActionCard", () => {
     expect(screen.getByText("user@example.test")).toBeInTheDocument();
     expect(screen.getByText("项目更新")).toBeInTheDocument();
     expect(screen.getByText("这里是邮件正文。")).toBeInTheDocument();
+    expect(screen.getByText("外部收件人")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "确认执行" })).toHaveFocus();
 
     fireEvent.click(screen.getByRole("button", { name: "拒绝" }));

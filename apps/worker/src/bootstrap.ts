@@ -134,6 +134,33 @@ async function isCommittedNoteAction(db: D1Database, proposal: NoteLifecycleProp
   return row?.patch_json === stableJson(proposal.input.patch);
 }
 
+type EmailRecipientProposal = Extract<StoredAiActionProposal, { tool: "send_email" }>;
+
+async function assertAiEmailRecipient(
+  db: D1Database,
+  context: WorkspaceContext,
+  proposal: EmailRecipientProposal,
+) {
+  const scope = proposal.input.recipient_scope;
+  // Legacy proposals have no declared scope. Keep them executable through the
+  // existing confirmation flow rather than guessing the user's email.
+  if (!scope || scope === "external") return;
+  const email = normalizeEmail(proposal.input.to_email);
+  const row = await db.prepare(
+    `SELECT u.id
+     FROM users u
+     JOIN workspace_members wm ON wm.user_id = u.id AND wm.workspace_id = ?
+     WHERE u.email = ? COLLATE NOCASE
+       AND u.status = 'active'
+       AND u.email_verified_at IS NOT NULL
+       AND (? = 'workspace_member' OR u.id = ?)
+     LIMIT 1`,
+  ).bind(context.workspaceId, email, scope, context.userId).first<{ id: string }>();
+  if (!row) {
+    throw new AiToolError("AI_ACTION_RECIPIENT_MISMATCH", "Email recipient is not an eligible verified user", 403);
+  }
+}
+
 function actionResultFromError(actionId: string, error: unknown): AiActionExecutionResult {
   const candidate = error && typeof error === "object" ? error as { code?: unknown; status?: unknown; retryable?: unknown } : {};
   const code = typeof candidate.code === "string" && candidate.code.length > 0
@@ -464,6 +491,7 @@ function createAiActionService(env: BetaWorkerEnv) {
   const orchestrator = new AiToolOrchestrator({
     repository,
     clock: () => new Date(),
+    assertEmailRecipient: (context, proposal) => assertAiEmailRecipient(env.DB, context, proposal),
     assertFreshPermission: async (context, proposal) => {
       if (context.role === "viewer") {
         throw new AiToolError("AI_ACTION_PERMISSION_DENIED", "Viewer permission is insufficient", 403);

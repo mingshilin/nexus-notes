@@ -16,6 +16,7 @@ import { isAiOrganizationTool, normalizeAiOrganizationInput, type AiOrganization
 interface AiToolOrchestratorDependencies {
   repository: AiToolRepositoryPort;
   assertFreshPermission(context: WorkspaceContext, proposal: StoredAiActionProposal): Promise<void> | void;
+  assertEmailRecipient?(context: WorkspaceContext, proposal: Extract<StoredAiActionProposal, { tool: "send_email" }>): Promise<void> | void;
   createId?: () => string;
   clock?: () => Date;
 }
@@ -32,6 +33,7 @@ interface AiToolExecutionDependencies {
   };
   knowledgeService: {
     createReminder(context: { workspaceId: string; userId: string; targetId?: string }, input: unknown): Promise<unknown>;
+    updateReminder?(context: { workspaceId: string; userId: string; targetId?: string }, reminderId: string, input: unknown): Promise<unknown>;
   };
   collaborationRepository: {
     createNotification(
@@ -93,6 +95,8 @@ function summaryForTool(tool: StoredAiActionProposal["tool"]) {
       return "创建笔记待确认";
     case "create_reminder":
       return "创建提醒待确认";
+    case "complete_reminder":
+      return "完成提醒待确认";
     case "create_notification":
       return "创建通知待确认";
     case "send_email":
@@ -148,6 +152,7 @@ function requiredCapability(tool: StoredAiActionProposal["tool"]) {
     case "delete_note":
       return "notes.write";
     case "create_reminder":
+    case "complete_reminder":
       return "reminders.write";
     case "create_notification":
       return "notifications.write";
@@ -191,10 +196,12 @@ function normalizedInput(name: string, raw: unknown): { tool: ReturnType<typeof 
     ? [...commonKeys, "title", "content", "folder_id", "database_id", "daily_date"]
     : tool === "create_reminder"
       ? [...commonKeys, "note_id", "title", "remind_at", "timezone"]
+      : tool === "complete_reminder"
+        ? [...commonKeys, "reminder_id", "base_revision"]
       : tool === "create_notification"
         ? [...commonKeys, "title", "body_text"]
         : tool === "send_email"
-          ? [...commonKeys, "to_email", "subject", "body_text"]
+          ? [...commonKeys, "to_email", "subject", "body_text", "recipient_scope"]
           : [...commonKeys, "target_note_id", "base_revision", "patch"];
   assertAllowedKeys(argumentsObject, allowedKeys);
   if (["update_note", "move_note"].includes(tool)) {
@@ -212,10 +219,12 @@ function normalizedInput(name: string, raw: unknown): { tool: ReturnType<typeof 
     ? pickInput(argumentsObject, ["title", "content", "folder_id", "database_id", "daily_date"])
     : tool === "create_reminder"
       ? pickInput(argumentsObject, ["note_id", "title", "remind_at", "timezone"])
+      : tool === "complete_reminder"
+        ? pickInput(argumentsObject, ["reminder_id", "base_revision"])
       : tool === "create_notification"
         ? pickInput(argumentsObject, ["title", "body_text"])
         : tool === "send_email"
-          ? pickInput(argumentsObject, ["to_email", "subject", "body_text"])
+          ? pickInput(argumentsObject, ["to_email", "subject", "body_text", "recipient_scope"])
           : (() => {
             const target = pickInput(argumentsObject, ["target_note_id", "base_revision"]);
             const rawPatch = isPlainObject(argumentsObject.patch) ? argumentsObject.patch : {};
@@ -256,7 +265,7 @@ export class AiToolOrchestrator {
       }
       const normalized = normalizedInput(toolCall.name, toolCall.arguments);
       assertActionPermission(actor, normalized.tool);
-      const target = ["update_note", "move_note", "archive_note", "restore_note", "delete_note"].includes(normalized.tool)
+      const target = ["update_note", "move_note", "archive_note", "restore_note", "delete_note", "complete_reminder"].includes(normalized.tool)
         || isAiOrganizationTool(normalized.tool) && normalized.tool !== "create_folder"
         ? "selected" as const
         : "workspace" as const;
@@ -307,6 +316,7 @@ export class AiToolOrchestrator {
 
     assertActionPermission(actor, proposal.tool);
     await this.dependencies.assertFreshPermission(actor, proposal);
+    if (proposal.tool === "send_email") await this.dependencies.assertEmailRecipient?.(actor, proposal);
     const claimed = await this.dependencies.repository.claimConfirmation({
       userId: actor.userId,
       workspaceId: actor.workspaceId,
@@ -408,6 +418,7 @@ export class AiToolOrchestrator {
     let executionResult: AiActionExecutionResult;
     try {
       await this.dependencies.assertFreshPermission(actor, proposal);
+      if (proposal.tool === "send_email") await this.dependencies.assertEmailRecipient?.(actor, proposal);
       switch (proposal.tool) {
         case "create_note": {
           const note = await dependencies.noteService.create(
@@ -451,8 +462,8 @@ export class AiToolOrchestrator {
           executionResult = organizationResult(proposal.action_id, proposal.tool, value);
           break;
         }
-        case "create_reminder":
-          await dependencies.knowledgeService.createReminder(
+        case "create_reminder": {
+          const reminder = await dependencies.knowledgeService.createReminder(
             { workspaceId: actor.workspaceId, userId: actor.userId, targetId: aiActionTargetId("create_reminder", proposal.action_id) },
             {
               note_id: proposal.input.note_id ?? null,
@@ -464,8 +475,21 @@ export class AiToolOrchestrator {
               delivery_enabled: true,
             },
           );
-          executionResult = { action_id: proposal.action_id, status: "executed", entity_id: aiActionTargetId("create_reminder", proposal.action_id) };
+          executionResult = reminderResult(proposal.action_id, reminder, aiActionTargetId("create_reminder", proposal.action_id));
           break;
+        }
+        case "complete_reminder": {
+          if (!dependencies.knowledgeService.updateReminder) {
+            throw new AiToolError("AI_ACTION_REMINDER_UNAVAILABLE", "Reminder completion is unavailable", 503);
+          }
+          const reminder = await dependencies.knowledgeService.updateReminder(
+            { workspaceId: actor.workspaceId, userId: actor.userId },
+            proposal.input.reminder_id,
+            { base_revision: proposal.input.base_revision, status: "dismissed" },
+          );
+          executionResult = reminderResult(proposal.action_id, reminder, proposal.input.reminder_id);
+          break;
+        }
         case "create_notification":
           await dependencies.collaborationRepository.createNotification(
             actor,
@@ -514,7 +538,9 @@ export class AiToolOrchestrator {
       const isNoteConflict = actionError.status === 409
         && ["NOTE_CONFLICT", "AI_ACTION_NOTE_CONFLICT", "DAILY_NOTE_CONFLICT", "NOTE_IDEMPOTENCY_CONFLICT"].includes(actionError.code);
       const isOrganizationConflict = actionError.status === 409 && isAiOrganizationTool(proposal.tool);
-      const isConflict = isNoteConflict || isOrganizationConflict;
+      const isReminderConflict = actionError.status === 409
+        && ["REMINDER_CONFLICT", "REVISION_CONFLICT"].includes(actionError.code);
+      const isConflict = isNoteConflict || isOrganizationConflict || isReminderConflict;
       const errorRecord = {
         code: isNoteConflict
           ? "AI_ACTION_NOTE_CONFLICT"
@@ -522,11 +548,15 @@ export class AiToolOrchestrator {
             ? proposal.tool === "update_database_record" || proposal.tool === "apply_template"
               ? "AI_ACTION_DATABASE_CONFLICT"
               : "AI_ACTION_ORGANIZATION_CONFLICT"
+            : isReminderConflict
+              ? "AI_ACTION_REMINDER_CONFLICT"
             : actionError.code,
         message: isNoteConflict
           ? "The note changed before the AI action could be executed"
           : isOrganizationConflict
             ? "The organization target changed before the AI action could be executed"
+            : isReminderConflict
+              ? "The reminder changed before the AI action could be executed"
             : "AI action execution failed",
         status: actionError.status,
       };
@@ -606,6 +636,16 @@ function noteResult(actionId: string, value: unknown, fallbackEntityId: string):
     status: "executed",
     entity_id: typeof note.id === "string" ? note.id : fallbackEntityId,
     ...(typeof note.revision === "number" ? { revision: note.revision } : {}),
+  };
+}
+
+function reminderResult(actionId: string, value: unknown, fallbackEntityId: string): AiActionExecutionResult {
+  const reminder = value && typeof value === "object" ? value as { id?: unknown; revision?: unknown } : {};
+  return {
+    action_id: actionId,
+    status: "executed",
+    entity_id: typeof reminder.id === "string" ? reminder.id : fallbackEntityId,
+    ...(typeof reminder.revision === "number" ? { revision: reminder.revision } : {}),
   };
 }
 

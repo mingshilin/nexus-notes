@@ -182,6 +182,7 @@ export type AiToolName = z.infer<typeof AiToolNameSchema>;
 export const AiActionToolNameSchema = z.enum([
   "create_note",
   "create_reminder",
+  "complete_reminder",
   "create_notification",
   "send_email",
   "update_note",
@@ -294,15 +295,25 @@ export const CreateReminderActionInputSchema = z.object({
   timezone: z.string().trim().min(1).max(64).default("UTC"),
 }).strict();
 
+export const CompleteReminderActionInputSchema = z.object({
+  reminder_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+}).strict();
+export type CompleteReminderActionInput = z.infer<typeof CompleteReminderActionInputSchema>;
+
 export const CreateNotificationActionInputSchema = z.object({
   title: z.string().trim().min(1).max(160),
   body_text: z.string().trim().min(1).max(2_000),
 }).strict();
 
+export const AiEmailRecipientScopeSchema = z.enum(["self", "workspace_member", "external"]);
+export type AiEmailRecipientScope = z.infer<typeof AiEmailRecipientScopeSchema>;
+
 export const SendEmailActionInputSchema = z.object({
   to_email: EmailSchema,
   subject: z.string().trim().min(1).max(160),
   body_text: z.string().trim().min(1).max(8_000),
+  recipient_scope: AiEmailRecipientScopeSchema.optional(),
 }).strict();
 
 const NoteActionTargetSchema = z.object({
@@ -411,6 +422,7 @@ export type AiOrganizationToolName = z.infer<typeof AiOrganizationToolNameSchema
 export const AiActionInputSchema = z.discriminatedUnion("tool", [
   z.object({ tool: z.literal("create_note"), input: CreateNoteActionInputSchema }).strict(),
   z.object({ tool: z.literal("create_reminder"), input: CreateReminderActionInputSchema }).strict(),
+  z.object({ tool: z.literal("complete_reminder"), input: CompleteReminderActionInputSchema }).strict(),
   z.object({ tool: z.literal("create_notification"), input: CreateNotificationActionInputSchema }).strict(),
   z.object({ tool: z.literal("send_email"), input: SendEmailActionInputSchema }).strict(),
   z.object({ tool: z.literal("update_note"), input: UpdateNoteActionInputSchema }).strict(),

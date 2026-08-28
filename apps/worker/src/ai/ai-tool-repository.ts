@@ -14,6 +14,8 @@ function summaryForTool(tool: StoredAiActionProposal["tool"]) {
       return "创建笔记待确认";
     case "create_reminder":
       return "创建提醒待确认";
+    case "complete_reminder":
+      return "完成提醒待确认";
     case "create_notification":
       return "创建通知待确认";
     case "send_email":
@@ -100,6 +102,8 @@ function parseStoredProposal(row: ProposalRow): StoredAiActionProposal {
     case "create_note":
       return { ...base, tool: validated.tool, input: validated.input };
     case "create_reminder":
+      return { ...base, tool: validated.tool, input: validated.input };
+    case "complete_reminder":
       return { ...base, tool: validated.tool, input: validated.input };
     case "create_notification":
       return { ...base, tool: validated.tool, input: validated.input };

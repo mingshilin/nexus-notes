@@ -68,6 +68,7 @@ describe("AI chat proxy", () => {
       expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
         "create_note",
         "create_reminder",
+        "complete_reminder",
         "create_notification",
         "send_email",
         "update_note",
