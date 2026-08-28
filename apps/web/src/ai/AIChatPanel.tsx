@@ -1,4 +1,4 @@
-import type { AiActionExecutionResult, AiActionProposal, AiChatMessage, AiChatResponse } from "@nexus/contracts";
+import type { AiActionExecutionResult, AiActionProposal, AiChatMessage, AiChatResponse, AiUserConfigSummary } from "@nexus/contracts";
 import { Bot, Send, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { ApiClient } from "../data/api-client";
@@ -50,7 +50,7 @@ function expireActionStates(entries: TranscriptEntry[], current: Record<string, 
 
 function errorMessage(error: unknown) {
   const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
-  if (code === "AI_NOT_CONFIGURED") return "AI 服务尚未配置，请管理员设置 AI_CHAT_API_URL、AI_CHAT_API_KEY 和 AI_CHAT_MODEL。";
+  if (code === "AI_NOT_CONFIGURED") return "当前没有可用的 AI。请使用系统 AI，或在 AI 配置中添加自己的 API Key。";
   if (code === "AI_ACTION_EXPIRED") return "AI 操作已过期，请重新生成。";
   if (code === "UNAUTHENTICATED" || code === "FORBIDDEN") return "当前工作区没有使用 AI 助手的权限，请重新登录或切换工作区。";
   return "AI 服务暂时不可用，请稍后重试。你的问题仍保留在输入框中。";
@@ -114,6 +114,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [configuration, setConfiguration] = useState<AIConfigurationState>(() => showStatus && workspaceId ? "checking" : null);
+  const [configurationDetails, setConfigurationDetails] = useState<AiUserConfigSummary | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const chatControllerRef = useRef<AbortController | null>(null);
   const workspaceIdRef = useRef(workspaceId);
@@ -128,6 +129,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
     setDraft("");
     setError(null);
     setConfiguration(showStatus && workspaceId ? "checking" : null);
+    setConfigurationDetails(null);
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
@@ -142,15 +144,21 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
       return undefined;
     }
     const controller = new AbortController();
-    void client.request<{ configured: boolean }>({
+    void client.request<AiUserConfigSummary>({
       path: "/api/v2/ai/status",
       headers: { "x-workspace-id": workspaceId },
       requestClass: "query",
       policy: { timeoutMs: 8_000, retry: 1, dedupeKey: `ai-status:${workspaceId}`, signal: controller.signal },
     }).then((status) => {
-      if (!controller.signal.aborted) setConfiguration(status.configured ? "configured" : "unconfigured");
+      if (!controller.signal.aborted) {
+        setConfigurationDetails(status);
+        setConfiguration(status.configured ? "configured" : "unconfigured");
+      }
     }).catch((caught) => {
-      if (!controller.signal.aborted) setConfiguration(isAiDisabledError(caught) ? "disabled" : null);
+      if (!controller.signal.aborted) {
+        setConfigurationDetails(null);
+        setConfiguration(isAiDisabledError(caught) ? "disabled" : null);
+      }
     });
     return () => controller.abort();
   }, [client, showStatus, workspaceId]);
@@ -360,7 +368,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false }: AIChatP
         <p className="ai-chat-config-status" role="status">AI 助手当前不可用，管理员尚未启用此功能。</p>
       ) : (
         <>
-          {showStatus ? <AIConfigPanel client={client} /> : null}
+          {showStatus ? <AIConfigPanel client={client} status={configurationDetails} /> : null}
           {showStatus && workspaceId && typeof client.getAiTrustedMode === "function" && typeof client.updateAiTrustedMode === "function" ? <AITrustedModePanel client={client as TrustedModeClient} workspaceId={workspaceId} /> : null}
           {showStatus && workspaceId && typeof client.listAiActionHistory === "function" ? <AIActionHistoryPanel client={client as ActionHistoryClient} workspaceId={workspaceId} /> : null}
           {!workspaceId ? <p role="status">未选择工作区，无法使用 AI 助手。</p> : null}
