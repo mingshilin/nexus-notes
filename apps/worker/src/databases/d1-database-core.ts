@@ -14,16 +14,51 @@ import { assertRevision, DatabaseRepositoryBase } from "./database-repository-ba
 import {
   DATABASE_COLUMNS,
   DatabaseRepositoryError,
+  decodeDatabasePageCursor,
+  encodeDatabasePageCursor,
   type DatabaseRow,
   toDatabase,
 } from "./database-model";
 
 export class D1DatabaseCoreRepository extends DatabaseRepositoryBase {
-  async listDatabases(context: WorkspaceContext) {
+  async listDatabases(context: WorkspaceContext, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const result = await this.db.prepare(
       `SELECT ${DATABASE_COLUMNS} FROM databases WHERE workspace_id = ? ORDER BY updated_at DESC, id DESC`,
     ).bind(context.workspaceId).all<DatabaseRow>();
+    signal?.throwIfAborted();
     return (result.results ?? []).map(toDatabase);
+  }
+
+  async listDatabasePage(
+    context: WorkspaceContext,
+    options: { cursor?: string | null; limit: number },
+    signal?: AbortSignal,
+  ) {
+    signal?.throwIfAborted();
+    const limit = Number.isFinite(options.limit)
+      ? Math.max(1, Math.min(Math.floor(options.limit), 100))
+      : 1;
+    const bindings: unknown[] = [context.workspaceId];
+    const conditions = ["workspace_id = ?"];
+    if (options.cursor !== undefined && options.cursor !== null) {
+      const cursor = decodeDatabasePageCursor(options.cursor, context.workspaceId);
+      conditions.push("(updated_at < ? OR (updated_at = ? AND id < ?))");
+      bindings.push(cursor.updatedAt, cursor.updatedAt, cursor.id);
+    }
+    const result = await this.db.prepare(
+      `SELECT ${DATABASE_COLUMNS} FROM databases WHERE ${conditions.join(" AND ")} ORDER BY updated_at DESC, id DESC LIMIT ?`,
+    ).bind(...bindings, limit + 1).all<DatabaseRow>();
+    signal?.throwIfAborted();
+    const rows = result.results ?? [];
+    const items = rows.slice(0, limit).map(toDatabase);
+    const last = items.at(-1);
+    return {
+      items,
+      next_cursor: rows.length > limit && last
+        ? encodeDatabasePageCursor(last)
+        : null,
+    };
   }
 
   async getStats(context: WorkspaceContext, databaseId: string) {

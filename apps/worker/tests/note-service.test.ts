@@ -28,6 +28,7 @@ function createRepository(overrides: Record<string, unknown> = {}) {
   return {
     createNote: vi.fn(async (input) => ({ ...serverNote, ...input, revision: 1 })),
     openOrCreateDaily: vi.fn(async (input) => ({ ...serverNote, ...input, daily_date: input.dailyDate, revision: 1 })),
+    hasFolder: vi.fn(async () => true),
     hasDatabase: vi.fn(async () => true),
     getNote: vi.fn(async () => serverNote),
     listNotes: vi.fn(async () => ({ items: [serverNote], nextCursor: null })),
@@ -71,6 +72,31 @@ describe("NoteService", () => {
       ? service.create(context, { title: "Daily", content: "", daily_date: "2026-08-23" })
       : service.update(context, "note-1", { base_revision: 1, daily_date: "2026-08-23" });
     await expect(result).rejects.toMatchObject({ code: "DAILY_NOTE_CONFLICT", status: 409, retryable: false });
+  });
+
+  it("maps an idempotent note replay mismatch to a stable conflict without details", async () => {
+    const worker = await loadWorker();
+    const repository = createRepository({
+      createNote: vi.fn(async () => { throw new Error("NOTE_IDEMPOTENCY_CONFLICT"); }),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository);
+    const promise = service.create(
+      { workspaceId: "ws-1", userId: "user-1", targetId: "note-action-1" },
+      { title: "Draft", content: "Body" },
+    );
+
+    await expect(promise).rejects.toMatchObject({
+      code: "NOTE_IDEMPOTENCY_CONFLICT",
+      status: 409,
+      retryable: false,
+    });
+    const error = await promise.catch((value) => value as { details?: unknown });
+    expect(error.details).toBeUndefined();
+    expect(repository.createNote).toHaveBeenCalledWith(expect.objectContaining({
+      id: "note-action-1",
+      idempotencyKey: "note-action-1",
+    }));
   });
 
   it("maps a daily date to the repository operation without falling back to normal creation", async () => {
@@ -196,6 +222,38 @@ describe("NoteService", () => {
       { content: "Captured body", target: "database", database_id: "db-other" },
     )).rejects.toMatchObject({ code: "DATABASE_NOT_FOUND", status: 404 });
     expect(repository.createNote).not.toHaveBeenCalled();
+  });
+
+  it("rejects note create and update references outside the current workspace", async () => {
+    const worker = await loadWorker();
+    const repository = createRepository({
+      hasFolder: vi.fn(async (_workspaceId: string, folderId: string) => folderId !== "folder-other"),
+      hasDatabase: vi.fn(async (_workspaceId: string, databaseId: string) => databaseId !== "database-other"),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository);
+    const context = { workspaceId: "ws-1", userId: "user-1" };
+
+    await expect(service.create(context, {
+      title: "Cross tenant",
+      content: "Body",
+      folder_id: "folder-other",
+    })).rejects.toMatchObject({ code: "FOLDER_NOT_FOUND", status: 404 });
+    await expect(service.create(context, {
+      title: "Cross tenant",
+      content: "Body",
+      database_id: "database-other",
+    })).rejects.toMatchObject({ code: "DATABASE_NOT_FOUND", status: 404 });
+    await expect(service.update(context, "note-1", {
+      base_revision: 3,
+      folder_id: "folder-other",
+    })).rejects.toMatchObject({ code: "FOLDER_NOT_FOUND", status: 404 });
+    await expect(service.update(context, "note-1", {
+      base_revision: 3,
+      database_id: "database-other",
+    })).rejects.toMatchObject({ code: "DATABASE_NOT_FOUND", status: 404 });
+    expect(repository.createNote).not.toHaveBeenCalled();
+    expect(repository.updateNote).not.toHaveBeenCalled();
   });
 
   it("returns both server and submitted revisions when an update conflicts", async () => {

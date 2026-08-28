@@ -48,14 +48,38 @@ function firstReminder(result: D1Result<ReminderRow> | undefined) {
   return row ? toReminder(row) : null;
 }
 
+function isSameCreate(input: {
+  workspaceId: string;
+  userId: string;
+  input: CreateReminderInput;
+}, existing: Reminder) {
+  return existing.workspace_id === input.workspaceId
+    && existing.user_id === input.userId
+    && existing.note_id === (input.input.note_id ?? null)
+    && existing.remind_at === input.input.remind_at
+    && existing.title === input.input.title
+    && existing.timezone === input.input.timezone
+    && JSON.stringify(existing.channels) === JSON.stringify(input.input.channels)
+    && JSON.stringify(existing.recurrence) === JSON.stringify(input.input.recurrence);
+}
+
 function encodeCursor(reminder: Reminder) {
   return encodeURIComponent(`${reminder.remind_at}|${reminder.id}`);
 }
 
 function decodeCursor(cursor: string | undefined) {
   if (!cursor) return null;
-  const [remindAt, id, ...rest] = decodeURIComponent(cursor).split("|");
-  return remindAt && id && rest.length === 0 ? { remindAt, id } : null;
+  try {
+    const [remindAt, id, ...rest] = decodeURIComponent(cursor).split("|");
+    if (remindAt && id && rest.length === 0) return { remindAt, id };
+  } catch {
+    // Convert malformed percent-encoding into the same stable cursor error.
+  }
+  const error = Object.assign(new Error("INVALID_REMINDER_CURSOR"), {
+    code: "INVALID_REMINDER_CURSOR",
+    status: 400,
+  });
+  throw error;
 }
 
 function escapeLike(value: string) {
@@ -69,13 +93,23 @@ export class D1ReminderRepository {
   ) {}
 
   async createReminder(input: {
+    id?: string;
+    idempotencyKey?: string;
     workspaceId: string;
     userId: string;
     input: CreateReminderInput;
     now: string;
   }) {
+    const id = input.id ?? this.createId();
+    if (input.idempotencyKey) {
+      const existing = await this.getReminder(input.workspaceId, input.userId, id);
+      if (existing) {
+        if (isSameCreate(input, existing)) return existing;
+        throw new Error("REMINDER_IDEMPOTENCY_CONFLICT");
+      }
+    }
     const reminder: Reminder = {
-      id: this.createId(),
+      id,
       workspace_id: input.workspaceId,
       note_id: input.input.note_id ?? null,
       user_id: input.userId,
@@ -127,8 +161,16 @@ export class D1ReminderRepository {
       reminder.note_id,
     );
     const sync = this.syncStatement(reminder, "create", input.now);
-    const results = await this.db.batch<ReminderRow>([insert, sync]);
-    return firstReminder(results[0]);
+    try {
+      const results = await this.db.batch<ReminderRow>([insert, sync]);
+      return firstReminder(results[0]);
+    } catch (error) {
+      if (input.idempotencyKey) {
+        const replay = await this.getReminder(input.workspaceId, input.userId, id);
+        if (replay && isSameCreate(input, replay)) return replay;
+      }
+      throw error;
+    }
   }
 
   async listReminders(workspaceId: string, userId: string, includeCompleted = false) {

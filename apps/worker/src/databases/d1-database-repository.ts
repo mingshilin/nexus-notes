@@ -8,6 +8,7 @@ import { D1DatabaseViewRepository } from "./d1-database-views";
 
 export class D1DatabaseRepository {
   readonly listDatabases: D1DatabaseCoreRepository["listDatabases"];
+  readonly listDatabasePage: D1DatabaseCoreRepository["listDatabasePage"];
   readonly getStats: D1DatabaseCoreRepository["getStats"];
   readonly createDatabase: D1DatabaseCoreRepository["createDatabase"];
   readonly updateDatabase: D1DatabaseCoreRepository["updateDatabase"];
@@ -55,6 +56,7 @@ export class D1DatabaseRepository {
     const csv = new D1DatabaseCsvRepository(db, options);
 
     this.listDatabases = core.listDatabases.bind(core);
+    this.listDatabasePage = core.listDatabasePage.bind(core);
     this.getStats = core.getStats.bind(core);
     this.createDatabase = core.createDatabase.bind(core);
     this.updateDatabase = core.updateDatabase.bind(core);

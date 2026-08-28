@@ -253,6 +253,7 @@ export class QueueConsumerRouter {
   constructor(
     private readonly ocr: QueueConsumer,
     private readonly operations: QueueConsumer,
+    private readonly aiEmail?: QueueConsumer,
     private readonly reminders?: QueueConsumer,
   ) {}
 
@@ -266,6 +267,9 @@ export class QueueConsumerRouter {
       return { outcome: "ack" };
     }
     if (parsed.data.kind === "ocr") return this.ocr.consume(message);
+    if (parsed.data.kind === "notification" && this.aiEmail && isRecord(parsed.data.payload) && typeof parsed.data.payload.outbox_id === "string") {
+      return this.aiEmail.consume(message);
+    }
     if ((parsed.data.kind === "notification" || parsed.data.kind === "email") && this.reminders) {
       return this.reminders.consume(message);
     }

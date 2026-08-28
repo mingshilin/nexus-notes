@@ -5,6 +5,16 @@ async function loadData() {
   return await import("../src/data") as Record<string, any>;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  return {
+    promise: new Promise<T>((next, fail) => { resolve = next; reject = fail; }),
+    resolve,
+    reject,
+  };
+}
+
 describe("DatabaseClient", () => {
   it("caches a database bootstrap for two minutes and invalidates it after a mutation", async () => {
     const data = await loadData();
@@ -32,6 +42,234 @@ describe("DatabaseClient", () => {
     await client.bootstrap({ databaseId: "db-1", limit: 25 });
     expect(api.request).toHaveBeenCalledTimes(4);
     expect(api.request.mock.calls[0]![0].path).toBe("/api/v2/databases/bootstrap?database_id=db-1&limit=25");
+  });
+
+  it("serves stale database cache while revalidating and keeps it after an aborted refresh", async () => {
+    const data = await loadData();
+    let now = 1_000;
+    const stale = [{ id: "db-stale", name: "Stale" }];
+    const fresh = [{ id: "db-fresh", name: "Fresh" }];
+    const refresh = deferred<{ items: typeof fresh }>();
+    const api = {
+      request: vi.fn()
+        .mockResolvedValueOnce({ items: stale })
+        .mockImplementationOnce(() => refresh.promise)
+        .mockImplementationOnce(({ policy }: { policy: { signal?: AbortSignal } }) => new Promise((_resolve, reject) => {
+          policy.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        })),
+    };
+    const client = new data.DatabaseClient(api, "ws-1", { now: () => now, createId: () => "operation" });
+
+    await expect(client.listDatabases()).resolves.toBe(stale);
+
+    now += 120_001;
+    const staleReads = [client.listDatabases(), client.listDatabases(), client.listDatabases()];
+    await Promise.resolve();
+    await expect(Promise.all(staleReads)).resolves.toEqual([stale, stale, stale]);
+    expect(api.request).toHaveBeenCalledTimes(2);
+
+    refresh.resolve({ items: fresh });
+    await refresh.promise;
+    await Promise.resolve();
+    await expect(client.listDatabases()).resolves.toBe(fresh);
+
+    now += 120_001;
+    const controller = new AbortController();
+    const staleDuringAbort = client.listDatabases(controller.signal);
+    controller.abort();
+    await expect(staleDuringAbort).resolves.toBe(fresh);
+    expect(api.request).toHaveBeenCalledTimes(3);
+
+    await Promise.resolve();
+    await expect(client.listDatabases()).resolves.toBe(fresh);
+  });
+
+  it("keeps the newest cache-miss response when concurrent requests resolve out of order", async () => {
+    const data = await loadData();
+    const firstRequest = deferred<{ items: Array<{ id: string; name: string }> }>();
+    const secondRequest = deferred<{ items: Array<{ id: string; name: string }> }>();
+    const api = {
+      request: vi.fn()
+        .mockImplementationOnce(() => firstRequest.promise)
+        .mockImplementationOnce(() => secondRequest.promise),
+    };
+    const client = new data.DatabaseClient(api, "ws-1", { now: () => 1_000, createId: () => "operation" });
+    const first = client.listDatabases(new AbortController().signal);
+    const second = client.listDatabases(new AbortController().signal);
+
+    secondRequest.resolve({ items: [{ id: "db-new", name: "New" }] });
+    await expect(second).resolves.toEqual([{ id: "db-new", name: "New" }]);
+    firstRequest.resolve({ items: [{ id: "db-old", name: "Old" }] });
+    await expect(first).resolves.toEqual([{ id: "db-old", name: "Old" }]);
+
+    await expect(client.listDatabases()).resolves.toEqual([{ id: "db-new", name: "New" }]);
+    expect(api.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let an older bootstrap overwrite a newer direct database bundle cache", async () => {
+    const data = await loadData();
+    const oldBundle = { database: { id: "db-1", name: "Old" }, role: "editor", properties: [], views: [], templates: [] };
+    const newBundle = { database: { id: "db-1", name: "New" }, role: "editor", properties: [], views: [], templates: [] };
+    const bootstrapRequest = deferred<{
+      items: Array<{ id: string; name: string }>;
+      selected_database_id: string;
+      bundle: typeof oldBundle;
+      records: { items: never[]; next_cursor: null };
+    }>();
+    const directRequest = deferred<typeof newBundle>();
+    const api = {
+      request: vi.fn(({ path }: { path: string }) => path.includes("/bootstrap")
+        ? bootstrapRequest.promise
+        : directRequest.promise),
+    };
+    const client = new data.DatabaseClient(api, "ws-1", { now: () => 1_000, createId: () => "operation" });
+    const bootstrap = client.bootstrap({ databaseId: "db-1", limit: 25 });
+    const direct = client.getDatabase("db-1");
+
+    directRequest.resolve(newBundle);
+    await expect(direct).resolves.toBe(newBundle);
+    bootstrapRequest.resolve({
+      items: [{ id: "db-1", name: "Old" }],
+      selected_database_id: "db-1",
+      bundle: oldBundle,
+      records: { items: [], next_cursor: null },
+    });
+    await expect(bootstrap).resolves.toMatchObject({ bundle: oldBundle });
+
+    await expect(client.getDatabase("db-1")).resolves.toBe(newBundle);
+    expect(api.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let an older bootstrap overwrite a newer database list cache", async () => {
+    const data = await loadData();
+    const bootstrapRequest = deferred<{
+      items: Array<{ id: string; name: string }>;
+      selected_database_id: null;
+      bundle: null;
+      records: { items: never[]; next_cursor: null };
+    }>();
+    const listRequest = deferred<{ items: Array<{ id: string; name: string }> }>();
+    const api = {
+      request: vi.fn(({ path }: { path: string }) => path.includes("/bootstrap")
+        ? bootstrapRequest.promise
+        : listRequest.promise),
+    };
+    const client = new data.DatabaseClient(api, "ws-1", { now: () => 1_000, createId: () => "operation" });
+    const bootstrap = client.bootstrap({ limit: 25 });
+    const list = client.listDatabases();
+
+    listRequest.resolve({ items: [{ id: "db-new", name: "New" }] });
+    await expect(list).resolves.toEqual([{ id: "db-new", name: "New" }]);
+    bootstrapRequest.resolve({
+      items: [{ id: "db-old", name: "Old" }],
+      selected_database_id: null,
+      bundle: null,
+      records: { items: [], next_cursor: null },
+    });
+    await expect(bootstrap).resolves.toMatchObject({ items: [{ id: "db-old" }] });
+
+    await expect(client.listDatabases()).resolves.toEqual([{ id: "db-new", name: "New" }]);
+    expect(api.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets a newer bootstrap win when an older direct bundle response resolves last", async () => {
+    const data = await loadData();
+    const oldBundle = { database: { id: "db-1", name: "Old" }, role: "editor", properties: [], views: [], templates: [] };
+    const newBundle = { database: { id: "db-1", name: "New" }, role: "editor", properties: [], views: [], templates: [] };
+    const directRequest = deferred<typeof oldBundle>();
+    const bootstrapRequest = deferred<{
+      items: Array<{ id: string; name: string }>;
+      selected_database_id: string;
+      bundle: typeof newBundle;
+      records: { items: never[]; next_cursor: null };
+    }>();
+    const api = {
+      request: vi.fn(({ path }: { path: string }) => path.includes("/bootstrap")
+        ? bootstrapRequest.promise
+        : directRequest.promise),
+    };
+    const client = new data.DatabaseClient(api, "ws-1", { now: () => 1_000, createId: () => "operation" });
+    const direct = client.getDatabase("db-1");
+    const bootstrap = client.bootstrap({ databaseId: "db-1", limit: 25 });
+
+    bootstrapRequest.resolve({
+      items: [{ id: "db-1", name: "New" }],
+      selected_database_id: "db-1",
+      bundle: newBundle,
+      records: { items: [], next_cursor: null },
+    });
+    await expect(bootstrap).resolves.toMatchObject({ bundle: newBundle });
+    directRequest.resolve(oldBundle);
+    await expect(direct).resolves.toBe(oldBundle);
+
+    await expect(client.getDatabase("db-1")).resolves.toBe(newBundle);
+    expect(api.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows an older cache miss to commit when the newer request fails", async () => {
+    const data = await loadData();
+    const olderRequest = deferred<{ items: Array<{ id: string; name: string }> }>();
+    const newerRequest = deferred<{ items: Array<{ id: string; name: string }> }>();
+    const api = {
+      request: vi.fn()
+        .mockImplementationOnce(() => olderRequest.promise)
+        .mockImplementationOnce(() => newerRequest.promise),
+    };
+    const client = new data.DatabaseClient(api, "ws-1", { now: () => 1_000, createId: () => "operation" });
+    const older = client.listDatabases(new AbortController().signal);
+    const newer = client.listDatabases(new AbortController().signal);
+
+    newerRequest.reject(new Error("newer failed"));
+    await expect(newer).rejects.toThrow("newer failed");
+    olderRequest.resolve({ items: [{ id: "db-old", name: "Old but available" }] });
+    await expect(older).resolves.toEqual([{ id: "db-old", name: "Old but available" }]);
+
+    await expect(client.listDatabases()).resolves.toEqual([{ id: "db-old", name: "Old but available" }]);
+    expect(api.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not restore derived bootstrap cache after a mutation invalidates an in-flight refresh", async () => {
+    const data = await loadData();
+    let now = 1_000;
+    let bootstrapRequests = 0;
+    const oldBundle = { database: { id: "db-old", name: "Old" }, role: "editor", properties: [], views: [], templates: [] };
+    const oldBootstrap = {
+      items: [{ id: "db-old", name: "Old" }],
+      selected_database_id: "db-old",
+      bundle: oldBundle,
+      records: { items: [], next_cursor: null },
+    };
+    const newBundle = { database: { id: "db-new", name: "New" }, role: "editor", properties: [], views: [], templates: [] };
+    const newDatabases = [{ id: "db-new", name: "New" }];
+    const refresh = deferred<typeof oldBootstrap>();
+    const api = {
+      request: vi.fn(({ path, method }: { path: string; method?: string }) => {
+        if (path.includes("/bootstrap")) {
+          bootstrapRequests += 1;
+          return bootstrapRequests === 1 ? Promise.resolve(oldBootstrap) : refresh.promise;
+        }
+        if (method === "POST") return Promise.resolve({ database: { id: "db-created", name: "Created" } });
+        if (path === "/api/v2/databases") return Promise.resolve({ items: newDatabases });
+        if (path === "/api/v2/databases/db-old") return Promise.resolve(newBundle);
+        throw new Error(`Unexpected request: ${method ?? "GET"} ${path}`);
+      }),
+    };
+    const client = new data.DatabaseClient(api, "ws-1", { now: () => now, createId: () => "create" });
+
+    await expect(client.bootstrap({ databaseId: "db-old", limit: 25 })).resolves.toBe(oldBootstrap);
+
+    now += 120_001;
+    await expect(client.bootstrap({ databaseId: "db-old", limit: 25 })).resolves.toBe(oldBootstrap);
+    expect(api.request).toHaveBeenCalledTimes(2);
+
+    await client.createDatabase({ name: "Created", description: "" });
+    refresh.resolve(oldBootstrap);
+    await refresh.promise;
+    await Promise.resolve();
+
+    await expect(client.listDatabases()).resolves.toBe(newDatabases);
+    await expect(client.getDatabase("db-old")).resolves.toBe(newBundle);
+    expect(api.request).toHaveBeenCalledTimes(5);
   });
 
   it("uses workspace-bound deduplicated queries for bundles, pages, and search", async () => {

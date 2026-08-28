@@ -1,6 +1,9 @@
 import type {
   ApiErrorPayload,
   ApiResponse,
+  AiActionExecutionResult,
+  AiActionHistoryResponse,
+  AiTrustedMode,
   RequestClass,
   RequestPolicy,
 } from "@nexus/contracts";
@@ -29,6 +32,16 @@ export interface ApiDownloadOptions {
   policy: RequestPolicy;
 }
 
+export interface ConfirmAiActionResult {
+  action: AiActionExecutionResult;
+}
+
+export interface RejectAiActionResult {
+  action: {
+    rejected: true;
+  };
+}
+
 export class ApiClientError extends Error {
   readonly code: string;
   readonly requestId?: string;
@@ -45,6 +58,22 @@ export class ApiClientError extends Error {
     this.status = status;
     this.details = error.details;
   }
+}
+
+function canonicalizeHeaders(headers: Record<string, string> | undefined) {
+  const canonical = Object.create(null) as Record<string, string>;
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    const key = name.toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(canonical, key) && canonical[key] !== value) {
+      throw new ApiClientError({
+        code: "INVALID_REQUEST",
+        message: `Conflicting ${key} headers`,
+        retryable: false,
+      });
+    }
+    canonical[key] = value;
+  }
+  return canonical;
 }
 
 const retryableStatuses = new Set([408, 429]);
@@ -84,12 +113,86 @@ async function readResponse<T>(response: Response): Promise<ApiResponse<T>> {
   }
 }
 
+function assertDataProperties(value: object) {
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    if (descriptor.enumerable && !("value" in descriptor)) {
+      throw new TypeError("Cannot safely canonicalize accessor-backed JSON value");
+    }
+  }
+}
+
+function normalizeJsonValue(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype || Object.prototype.hasOwnProperty.call(value, "toJSON")) {
+      throw new TypeError("Cannot safely canonicalize custom array JSON value");
+    }
+    assertDataProperties(value);
+    if (seen.has(value)) throw new TypeError("Cannot normalize cyclic JSON value");
+    seen.add(value);
+    const normalized = value.map((item) => item === undefined ? null : normalizeJsonValue(item, seen));
+    seen.delete(value);
+    return normalized;
+  }
+  if (!value || typeof value !== "object") return value;
+  if (value instanceof Date) {
+    if (Object.getPrototypeOf(value) !== Date.prototype || Object.prototype.hasOwnProperty.call(value, "toJSON")) {
+      throw new TypeError("Cannot safely canonicalize custom date JSON value");
+    }
+    return value.toJSON();
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError("Cannot safely canonicalize custom JSON object");
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "toJSON") || typeof (Object.prototype as { toJSON?: unknown }).toJSON === "function") {
+    throw new TypeError("Cannot safely canonicalize custom JSON serialization");
+  }
+  assertDataProperties(value);
+  if (seen.has(value)) throw new TypeError("Cannot normalize cyclic JSON value");
+
+  seen.add(value);
+  const normalized = Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, normalizeJsonValue(entry, seen)]),
+  );
+  seen.delete(value);
+  return normalized;
+}
+
+function stableJson(value: unknown) {
+  return JSON.stringify(normalizeJsonValue(value));
+}
+
+interface PreparedApiRequest {
+  path: string;
+  method: NonNullable<ApiRequestOptions["method"]>;
+  headers: Record<string, string>;
+  requestBody?: BodyInit;
+  requestClass: RequestClass;
+  canRetry: boolean;
+  timeoutMs: number;
+  retry: RequestPolicy["retry"];
+  signal?: AbortSignal;
+  activeQueryKey?: string;
+}
+
+function preparationError(error: unknown) {
+  if (error instanceof ApiClientError) return error;
+  return new ApiClientError({
+    code: "NETWORK_ERROR",
+    message: "Network request failed",
+    retryable: true,
+  });
+}
+
 export class ApiClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly random: () => number;
-  private readonly activeQueries = new Map<string, { promise: Promise<unknown>; signal?: AbortSignal }>();
+  private readonly activeQueries = new Map<string, Array<{ promise: Promise<unknown>; signal?: AbortSignal }>>();
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = options.baseUrl?.replace(/\/$/, "") ?? "";
@@ -99,20 +202,34 @@ export class ApiClient {
   }
 
   request<T>(options: ApiRequestOptions): Promise<T> {
-    const dedupeKey = options.requestClass === "query" ? options.policy.dedupeKey : undefined;
+    let prepared: PreparedApiRequest;
+    try {
+      prepared = this.prepareRequest(options);
+    } catch (error) {
+      return Promise.reject(preparationError(error));
+    }
+    const dedupeKey = prepared.activeQueryKey;
     if (dedupeKey) {
-      const active = this.activeQueries.get(dedupeKey);
-      if (active && !active.signal?.aborted) return active.promise as Promise<T>;
-      if (active) this.activeQueries.delete(dedupeKey);
+      const activeQueries = this.activeQueries.get(dedupeKey)?.filter((active) => !active.signal?.aborted) ?? [];
+      const active = activeQueries.find((query) => query.signal === prepared.signal);
+      if (active) return active.promise as Promise<T>;
+      if (activeQueries.length > 0) this.activeQueries.set(dedupeKey, activeQueries);
+      else this.activeQueries.delete(dedupeKey);
     }
 
-    const promise = this.execute<T>(options);
+    const promise = this.execute<T>(prepared);
     if (!dedupeKey) return promise;
 
-    const active = { promise, signal: options.policy.signal };
-    this.activeQueries.set(dedupeKey, active);
+    const active = { promise, signal: prepared.signal };
+    const activeQueries = this.activeQueries.get(dedupeKey) ?? [];
+    activeQueries.push(active);
+    this.activeQueries.set(dedupeKey, activeQueries);
     return promise.finally(() => {
-      if (this.activeQueries.get(dedupeKey) === active) this.activeQueries.delete(dedupeKey);
+      const activeQueries = this.activeQueries.get(dedupeKey);
+      if (!activeQueries) return;
+      const remaining = activeQueries.filter((query) => query !== active);
+      if (remaining.length > 0) this.activeQueries.set(dedupeKey, remaining);
+      else this.activeQueries.delete(dedupeKey);
     });
   }
 
@@ -120,31 +237,135 @@ export class ApiClient {
     return this.executeDownload(options);
   }
 
-  private async execute<T>(options: ApiRequestOptions): Promise<T> {
+  confirmAiAction(workspaceId: string, actionId: string, baseRevision: number) {
+    return this.request<ConfirmAiActionResult>({
+      path: `/api/v2/ai/actions/${encodeURIComponent(actionId)}/confirm`,
+      method: "POST",
+      headers: { "x-workspace-id": workspaceId },
+      body: { action_id: actionId, base_revision: baseRevision },
+      requestClass: "command",
+      policy: { timeoutMs: 12_000, retry: 0, idempotencyKey: crypto.randomUUID() },
+    });
+  }
+
+  rejectAiAction(workspaceId: string, actionId: string, baseRevision: number) {
+    return this.request<RejectAiActionResult>({
+      path: `/api/v2/ai/actions/${encodeURIComponent(actionId)}/reject`,
+      method: "POST",
+      headers: { "x-workspace-id": workspaceId },
+      body: { action_id: actionId, base_revision: baseRevision },
+      requestClass: "command",
+      policy: { timeoutMs: 12_000, retry: 0, idempotencyKey: crypto.randomUUID() },
+    });
+  }
+
+  getAiTrustedMode(workspaceId: string, signal?: AbortSignal) {
+    return this.request<AiTrustedMode>({
+      path: "/api/v2/ai/trusted-mode",
+      headers: { "x-workspace-id": workspaceId },
+      requestClass: "query",
+      policy: { timeoutMs: 8_000, retry: 1, dedupeKey: `ai-trusted-mode:${workspaceId}`, signal },
+    });
+  }
+
+  updateAiTrustedMode(workspaceId: string, input: Pick<AiTrustedMode, "enabled" | "expires_at"> & { base_revision: number }) {
+    return this.request<AiTrustedMode>({
+      path: "/api/v2/ai/trusted-mode",
+      method: "PATCH",
+      headers: { "x-workspace-id": workspaceId },
+      body: input,
+      requestClass: "command",
+      policy: { timeoutMs: 12_000, retry: 0, idempotencyKey: crypto.randomUUID() },
+    });
+  }
+
+  listAiActionHistory(workspaceId: string, limit = 20, signal?: AbortSignal) {
+    const query = new URLSearchParams({ limit: String(limit) });
+    return this.request<AiActionHistoryResponse>({
+      path: `/api/v2/ai/actions/history?${query.toString()}`,
+      headers: { "x-workspace-id": workspaceId },
+      requestClass: "query",
+      policy: { timeoutMs: 8_000, retry: 1, dedupeKey: `ai-action-history:${workspaceId}:${limit}`, signal },
+    });
+  }
+
+  private prepareRequest(options: ApiRequestOptions): PreparedApiRequest {
+    const path = options.path;
     const method = options.method ?? "GET";
-    const canRetry = options.requestClass === "query" || Boolean(options.policy.idempotencyKey);
-    const retryCount = canRetry ? options.policy.retry : 0;
+    const requestClass = options.requestClass;
+    const body = options.body;
+    const bodyMode = options.bodyMode ?? "json";
+    const policy = options.policy;
+    const { timeoutMs, retry, dedupeKey, idempotencyKey, signal } = policy;
+    const canonicalHeaders = canonicalizeHeaders(options.headers);
+    const headers: Record<string, string> = { accept: "application/json", ...canonicalHeaders };
+    if (body !== undefined && bodyMode === "json") headers["content-type"] = "application/json";
+    if (idempotencyKey) headers["idempotency-key"] = idempotencyKey;
+
+    let requestBody: BodyInit | undefined;
+    let bodyKey = body === undefined ? "" : undefined;
+    if (body !== undefined && bodyMode === "raw") {
+      requestBody = body as BodyInit;
+    } else if (body !== undefined) {
+      if (requestClass === "query" && dedupeKey) {
+        try {
+          const canonicalBody = stableJson(body);
+          if (typeof canonicalBody === "string") {
+            bodyKey = canonicalBody;
+            requestBody = canonicalBody;
+          }
+        } catch {
+          // Custom serializers and accessors use their normal wire form without active dedupe.
+        }
+      }
+      if (requestBody === undefined) requestBody = JSON.stringify(body);
+    }
+
+    let activeQueryKey: string | undefined;
+    if (requestClass === "query" && dedupeKey && bodyKey !== undefined) {
+      try {
+        activeQueryKey = JSON.stringify([
+          canonicalHeaders["x-workspace-id"] ?? "",
+          method,
+          this.normalizePath(path),
+          bodyKey,
+        ]);
+      } catch {
+        // Invalid paths remain on the normal asynchronous request error path.
+      }
+    }
+
+    return {
+      path,
+      method,
+      headers: Object.freeze(headers),
+      requestBody,
+      requestClass,
+      canRetry: requestClass === "query" || Boolean(idempotencyKey),
+      timeoutMs,
+      retry,
+      signal,
+      activeQueryKey,
+    };
+  }
+
+  private normalizePath(path: string) {
+    const url = new URL(path, "https://nexus.local");
+    url.searchParams.sort();
+    const query = url.searchParams.toString();
+    return query ? `${url.pathname}?${query}` : url.pathname;
+  }
+
+  private async execute<T>(request: PreparedApiRequest): Promise<T> {
+    const retryCount = request.canRetry ? request.retry : 0;
 
     for (let attempt = 0; attempt <= retryCount; attempt += 1) {
-      const attemptSignal = createAttemptSignal(options.policy.timeoutMs, options.policy.signal);
+      const attemptSignal = createAttemptSignal(request.timeoutMs, request.signal);
       try {
-        const bodyMode = options.bodyMode ?? "json";
-        const headers: Record<string, string> = {
-          accept: "application/json",
-          ...options.headers,
-        };
-        if (options.body !== undefined && bodyMode === "json") headers["content-type"] = "application/json";
-        if (options.policy.idempotencyKey) headers["idempotency-key"] = options.policy.idempotencyKey;
-        const requestBody = options.body === undefined
-          ? undefined
-          : bodyMode === "raw"
-            ? options.body as BodyInit
-            : JSON.stringify(options.body);
-
-        const response = await this.fetchImpl(`${this.baseUrl}${options.path}`, {
-          method,
-          headers,
-          body: requestBody,
+        const response = await this.fetchImpl(`${this.baseUrl}${request.path}`, {
+          method: request.method,
+          headers: request.headers,
+          body: request.requestBody,
           signal: attemptSignal.signal,
           credentials: "include",
         });
@@ -161,7 +382,7 @@ export class ApiClient {
         throw new ApiClientError(payload, response.status);
       } catch (error) {
         if (error instanceof ApiClientError) throw error;
-        if (options.policy.signal?.aborted) throw error;
+        if (request.signal?.aborted) throw error;
         if (attempt < retryCount) {
           await this.waitBeforeRetry(attempt);
           continue;
@@ -180,13 +401,15 @@ export class ApiClient {
   }
 
   private async executeDownload(options: ApiDownloadOptions): Promise<Blob> {
-    const retryCount = options.policy.retry;
+    const path = options.path;
+    const { retry: retryCount, timeoutMs, signal } = options.policy;
+    const headers = Object.freeze({ accept: "application/octet-stream", ...canonicalizeHeaders(options.headers) });
     for (let attempt = 0; attempt <= retryCount; attempt += 1) {
-      const attemptSignal = createAttemptSignal(options.policy.timeoutMs, options.policy.signal);
+      const attemptSignal = createAttemptSignal(timeoutMs, signal);
       try {
-        const response = await this.fetchImpl(`${this.baseUrl}${options.path}`, {
+        const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
           method: "GET",
-          headers: { accept: "application/octet-stream", ...options.headers },
+          headers,
           signal: attemptSignal.signal,
           credentials: "include",
         });
@@ -202,7 +425,7 @@ export class ApiClient {
         throw new ApiClientError(payload, response.status);
       } catch (error) {
         if (error instanceof ApiClientError) throw error;
-        if (options.policy.signal?.aborted) throw error;
+        if (signal?.aborted) throw error;
         if (attempt < retryCount) {
           await this.waitBeforeRetry(attempt);
           continue;

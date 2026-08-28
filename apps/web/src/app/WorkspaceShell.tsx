@@ -28,12 +28,13 @@ export function WorkspaceShell({
   ...workbenchProps
 }: WorkspaceShellProps) {
   const changingDomain = domainPending && requestedDomain !== activeDomain;
+  const busy = domainPending || changingDomain;
   return (
     <AdaptiveWorkbench {...workbenchProps}>
       <div
         className="workspace-domain-surface"
         data-domain={changingDomain ? requestedDomain : activeDomain}
-        aria-busy={changingDomain || undefined}
+        aria-busy={busy || undefined}
       >
         {changingDomain ? (
           <section

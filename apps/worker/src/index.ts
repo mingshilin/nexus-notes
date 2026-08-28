@@ -77,6 +77,40 @@ export { registerSyncRoutes } from "./routes/sync";
 export { D1SyncRepository } from "./sync/d1-sync-repository";
 export { SyncService } from "./sync/sync-service";
 export { AiChatService, AiChatServiceError } from "./ai/ai-chat-service";
+export { AiReadTools, AiReadToolError } from "./ai/ai-read-tools";
+export type { AiReadExecutionContext, AiReadToolsDependencies } from "./ai/ai-read-tools";
+export { AiEmailOutboxRepository } from "./ai/ai-email-outbox-repository";
+export { AiEmailConsumer } from "./ai/ai-email-consumer";
+export { AiEmailOutboxDispatcher } from "./ai/ai-email-outbox-dispatcher";
+export {
+  AI_ACTION_PROPOSAL_TTL_MS,
+  type AiActionProposal,
+  type AiActionStatus,
+  type AiActionToolName,
+  type AiToolName,
+} from "@nexus/contracts";
+export { AiToolError } from "./ai/ai-tool-model";
+export type {
+  AiToolCall,
+  AiToolInput,
+  AiToolRepositoryPort,
+  InsertProposalInput,
+  ProposalMutationInput,
+  StoredAiActionProposal,
+} from "./ai/ai-tool-model";
+export { D1AiToolRepository } from "./ai/ai-tool-repository";
+export { AiToolOrchestrator } from "./ai/ai-tool-orchestrator";
+export {
+  AiOrganizationTools,
+  isAiOrganizationTool,
+  normalizeAiOrganizationInput,
+} from "./ai/ai-organization-tools";
+export type {
+  AiOrganizationExecutionMeta,
+  AiOrganizationInput,
+  AiOrganizationServices,
+  AiOrganizationToolName,
+} from "./ai/ai-organization-tools";
 export { UserSecretBox } from "./security/user-secret-box";
 export { D1AiConfigRepository } from "./ai/d1-ai-config-repository";
 export { UserAiConfigService, UserAiConfigError, normalizeAiEndpoint } from "./ai/user-ai-config-service";

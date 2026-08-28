@@ -709,6 +709,59 @@ export class D1CollaborationRepository {
     return comment;
   }
 
+  async createNotification(context: WorkspaceContext, input: {
+    notificationId: string;
+    userId: string;
+    title: string;
+    summary: string;
+    deepLink: string;
+    now: string;
+    requestId?: string;
+  }) {
+    const member = await this.member(context.workspaceId, input.userId);
+    if (!member) {
+      throw new CollaborationRepositoryError("NOTIFICATION_TARGET_NOT_FOUND", "Notification target not found", 404);
+    }
+    const payloadMetadata = redactAuditMetadata({
+      notification_id: input.notificationId,
+      source: "ai_action",
+      title: input.title,
+      summary: input.summary,
+    });
+    const payload = JSON.stringify(payloadMetadata);
+    await this.db.prepare(
+      `INSERT INTO notifications
+       (id, workspace_id, user_id, type, payload_json, deep_link, read_at, revision, created_at, updated_at)
+       VALUES (?, ?, ?, 'ai_action', ?, ?, NULL, 1, ?, ?)
+       ON CONFLICT(id) DO NOTHING`,
+    ).bind(
+      input.notificationId,
+      context.workspaceId,
+      input.userId,
+      payload,
+      input.deepLink,
+      input.now,
+      input.now,
+    ).run();
+    const row = await this.db.prepare(
+      `SELECT ${notificationColumns} FROM notifications
+       WHERE id = ? AND workspace_id = ? AND user_id = ? LIMIT 1`,
+    ).bind(input.notificationId, context.workspaceId, input.userId).first<NotificationRow>();
+    if (!row) {
+      const collision = await this.db.prepare(
+        "SELECT 1 AS present FROM notifications WHERE id = ? LIMIT 1",
+      ).bind(input.notificationId).first<{ present: number }>();
+      if (collision) {
+        throw new CollaborationRepositoryError("NOTIFICATION_IDEMPOTENCY_CONFLICT", "Notification request conflicts with an existing request", 409);
+      }
+      throw new CollaborationRepositoryError("NOTIFICATION_CREATE_FAILED", "Notification could not be created", 500);
+    }
+    if (JSON.stringify(parseMetadata(row.payload_json)) !== JSON.stringify(payloadMetadata)) {
+      throw new CollaborationRepositoryError("NOTIFICATION_IDEMPOTENCY_CONFLICT", "Notification request conflicts with an existing request", 409);
+    }
+    return this.toNotification(row);
+  }
+
   async listComments(context: WorkspaceContext, targetType: CollaborationComment["target_type"], targetId: string) {
     await this.assertTarget(context, targetType, targetId, "read");
     const result = await this.db.prepare(

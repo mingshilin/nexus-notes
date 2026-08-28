@@ -130,6 +130,39 @@ export function toDatabase(row: DatabaseRow): Database {
   return row;
 }
 
+export function encodeDatabasePageCursor(database: Pick<Database, "workspace_id" | "updated_at" | "id">) {
+  return encodeURIComponent(JSON.stringify({
+    kind: "database_list",
+    workspace_id: database.workspace_id,
+    updated_at: database.updated_at,
+    id: database.id,
+  }));
+}
+
+export function decodeDatabasePageCursor(cursor: string, workspaceId: string) {
+  try {
+    const decoded = JSON.parse(decodeURIComponent(cursor)) as {
+      kind?: unknown;
+      workspace_id?: unknown;
+      updated_at?: unknown;
+      id?: unknown;
+    };
+    if (
+      decoded.kind !== "database_list"
+      || decoded.workspace_id !== workspaceId
+      || typeof decoded.updated_at !== "string"
+      || !decoded.updated_at
+      || typeof decoded.id !== "string"
+      || !decoded.id
+    ) {
+      throw new Error("invalid database cursor");
+    }
+    return { updatedAt: decoded.updated_at, id: decoded.id };
+  } catch {
+    throw new DatabaseRepositoryError("INVALID_CURSOR", "Database cursor is invalid", 400);
+  }
+}
+
 export function toProperty(row: PropertyRow): DatabaseProperty {
   return {
     id: row.id,

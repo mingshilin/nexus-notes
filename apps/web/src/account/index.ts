@@ -2,15 +2,18 @@ import type { AccountSession, Profile, WorkspaceMembershipSummary } from "@nexus
 import type { ProfileClient } from "../data/profile-client";
 import type { CollaborationClient } from "../data/collaboration-client";
 import type { OperationsClient } from "../data/operations-client";
+import type { ApiClient } from "../data/api-client";
 
 export type ProfileClientLike = Pick<ProfileClient, "getProfile" | "updateProfile" | "uploadAvatar" | "deleteAvatar" | "requestEmailChange" | "confirmEmailChange" | "changePassword" | "listSessions" | "revokeSession" | "deleteAccount">
   & Partial<Pick<ProfileClient, "getOverview" | "getPreferences" | "updatePreferences" | "getActivity" | "revokeOtherSessions" | "listPushSubscriptions" | "getPushPublicKey" | "subscribePush" | "disablePushSubscription" | "testPush">>;
 export type CollaborationClientLike = Pick<CollaborationClient, "listMembers" | "updateMemberRole" | "removeMember" | "createInvitation">;
 export type OperationsClientLike = Pick<OperationsClient, "getUsage" | "getStatus" | "createJob"> & Partial<Pick<OperationsClient, "getJob" | "downloadJob" | "listJobs">>;
-export type AccountTab = "overview" | "profile" | "security" | "workspace" | "preferences" | "privacy";
+export type AccountTab = "overview" | "profile" | "security" | "workspace" | "preferences" | "privacy" | "ai";
+export type AiControlClientLike = Pick<ApiClient, "getAiTrustedMode" | "updateAiTrustedMode" | "listAiActionHistory">;
 
 export interface AccountCenterProps {
   client: ProfileClientLike;
+  ai?: AiControlClientLike;
   collaboration?: CollaborationClientLike;
   operations?: OperationsClientLike;
   workspaces: WorkspaceMembershipSummary[];

@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { DailyDateSchema } from "./notes";
+
+const EntityIdSchema = z.string().trim().min(1).max(128);
+const TimestampSchema = z.string().datetime({ offset: true });
 
 const AiMessageSchema = z.object({
   role: z.enum(["user", "assistant"]),
@@ -8,8 +12,34 @@ const AiMessageSchema = z.object({
   content: message.content.trim(),
 }));
 
+export const AiReadToolNameSchema = z.enum([
+  "search_notes",
+  "get_note",
+  "list_reminders",
+  "search_databases",
+  "get_database_record",
+]);
+export type AiReadToolName = z.infer<typeof AiReadToolNameSchema>;
+
+export const AiReadContextSchema = z.object({
+  workspaceId: EntityIdSchema,
+  userId: EntityIdSchema,
+  selectedNoteIds: z.array(EntityIdSchema).max(50).transform((ids) => [...new Set(ids)]),
+  selectedDatabaseIds: z.array(EntityIdSchema).max(50).transform((ids) => [...new Set(ids)]),
+  allowWorkspaceSearch: z.boolean(),
+}).strict();
+export type AiReadContext = z.infer<typeof AiReadContextSchema>;
+
+export const AiReadScopeInputSchema = z.object({
+  selected_note_ids: z.array(EntityIdSchema).max(50).default([]),
+  selected_database_ids: z.array(EntityIdSchema).max(50).default([]),
+  allow_workspace_search: z.boolean().default(false),
+}).strict();
+export type AiReadScopeInput = z.infer<typeof AiReadScopeInputSchema>;
+
 export const AiChatInputSchema = z.object({
   messages: z.array(AiMessageSchema).min(1).max(20),
+  read_context: AiReadScopeInputSchema.optional(),
 }).strict().superRefine((input, context) => {
   const totalCharacters = input.messages.reduce((total, message) => total + message.content.length, 0);
   if (totalCharacters > 32_000) {
@@ -22,12 +52,180 @@ export type AiChatMessage = AiChatInput["messages"][number];
 export const AiChatResponseSchema = z.object({
   message: z.string().trim().min(1).max(8_000),
   model: z.string().trim().min(1).max(128),
+  action_proposals: z.array(z.lazy(() => AiActionProposalSchema)).optional(),
+  action_results: z.array(z.lazy(() => AiActionExecutionResultSchema)).max(20).optional(),
+  read_results: z.array(z.lazy(() => AiReadResultSchema)).max(5).optional(),
 }).strict();
 export type AiChatResponse = z.infer<typeof AiChatResponseSchema>;
 
 const AiBaseUrlSchema = z.string().trim().url().max(2048).refine((value) => new URL(value).protocol === "https:", "AI base URL must use HTTPS");
 const AiModelSchema = z.string().trim().min(1).max(128);
 const AiKeySchema = z.string().trim().min(16).max(512);
+const PositiveRevisionSchema = z.number().int().positive();
+
+export const AI_ACTION_PROPOSAL_TTL_MS = 10 * 60 * 1000;
+export const AI_TRUSTED_MODE_TTL_MS = 24 * 60 * 60 * 1000;
+
+const ReadLimitSchema = z.coerce.number().int().min(1).max(50).default(20);
+const AiReadCursorValueSchema = z.string().trim().min(1).max(4_096);
+const ReadCursorSchema = AiReadCursorValueSchema.optional();
+
+const AiSearchNotesInputSchema = z.object({
+  query: z.string().trim().max(500).default(""),
+  limit: ReadLimitSchema,
+  cursor: ReadCursorSchema,
+}).strict();
+const AiGetNoteInputSchema = z.object({ note_id: EntityIdSchema }).strict();
+const AiListRemindersInputSchema = z.object({
+  include_completed: z.boolean().default(false),
+  query: z.string().trim().max(160).optional(),
+  limit: ReadLimitSchema,
+  cursor: ReadCursorSchema,
+}).strict();
+const AiSearchDatabasesInputSchema = z.object({
+  query: z.string().trim().max(500).default(""),
+  limit: ReadLimitSchema,
+  cursor: ReadCursorSchema,
+}).strict();
+const AiGetDatabaseRecordInputSchema = z.object({
+  database_id: EntityIdSchema,
+  record_id: EntityIdSchema,
+}).strict();
+
+export const AiReadToolCallSchema = z.discriminatedUnion("tool", [
+  z.object({ tool: z.literal("search_notes"), input: AiSearchNotesInputSchema }).strict(),
+  z.object({ tool: z.literal("get_note"), input: AiGetNoteInputSchema }).strict(),
+  z.object({ tool: z.literal("list_reminders"), input: AiListRemindersInputSchema }).strict(),
+  z.object({ tool: z.literal("search_databases"), input: AiSearchDatabasesInputSchema }).strict(),
+  z.object({ tool: z.literal("get_database_record"), input: AiGetDatabaseRecordInputSchema }).strict(),
+]);
+export type AiReadToolCall = z.infer<typeof AiReadToolCallSchema>;
+
+export const AiReadSourceTypeSchema = z.enum(["note", "reminder", "database", "database_record"]);
+export type AiReadSourceType = z.infer<typeof AiReadSourceTypeSchema>;
+
+export const AiReadItemSchema = z.object({
+  source_type: AiReadSourceTypeSchema,
+  source_id: EntityIdSchema,
+  workspace_id: EntityIdSchema,
+  title: z.string().max(160),
+  excerpt: z.string().max(1_000).optional(),
+  content: z.string().max(20_000).optional(),
+  values: z.record(EntityIdSchema, z.unknown()).optional(),
+  hit_sources: z.array(z.enum(["title", "content", "tags", "properties", "attachment_name", "ocr"])).max(6).optional(),
+  remind_at: TimestampSchema.optional(),
+  status: z.string().trim().min(1).max(32).optional(),
+  revision: PositiveRevisionSchema,
+  updated_at: TimestampSchema,
+}).strict().superRefine((item, context) => {
+  try {
+    const serialized = JSON.stringify(item.values);
+    if (serialized && new TextEncoder().encode(serialized).byteLength > 16_000) {
+      context.addIssue({ code: "custom", path: ["values"], message: "AI read values exceed the bounded response size" });
+    }
+  } catch {
+    context.addIssue({ code: "custom", path: ["values"], message: "AI read values must be JSON serializable" });
+  }
+});
+export type AiReadItem = z.infer<typeof AiReadItemSchema>;
+
+export const AiReadResultSchema = z.object({
+  tool: AiReadToolNameSchema,
+  items: z.array(AiReadItemSchema).max(50),
+  next_cursor: AiReadCursorValueSchema.nullable(),
+  scope: z.object({ workspace_id: EntityIdSchema, selected_only: z.boolean() }).strict(),
+}).strict();
+export type AiReadResult = z.infer<typeof AiReadResultSchema>;
+
+export const AiToolRiskSchema = z.enum([
+  "read",
+  "safe_write",
+  "confirmed_write",
+  "external_or_destructive",
+]);
+export type AiToolRisk = z.infer<typeof AiToolRiskSchema>;
+
+export const AiToolTargetSchema = z.enum(["current", "selected", "workspace"]);
+export type AiToolTarget = z.infer<typeof AiToolTargetSchema>;
+
+export const AI_TOOL_CATALOG = [
+  { name: "search_notes", risk: "read" },
+  { name: "get_note", risk: "read" },
+  { name: "list_reminders", risk: "read" },
+  { name: "search_databases", risk: "read" },
+  { name: "get_database_record", risk: "read" },
+  { name: "create_note", risk: "safe_write" },
+  { name: "create_reminder", risk: "safe_write" },
+  { name: "create_notification", risk: "safe_write" },
+  { name: "create_folder", risk: "confirmed_write" },
+  { name: "update_note", risk: "confirmed_write" },
+  { name: "move_note", risk: "confirmed_write" },
+  { name: "archive_note", risk: "confirmed_write" },
+  { name: "restore_note", risk: "confirmed_write" },
+  { name: "delete_note", risk: "confirmed_write" },
+  { name: "apply_tag", risk: "confirmed_write" },
+  { name: "create_database_record", risk: "confirmed_write" },
+  { name: "update_database_record", risk: "confirmed_write" },
+  { name: "apply_template", risk: "confirmed_write" },
+  { name: "complete_reminder", risk: "confirmed_write" },
+  { name: "send_email", risk: "external_or_destructive" },
+  { name: "change_permissions", risk: "external_or_destructive" },
+  { name: "delete_database", risk: "external_or_destructive" },
+] as const satisfies readonly { name: string; risk: AiToolRisk }[];
+
+type AiCatalogToolName = typeof AI_TOOL_CATALOG[number]["name"];
+const AiToolNames = AI_TOOL_CATALOG.map((entry) => entry.name) as [AiCatalogToolName, ...AiCatalogToolName[]];
+
+export const AiToolNameSchema = z.enum(AiToolNames);
+export type AiToolName = z.infer<typeof AiToolNameSchema>;
+
+export const AiActionToolNameSchema = z.enum([
+  "create_note",
+  "create_reminder",
+  "complete_reminder",
+  "create_notification",
+  "send_email",
+  "update_note",
+  "move_note",
+  "archive_note",
+  "restore_note",
+  "delete_note",
+  "create_folder",
+  "apply_tag",
+  "create_database_record",
+  "update_database_record",
+  "apply_template",
+]);
+export type AiActionToolName = z.infer<typeof AiActionToolNameSchema>;
+
+export const AiTrustedModeSchema = z.object({
+  workspace_id: EntityIdSchema,
+  enabled: z.boolean(),
+  expires_at: TimestampSchema.nullable(),
+  revision: PositiveRevisionSchema,
+}).strict().superRefine((value, context) => {
+  if (value.enabled && value.expires_at === null) {
+    context.addIssue({ code: "custom", path: ["expires_at"], message: "Enabled trusted mode requires an expiry" });
+  }
+  if (!value.enabled && value.expires_at !== null) {
+    context.addIssue({ code: "custom", path: ["expires_at"], message: "Disabled trusted mode cannot have an expiry" });
+  }
+});
+export type AiTrustedMode = z.infer<typeof AiTrustedModeSchema>;
+
+export const UpdateAiTrustedModeInputSchema = z.object({
+  enabled: z.boolean(),
+  expires_at: TimestampSchema.nullable(),
+  base_revision: PositiveRevisionSchema,
+}).strict().superRefine((value, context) => {
+  if (value.enabled && value.expires_at === null) {
+    context.addIssue({ code: "custom", path: ["expires_at"], message: "Enabled trusted mode requires an expiry" });
+  }
+  if (!value.enabled && value.expires_at !== null) {
+    context.addIssue({ code: "custom", path: ["expires_at"], message: "Disabled trusted mode cannot have an expiry" });
+  }
+});
+export type UpdateAiTrustedModeInput = z.infer<typeof UpdateAiTrustedModeInputSchema>;
 
 export const AiUserConfigSummarySchema = z.object({
   configured: z.boolean(),
@@ -35,15 +233,15 @@ export const AiUserConfigSummarySchema = z.object({
   base_url: AiBaseUrlSchema.optional(),
   model: AiModelSchema.optional(),
   key_hint: z.string().min(1).max(32).optional(),
-  verified_at: z.string().datetime({ offset: true }).nullable().optional(),
-  revision: z.number().int().positive().optional(),
+  verified_at: TimestampSchema.nullable().optional(),
+  revision: PositiveRevisionSchema.optional(),
 }).strict();
 
 export const UpsertAiUserConfigInputSchema = z.object({
   base_url: AiBaseUrlSchema,
   model: AiModelSchema,
   api_key: AiKeySchema.optional(),
-  base_revision: z.number().int().positive().nullable().optional(),
+  base_revision: PositiveRevisionSchema.nullable().optional(),
 }).strict();
 
 export const TestAiUserConfigInputSchema = z.object({
@@ -53,7 +251,255 @@ export const TestAiUserConfigInputSchema = z.object({
 }).strict();
 
 export const DeleteAiUserConfigInputSchema = z.object({
-  base_revision: z.number().int().positive(),
+  base_revision: PositiveRevisionSchema,
+}).strict();
+
+const BoundedJsonSchema: z.ZodType<unknown> = z.unknown().superRefine((value, context) => {
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) {
+      context.addIssue({ code: "custom", message: "AI action input must be JSON serializable" });
+      return;
+    }
+    if (serialized.length > 16_000) {
+      context.addIssue({ code: "custom", message: "AI action input exceeds the 16 KB limit" });
+    }
+  } catch {
+    context.addIssue({ code: "custom", message: "AI action input must be JSON serializable" });
+  }
+});
+
+const EmailSchema = z.email().max(320);
+const AiActionSummarySchema = z.string().trim().min(1).max(280);
+const AiActionReasonSchema = z.string().trim().min(1).max(500);
+const NoteTitleSchema = z.string().trim().max(160);
+const NoteContentSchema = z.string().max(20_000);
+const OrganizationIdsSchema = z.array(EntityIdSchema).min(1).max(100).transform((ids) => [...new Set(ids)]);
+const OrganizationValuesSchema = z.record(EntityIdSchema, z.unknown());
+
+export const AiActionStatusSchema = z.enum(["proposed", "confirmed", "executing", "rejected", "expired", "executed", "failed", "conflict"]);
+export type AiActionStatus = z.infer<typeof AiActionStatusSchema>;
+
+export const AiActionHistoryItemSchema = z.object({
+  action_id: EntityIdSchema,
+  tool: AiActionToolNameSchema,
+  risk: AiToolRiskSchema,
+  status: AiActionStatusSchema,
+  created_at: TimestampSchema,
+  updated_at: TimestampSchema,
+  error_code: z.string().trim().min(1).max(128).optional(),
+}).strict();
+export type AiActionHistoryItem = z.infer<typeof AiActionHistoryItemSchema>;
+
+export const AiActionHistoryResponseSchema = z.object({
+  items: z.array(AiActionHistoryItemSchema).max(50),
+}).strict();
+export type AiActionHistoryResponse = z.infer<typeof AiActionHistoryResponseSchema>;
+
+export const AiActionHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+}).strict();
+export type AiActionHistoryQuery = z.infer<typeof AiActionHistoryQuerySchema>;
+
+export const CreateNoteActionInputSchema = z.object({
+  title: NoteTitleSchema.default(""),
+  content: NoteContentSchema.default(""),
+  folder_id: EntityIdSchema.nullable().optional(),
+  database_id: EntityIdSchema.nullable().optional(),
+  daily_date: DailyDateSchema.nullable().optional(),
+}).strict();
+
+export const CreateReminderActionInputSchema = z.object({
+  note_id: EntityIdSchema.nullable().optional(),
+  title: z.string().trim().max(160).default(""),
+  remind_at: TimestampSchema,
+  timezone: z.string().trim().min(1).max(64).default("UTC"),
+}).strict();
+
+export const CompleteReminderActionInputSchema = z.object({
+  reminder_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+}).strict();
+export type CompleteReminderActionInput = z.infer<typeof CompleteReminderActionInputSchema>;
+
+export const CreateNotificationActionInputSchema = z.object({
+  title: z.string().trim().min(1).max(160),
+  body_text: z.string().trim().min(1).max(2_000),
+}).strict();
+
+export const AiEmailRecipientScopeSchema = z.enum(["self", "workspace_member", "external"]);
+export type AiEmailRecipientScope = z.infer<typeof AiEmailRecipientScopeSchema>;
+
+export const SendEmailActionInputSchema = z.object({
+  to_email: EmailSchema,
+  subject: z.string().trim().min(1).max(160),
+  body_text: z.string().trim().min(1).max(8_000),
+  recipient_scope: AiEmailRecipientScopeSchema.optional(),
+}).strict();
+
+const NoteActionTargetSchema = z.object({
+  target_note_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+}).strict();
+
+const NoteActionPatchSchema = z.object({
+  title: NoteTitleSchema.optional(),
+  content: NoteContentSchema.optional(),
+  folder_id: EntityIdSchema.nullable().optional(),
+  database_id: EntityIdSchema.nullable().optional(),
+  daily_date: DailyDateSchema.nullable().optional(),
+  is_favorite: z.boolean().optional(),
+  is_pinned: z.boolean().optional(),
+}).strict().refine(
+  (patch) => Object.values(patch).some((value) => value !== undefined),
+  { message: "At least one note field must change" },
+);
+
+export const UpdateNoteActionInputSchema = NoteActionTargetSchema.extend({
+  patch: NoteActionPatchSchema,
+}).strict();
+
+export const MoveNoteActionInputSchema = NoteActionTargetSchema.extend({
+  patch: z.object({ folder_id: EntityIdSchema.nullable() }).strict(),
+}).strict();
+
+export const ArchiveNoteActionInputSchema = NoteActionTargetSchema.extend({
+  patch: z.object({ status: z.literal("archived") }).strict(),
+}).strict();
+
+export const RestoreNoteActionInputSchema = NoteActionTargetSchema.extend({
+  patch: z.object({ status: z.literal("active") }).strict(),
+}).strict();
+
+export const DeleteNoteActionInputSchema = NoteActionTargetSchema.extend({
+  patch: z.object({ status: z.literal("trashed") }).strict(),
+}).strict();
+
+export const CreateFolderActionInputSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  parent_id: EntityIdSchema.nullable().optional(),
+  position: z.number().int().min(0).optional(),
+}).strict();
+
+export const ApplyTagActionInputSchema = z.object({
+  target_note_ids: OrganizationIdsSchema.optional(),
+  target_note_id: EntityIdSchema.optional(),
+  tag_ids: OrganizationIdsSchema,
+}).strict().superRefine((input, context) => {
+  if (!input.target_note_ids && !input.target_note_id) {
+    context.addIssue({ code: "custom", path: ["target_note_ids"], message: "At least one target note is required" });
+  }
+  if (input.target_note_ids && input.target_note_id) {
+    context.addIssue({ code: "custom", path: ["target_note_id"], message: "Use target_note_ids or target_note_id, not both" });
+  }
+}).transform((input) => ({
+  target_note_ids: input.target_note_ids ?? [input.target_note_id!],
+  tag_ids: input.tag_ids,
+}));
+
+export const CreateDatabaseRecordActionInputSchema = z.object({
+  database_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+  note_id: EntityIdSchema.nullable().optional(),
+  values: OrganizationValuesSchema.default({}),
+}).strict();
+
+export const UpdateDatabaseRecordActionInputSchema = z.object({
+  database_id: EntityIdSchema,
+  record_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+  values: OrganizationValuesSchema.refine((values) => Object.keys(values).length > 0, "At least one value must change"),
+}).strict();
+
+export const ApplyTemplateActionInputSchema = z.object({
+  database_id: EntityIdSchema,
+  template_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+  records: z.array(z.object({
+    record_id: EntityIdSchema,
+    base_revision: PositiveRevisionSchema,
+  }).strict()).min(1).max(100),
+}).strict().superRefine((input, context) => {
+  if (new Set(input.records.map((record) => record.record_id)).size !== input.records.length) {
+    context.addIssue({ code: "custom", path: ["records"], message: "A record may only appear once per action" });
+  }
+});
+
+export type CreateFolderActionInput = z.infer<typeof CreateFolderActionInputSchema>;
+export type ApplyTagActionInput = z.infer<typeof ApplyTagActionInputSchema>;
+export type CreateDatabaseRecordActionInput = z.infer<typeof CreateDatabaseRecordActionInputSchema>;
+export type UpdateDatabaseRecordActionInput = z.infer<typeof UpdateDatabaseRecordActionInputSchema>;
+export type ApplyTemplateActionInput = z.infer<typeof ApplyTemplateActionInputSchema>;
+
+export const AiOrganizationToolNameSchema = z.enum([
+  "create_folder",
+  "apply_tag",
+  "create_database_record",
+  "update_database_record",
+  "apply_template",
+]);
+export type AiOrganizationToolName = z.infer<typeof AiOrganizationToolNameSchema>;
+
+export const AiActionInputSchema = z.discriminatedUnion("tool", [
+  z.object({ tool: z.literal("create_note"), input: CreateNoteActionInputSchema }).strict(),
+  z.object({ tool: z.literal("create_reminder"), input: CreateReminderActionInputSchema }).strict(),
+  z.object({ tool: z.literal("complete_reminder"), input: CompleteReminderActionInputSchema }).strict(),
+  z.object({ tool: z.literal("create_notification"), input: CreateNotificationActionInputSchema }).strict(),
+  z.object({ tool: z.literal("send_email"), input: SendEmailActionInputSchema }).strict(),
+  z.object({ tool: z.literal("update_note"), input: UpdateNoteActionInputSchema }).strict(),
+  z.object({ tool: z.literal("move_note"), input: MoveNoteActionInputSchema }).strict(),
+  z.object({ tool: z.literal("archive_note"), input: ArchiveNoteActionInputSchema }).strict(),
+  z.object({ tool: z.literal("restore_note"), input: RestoreNoteActionInputSchema }).strict(),
+  z.object({ tool: z.literal("delete_note"), input: DeleteNoteActionInputSchema }).strict(),
+  z.object({ tool: z.literal("create_folder"), input: CreateFolderActionInputSchema }).strict(),
+  z.object({ tool: z.literal("apply_tag"), input: ApplyTagActionInputSchema }).strict(),
+  z.object({ tool: z.literal("create_database_record"), input: CreateDatabaseRecordActionInputSchema }).strict(),
+  z.object({ tool: z.literal("update_database_record"), input: UpdateDatabaseRecordActionInputSchema }).strict(),
+  z.object({ tool: z.literal("apply_template"), input: ApplyTemplateActionInputSchema }).strict(),
+]).superRefine((value, context) => {
+  const result = BoundedJsonSchema.safeParse(value.input);
+  if (!result.success) {
+    for (const issue of result.error.issues) {
+      context.addIssue({ ...issue, path: ["input", ...issue.path] });
+    }
+  }
+});
+
+export type AiActionInput = z.infer<typeof AiActionInputSchema>;
+
+export const AiActionExecutionResultSchema = z.object({
+  action_id: EntityIdSchema,
+  status: z.enum(["executed", "failed", "conflict"]),
+  retryable: z.boolean().optional(),
+  entity_id: EntityIdSchema.optional(),
+  entity_ids: z.array(EntityIdSchema).max(100).optional(),
+  revision: PositiveRevisionSchema.optional(),
+  error: z.object({
+    code: z.string().trim().min(1).max(128),
+    message: z.string().trim().min(1).max(500),
+    status: z.number().int().min(400).max(599),
+  }).strict().optional(),
+}).strict();
+export type AiActionExecutionResult = z.infer<typeof AiActionExecutionResultSchema>;
+
+export const AiActionProposalSchema = z.object({
+  action_id: EntityIdSchema,
+  proposal_revision: PositiveRevisionSchema.optional(),
+  summary: AiActionSummarySchema,
+  requires_confirmation: z.boolean(),
+  expires_at: TimestampSchema,
+}).and(AiActionInputSchema);
+export type AiActionProposal = z.infer<typeof AiActionProposalSchema>;
+
+export const AiActionConfirmSchema = z.object({
+  action_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+}).strict();
+
+export const AiActionRejectSchema = z.object({
+  action_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+  reason: AiActionReasonSchema.optional(),
 }).strict();
 
 export const AiStatusSchema = AiUserConfigSummarySchema;

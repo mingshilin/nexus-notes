@@ -1,14 +1,26 @@
 import {
+  AiActionHistoryQuerySchema,
+  AiActionHistoryResponseSchema,
+  AiActionConfirmSchema,
+  AiActionRejectSchema,
+  AiActionExecutionResultSchema,
   AiChatInputSchema,
+  AiTrustedModeSchema,
   DeleteAiUserConfigInputSchema,
   TestAiUserConfigInputSchema,
+  UpdateAiTrustedModeInputSchema,
   UpsertAiUserConfigInputSchema,
   type AiChatInput,
   type AiChatResponse,
+  type AiActionExecutionResult,
+  type AiActionHistoryItem,
+  type AiTrustedMode,
   type AiStatus,
   type DeleteAiUserConfigInput,
   type TestAiUserConfigInput,
+  type UpdateAiTrustedModeInput,
   type UpsertAiUserConfigInput,
+  type WorkspaceContext,
 } from "@nexus/contracts";
 import type { RouteDefinition } from "../http/route-registry";
 
@@ -17,12 +29,29 @@ interface AiRegistry<TEnv> {
 }
 
 export interface AiChatRouteService {
-  chat(input: AiChatInput, signal: AbortSignal, userId?: string): Promise<AiChatResponse>;
+  chat(input: AiChatInput, signal: AbortSignal, userId?: string, workspace?: WorkspaceContext): Promise<AiChatResponse>;
   status?(userId?: string): AiStatus | { configured: boolean } | Promise<AiStatus | { configured: boolean }>;
   getConfig?(userId: string): Promise<AiStatus>;
   saveConfig?(userId: string, input: UpsertAiUserConfigInput, requestId: string): Promise<AiStatus>;
   testConfig?(userId: string, input: TestAiUserConfigInput, signal: AbortSignal, requestId: string): Promise<unknown>;
   deleteConfig?(userId: string, input: DeleteAiUserConfigInput, requestId: string): Promise<{ deleted: true }>;
+  confirmAction?(
+    userId: string,
+    workspace: WorkspaceContext,
+    actionId: string,
+    baseRevision: number,
+    requestId: string,
+  ): Promise<AiActionExecutionResult>;
+  rejectAction?(
+    userId: string,
+    workspace: WorkspaceContext,
+    actionId: string,
+    baseRevision: number,
+    requestId: string,
+  ): Promise<{ rejected: true }>;
+  getTrustedMode?(workspaceId: string): Promise<AiTrustedMode>;
+  updateTrustedMode?(workspaceId: string, input: UpdateAiTrustedModeInput, requestId: string): Promise<AiTrustedMode>;
+  listActionHistory?(userId: string, workspaceId: string, limit: number): Promise<AiActionHistoryItem[]>;
 }
 
 class AiConfigurationRouteError extends Error {
@@ -74,6 +103,105 @@ export function registerAiRoutes<TEnv>(registry: AiRegistry<TEnv>, createService
     }),
   });
   registry.register({
+    method: "GET",
+    path: "/api/v2/ai/trusted-mode",
+    auth: "workspace",
+    minimumRole: "viewer",
+    rateLimit: { bucket: "account", limit: 30, windowSeconds: 60 },
+    handler: async ({ env, workspace }) => ({
+      data: AiTrustedModeSchema.parse(await required(createService(env).getTrustedMode)(workspace!.workspaceId)),
+    }),
+  });
+  registry.register({
+    method: "PATCH",
+    path: "/api/v2/ai/trusted-mode",
+    auth: "workspace",
+    minimumRole: "editor",
+    rateLimit: { bucket: "account", limit: 20, windowSeconds: 60 },
+    body: UpdateAiTrustedModeInputSchema,
+    handler: async ({ env, workspace, body, requestId }) => ({
+      data: AiTrustedModeSchema.parse(
+        await required(createService(env).updateTrustedMode)(workspace!.workspaceId, body, requestId),
+      ),
+    }),
+  });
+  registry.register({
+    method: "GET",
+    path: "/api/v2/ai/actions/history",
+    auth: "workspace",
+    minimumRole: "viewer",
+    rateLimit: { bucket: "account", limit: 30, windowSeconds: 60 },
+    handler: async ({ env, principal, workspace, request }) => {
+      const parsed = AiActionHistoryQuerySchema.safeParse({
+        limit: new URL(request.url).searchParams.get("limit") ?? undefined,
+      });
+      if (!parsed.success) {
+        throw Object.assign(new Error("AI action history query is invalid"), {
+          code: "INVALID_QUERY", status: 400, retryable: false,
+        });
+      }
+      return {
+        data: AiActionHistoryResponseSchema.parse({
+          items: await required(createService(env).listActionHistory)(
+            principal!.userId,
+            workspace!.workspaceId,
+            parsed.data.limit,
+          ),
+        }),
+      };
+    },
+  });
+  registry.register({
+    method: "POST",
+    path: "/api/v2/ai/actions/:actionId/confirm",
+    auth: "workspace",
+    rateLimit: { bucket: "ip", limit: 30, windowSeconds: 60 },
+    body: AiActionConfirmSchema,
+    handler: async ({ env, principal, workspace, params, body, requestId }) => {
+      const service = createService(env);
+      const confirmAction = service.confirmAction;
+      if (!confirmAction) throw new AiConfigurationRouteError("AI action confirmation is unavailable");
+      if (params.actionId !== body.action_id) {
+        throw Object.assign(new Error("AI action id does not match the route"), {
+          code: "AI_ACTION_MISMATCH",
+          status: 400,
+          retryable: false,
+        });
+      }
+      return {
+        data: {
+          action: AiActionExecutionResultSchema.parse(
+            await confirmAction(principal!.userId, workspace!, params.actionId!, body.base_revision, requestId),
+          ),
+        },
+      };
+    },
+  });
+  registry.register({
+    method: "POST",
+    path: "/api/v2/ai/actions/:actionId/reject",
+    auth: "workspace",
+    rateLimit: { bucket: "ip", limit: 30, windowSeconds: 60 },
+    body: AiActionRejectSchema,
+    handler: async ({ env, principal, workspace, params, body, requestId }) => {
+      const service = createService(env);
+      const rejectAction = service.rejectAction;
+      if (!rejectAction) throw new AiConfigurationRouteError("AI action rejection is unavailable");
+      if (params.actionId !== body.action_id) {
+        throw Object.assign(new Error("AI action id does not match the route"), {
+          code: "AI_ACTION_MISMATCH",
+          status: 400,
+          retryable: false,
+        });
+      }
+      return {
+        data: {
+          action: await rejectAction(principal!.userId, workspace!, params.actionId!, body.base_revision, requestId),
+        },
+      };
+    },
+  });
+  registry.register({
     method: "POST",
     path: "/api/v2/ai/chat",
     auth: "workspace",
@@ -82,8 +210,8 @@ export function registerAiRoutes<TEnv>(registry: AiRegistry<TEnv>, createService
     bodyLimitBytes: 256 * 1024,
     timeoutMs: 35_000,
     body: AiChatInputSchema,
-    handler: async ({ env, body, signal, principal }) => ({
-      data: await createService(env).chat(body, signal, principal?.userId),
+    handler: async ({ env, body, signal, principal, workspace }) => ({
+      data: await createService(env).chat(body, signal, principal?.userId, workspace),
     }),
   });
 }

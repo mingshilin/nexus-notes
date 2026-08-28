@@ -1,25 +1,16 @@
 import {
-  Archive,
-  Bell,
-  Boxes,
-  Command,
   LayoutGrid,
-  Pin,
   Plus,
   Search,
-  Share2,
-  Sparkles,
-  Star,
   UserRound,
   X,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useTransition, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { MAX_UPLOAD_BYTES, NoteSchema, SUPPORTED_ATTACHMENT_MIME_TYPES } from "@nexus/contracts";
 import type { Attachment, AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, NoteLink, NoteRevision, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient, ApiClientError } from "../data/api-client";
 import { CollaborationClient } from "../data/collaboration-client";
-import { NoteAiActions } from "../ai/NoteAiActions";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic, type RecoveryFilters } from "../knowledge/KnowledgeRecoveryPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { useWorkbenchMode } from "../layout/use-mobile-layout";
@@ -33,60 +24,28 @@ import { ProductNavigation, type AccountSubsection, type ProductDomain } from ".
 import { QuickCapturePanel } from "../notes/QuickCapturePanel";
 import { WebClipperPanel } from "../notes/WebClipperPanel";
 import { NoteOrganizationPanel } from "../notes/NoteOrganizationPanel";
-import { NoteTagPanel } from "../notes/NoteTagPanel";
-import { NoteEditorSurface } from "../notes/NoteEditorSurface";
-import { NoteConflictPanel } from "../notes/NoteConflictPanel";
-import { NoteLinksPanel } from "../notes/NoteLinksPanel";
-import { NoteHistoryPanel } from "../notes/NoteHistoryPanel";
-import { MarkdownPreview } from "../notes/MarkdownPreview";
 import { CommandPalette, type CommandAction } from "../commands/CommandPalette";
 import { CreateCenter, ImportExportCenter, type CreateActionResult } from "../create";
-import { FeatureHub } from "../features";
 import { InviteRedemptionPage } from "../collaboration/InviteRedemptionPage";
 import { PublicSharePage } from "../collaboration/PublicSharePage";
-import { NotificationCenter, notificationButtonLabel } from "../collaboration/NotificationCenter";
+import { NotificationCenter } from "../collaboration/NotificationCenter";
 import type { CollaborationCommentTarget, CollaborationShareTarget, NotificationTarget } from "../collaboration/collaboration-types";
 import { useWorkspaceClients } from "./use-workspace-clients";
+import { useWorkspaceNavigation } from "./use-workspace-navigation";
 import { WorkspaceShell } from "./WorkspaceShell";
+import { NotesDomain, type NotesDomainCallbacks, type NotesEditorState, type NotesOverviewState } from "./domains/NotesDomain";
+import { DatabaseDomain, type DatabaseDomainCallbacks, type DatabaseDomainSelection } from "./domains/DatabaseDomain";
+import { KnowledgeDomain } from "./domains/KnowledgeDomain";
+import { AccountAndAIDomain, type AccountAndAIDomainCallbacks, type AccountAndAIDomainSelection } from "./domains/AccountAndAIDomain";
 import {
-  loadAccountCenter,
-  loadAIChatPanel,
   loadCollaborationCenter,
-  loadDatabaseWorkbench,
-  loadKnowledgeCalendarPanel,
-  loadKnowledgeGraphPanel,
-  loadKnowledgeSearchPanel,
   loadReminderPanel,
   preloadWorkspaceDomain,
 } from "./workspace-domain-loader";
 
-const LazyDatabaseWorkbench = lazy(async () => {
-  const module = await loadDatabaseWorkbench();
-  return { default: module.DatabaseWorkbench };
-});
-const LazyKnowledgeSearchPanel = lazy(async () => {
-  const module = await loadKnowledgeSearchPanel();
-  return { default: module.KnowledgeSearchPanel };
-});
-const LazyKnowledgeGraphPanel = lazy(async () => {
-  const module = await loadKnowledgeGraphPanel();
-  return { default: module.KnowledgeGraphPanel };
-});
-const LazyKnowledgeCalendarPanel = lazy(async () => {
-  const module = await loadKnowledgeCalendarPanel();
-  return { default: module.KnowledgeCalendarPanel };
-});
 const LazyReminderPanel = lazy(async () => {
   const module = await loadReminderPanel();
   return { default: module.ReminderPanel };
-});
-const LazyAccountCenter = lazy(async () => {
-  const module = await loadAccountCenter();
-  return { default: module.AccountCenter };
-});
-const LazyAIChatPanel = lazy(async () => {
-  const module = await loadAIChatPanel();
-  return { default: module.AIChatPanel };
 });
 const LazyCollaborationCenter = lazy(async () => {
   const module = await loadCollaborationCenter();
@@ -319,9 +278,7 @@ function AuthenticatedWorkspace({
 }) {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
-  const [activeDomain, setActiveDomain] = useState<ProductDomain>("notes");
-  const [requestedDomain, setRequestedDomain] = useState<ProductDomain>("notes");
-  const [domainPending, startDomainTransition] = useTransition();
+  const { activeDomain, requestedDomain, domainPending, navigate: navigateWorkspaceDomain } = useWorkspaceNavigation("notes");
   const [accountSubsection, setAccountSubsection] = useState<AccountSubsection>("overview");
   const workspaceClients = useWorkspaceClients(apiClient, workspaceId ?? "");
   const collaborationClient = workspaceClients.collaboration;
@@ -331,13 +288,9 @@ function AuthenticatedWorkspace({
   const operationsClient = workspaceClients.operations;
   const profileClient = workspaceClients.profile;
   const transitionToDomain = useCallback((domain: ProductDomain) => {
-    setRequestedDomain(domain);
     setActivePane("canvas");
-    // Commit navigation synchronously so the shell responds immediately. Keep the
-    // heavier lazy-domain work outside the urgent interaction update.
-    setActiveDomain(domain);
-    startDomainTransition(() => { void preloadWorkspaceDomain(domain).catch(() => undefined); });
-  }, []);
+    navigateWorkspaceDomain(domain);
+  }, [navigateWorkspaceDomain]);
   const [navigationUser, setNavigationUser] = useState(user);
   const [unreadCount, setUnreadCount] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);
@@ -1183,7 +1136,7 @@ function AuthenticatedWorkspace({
     focusInstalledNoteRef.current = false;
   }, [activeDraftId, creatingNote, selectedNoteId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if ((!event.ctrlKey && !event.metaKey) || event.repeat || permanentDeleteOpen) return;
       const key = event.key.toLowerCase();
@@ -2021,12 +1974,6 @@ function AuthenticatedWorkspace({
       <span>创建内容</span>
     </button>
   );
-  const createCenterQuickStartTrigger = (
-    <button className="create-center-trigger" type="button" aria-label="创建内容" title="打开创建中心" disabled={logoutPending} onClick={(event) => openCreateCenter(event.currentTarget)}>
-      <Plus aria-hidden="true" size={17} />
-      <span>创建内容</span>
-    </button>
-  );
   const desktopAccountAction = (
     <button className="create-center-trigger workspace-account-trigger" type="button" aria-label="打开个人资料与设置" title="个人资料、密码、安全与工作区" disabled={logoutPending} onClick={() => openAccountSubsection("personal")}>
       <UserRound aria-hidden="true" size={16} />
@@ -2234,66 +2181,168 @@ function AuthenticatedWorkspace({
     />
   );
 
-  const databaseCanvas = databaseBundle && workspaceId ? (
-    <Suspense fallback={<p className="database-empty" role="status">正在准备数据库视图…</p>}>
-      <LazyDatabaseWorkbench
-        database={databaseBundle.database}
-        databases={databases}
-        properties={databaseBundle.properties}
-        records={databaseRecords}
-        recordsNextCursor={databaseRecordsNextCursor}
-        views={databaseBundle.views}
-        templates={databaseBundle.templates}
-        client={databaseClient}
-        collaborationClient={collaborationClient}
-        onMutation={() => setDatabaseRefreshVersion((version) => version + 1)}
-        onRecordsPageRequest={requestDatabasePage}
-        onBoardMove={(input) => databaseClient.boardMove(databaseBundle.database.id, input)}
-        onCalendarAssign={(input) => databaseClient.calendarAssign(databaseBundle.database.id, input)}
-      />
-    </Suspense>
-  ) : (
-    <section className="database-workbench">
-      {databaseLoading ? <p className="database-empty" role="status">正在加载数据库内容…</p> : null}
-      {databaseError ? <p className="database-operation-error" role="alert">{databaseError}</p> : null}
-      {!databaseLoading && databases.length === 0 && workspaceId ? <section className="database-first-create" aria-label="创建第一个数据库"><p className="eyebrow">STRUCTURED DATABASE</p><h1>创建第一个数据库</h1><p>从一个轻量的表格开始，之后可随时添加属性、视图和协作规则。</p><label>数据库名称<input aria-label="数据库名称" value={firstDatabaseName} onChange={(event) => setFirstDatabaseName(event.target.value)} /></label><button type="button" disabled={!firstDatabaseName.trim() || creatingFirstDatabase} onClick={createFirstDatabase}>创建数据库</button></section> : null}
-      {!databaseLoading && !databaseError && databases.length > 0 && !databaseBundle ? <p className="database-empty">请选择数据库。</p> : null}
-    </section>
+  const notesDomainCallbacks: NotesDomainCallbacks = {
+    onStartNewNote: startNewNote,
+    onOpenCreateCenter: openCreateCenter,
+    onOpenProfile: () => openAccountSubsection("personal"),
+    onSelectFolder: selectFolderFilter,
+    onCreateFolder: createFolder,
+    onNavigateFeature: navigateFeatureMap,
+    onToggleNotifications: toggleNotifications,
+    onOpenInspector: openInspector,
+    onToggleFavorite: () => toggleSelectedNoteFlag("is_favorite"),
+    onTogglePinned: () => toggleSelectedNoteFlag("is_pinned"),
+    onOpenShare: () => changeDomain("collaboration", { collaborationSection: "shares" }),
+    onOpenCommandPalette: openCommandPalette,
+    onDraftTitleChange: (value) => { updateActiveDraftInput(value, draftContentRef.current); },
+    onDraftFolderChange: (value) => { setDraftFolderId(value); setNoteMessage(null); },
+    onDraftDatabaseChange: (value) => { setDraftDatabaseId(value); setNoteMessage(null); },
+    onCreateTag: createNoteTag,
+    onUpdateTags: updateSelectedNoteTags,
+    onSaveLinks: saveSelectedNoteLinks,
+    onApplyAIContent: applyAiContent,
+    onApplyAITags: applyAiTags,
+    onDraftContentChange: (content) => { updateActiveDraftInput(draftTitleRef.current, content); },
+    onResolveConflict: resolveNoteConflict,
+    onToggleEditorMode: () => setEditorMode((mode) => mode === "edit" ? "preview" : "edit"),
+    onSaveNote: saveNote,
+    onChangeStatus: changeSelectedNoteStatus,
+    onOpenPermanentDelete: openPermanentDelete,
+    onToggleHistory: () => setHistoryOpen((open) => !open),
+    onRetryHistory: () => setHistoryRefreshVersion((version) => version + 1),
+    onRestoreRevision: restoreSelectedRevision,
+    onUploadAttachment: (file) => uploadAttachment(file, true),
+  };
+  const notesOverviewState: NotesOverviewState = {
+    workbenchMode,
+    workspaceAvailable: Boolean(workspaceId),
+    folders,
+    selectedFolderId: noteFolderFilter,
+    folderLoading,
+    logoutPending,
+    activePane,
+    noteError,
+    collaborationEnabled,
+    unreadCount,
+    recoveryContent: recoveryPanel,
+    headingRef: permanentDeleteFallbackRef,
+  };
+  const notesEditorState: NotesEditorState | null = selectedNote || creatingNote ? {
+    selectedNote,
+    creatingNote,
+    activeDraftId,
+    draftTitle,
+    draftContent,
+    editorMode,
+    draftFolderId,
+    draftDatabaseId,
+    folders,
+    tags,
+    notes,
+    noteTagIds,
+    linkedNoteIds,
+    backlinks,
+    noteDatabases,
+    noteDatabasesLoading,
+    noteDatabasesError,
+    noteTagsLoading,
+    noteTagsSaving,
+    noteTagsError,
+    noteLinksLoading,
+    noteLinksSaving,
+    noteLinksError,
+    uploadingAttachment,
+    logoutPending,
+    activePane,
+    unreadCount,
+    noteConflict,
+    noteSaving,
+    noteMessage,
+    noteError,
+    historyOpen,
+    noteRevisions,
+    historyLoading,
+    historyError,
+    restoringRevision,
+    permanentDeletePending,
+    titleInputRef,
+    permanentDeleteOpenerRef,
+    recoveryContent: recoveryPanel,
+  } : null;
+  const notesDomainCanvas = (
+    <NotesDomain
+      client={apiClient}
+      workspaceId={workspaceId ?? ""}
+      role={role}
+      selectedEntity={{ featureMapOpen, editor: notesEditorState, overview: notesOverviewState }}
+      callbacks={notesDomainCallbacks}
+    />
   );
-  const knowledgeCanvas = (
-    <section className="product-domain-page knowledge-domain-page">
-      <p className="eyebrow">KNOWLEDGE CENTER</p>
-      <h1>知识恢复</h1>
-      <p className="product-domain-lead">搜索、保存查询，并集中处理附件 OCR 状态与知识诊断。</p>
-      <Suspense fallback={<p className="knowledge-search-state" role="status">正在加载知识工具…</p>}>
-        <LazyKnowledgeSearchPanel client={knowledgeClient} />
-        <LazyKnowledgeGraphPanel client={knowledgeClient} />
-        <LazyKnowledgeCalendarPanel client={knowledgeClient} />
-      </Suspense>
-      {recoveryPanel}
-    </section>
+
+  const databaseDomainCallbacks: DatabaseDomainCallbacks = {
+    onFirstDatabaseNameChange: setFirstDatabaseName,
+    onCreateFirstDatabase: createFirstDatabase,
+    onMutation: () => setDatabaseRefreshVersion((version) => version + 1),
+    onRecordsPageRequest: requestDatabasePage,
+    onBoardMove: (input) => databaseClient.boardMove(databaseBundle?.database.id ?? selectedDatabaseId ?? "", input),
+    onCalendarAssign: (input) => databaseClient.calendarAssign(databaseBundle?.database.id ?? selectedDatabaseId ?? "", input),
+  };
+  const databaseDomainSelection: DatabaseDomainSelection = {
+    bundle: databaseBundle,
+    databases,
+    records: databaseRecords,
+    recordsNextCursor: databaseRecordsNextCursor,
+    loading: databaseLoading,
+    error: databaseError,
+    firstDatabaseName,
+    creatingFirstDatabase,
+  };
+  const databaseDomainCanvas = (
+    <DatabaseDomain
+      client={{ database: databaseClient, collaboration: collaborationClient }}
+      workspaceId={workspaceId ?? ""}
+      role={role}
+      selectedEntity={databaseDomainSelection}
+      callbacks={databaseDomainCallbacks}
+    />
+  );
+  const knowledgeDomainCanvas = (
+    <KnowledgeDomain
+      client={knowledgeClient}
+      workspaceId={workspaceId ?? ""}
+      role={role}
+      selectedEntity={{ recoveryContent: recoveryPanel }}
+      callbacks={{}}
+    />
+  );
+  const accountAndAIDomainCallbacks: AccountAndAIDomainCallbacks = {
+    onWorkspaceChange: changeWorkspace,
+    onCreateWorkspace,
+    onPrepareDelete: () => draftController.quiesce(),
+    onDeleteFailed: () => draftController.resume(),
+    onDeleted,
+    onProfileChange: handleProfileChange,
+  };
+  const accountAndAIDomainSelection: AccountAndAIDomainSelection = activeDomain === "ai"
+    ? { kind: "ai", showStatus: true }
+    : {
+        kind: "account",
+        workspaces,
+        activeWorkspaceId,
+        currentUserId: userId,
+        initialTab: accountSubsection === "workspace" ? "workspace" : accountSubsection === "personal" ? "profile" : "overview",
+      };
+  const accountAndAIDomainCanvas = (
+    <AccountAndAIDomain
+      client={{ api: apiClient, profile: profileClient, collaboration: collaborationClient, operations: operationsClient }}
+      workspaceId={workspaceId ?? ""}
+      role={role}
+      selectedEntity={accountAndAIDomainSelection}
+      callbacks={accountAndAIDomainCallbacks}
+    />
   );
   const remindersCanvas = <Suspense fallback={<p className="reminder-state" role="status">正在加载提醒中心…</p>}><LazyReminderPanel client={knowledgeClient} notesClient={notesClient} /></Suspense>;
-  const aiCanvas = <Suspense fallback={<p className="database-empty" role="status">正在加载 AI 助手…</p>}><LazyAIChatPanel client={apiClient} workspaceId={workspaceId ?? ""} showStatus /></Suspense>;
-  const accountCanvas = (
-    <Suspense fallback={<p className="database-empty" role="status">正在加载账户中心…</p>}>
-      <LazyAccountCenter
-        client={profileClient}
-        collaboration={collaborationClient}
-        operations={operationsClient}
-        workspaces={workspaces}
-        activeWorkspaceId={activeWorkspaceId}
-        currentUserId={userId}
-        initialTab={accountSubsection === "workspace" ? "workspace" : accountSubsection === "personal" ? "profile" : "overview"}
-        onWorkspaceChange={changeWorkspace}
-        onCreateWorkspace={onCreateWorkspace}
-        onPrepareDelete={() => draftController.quiesce()}
-        onDeleteFailed={() => draftController.resume()}
-        onDeleted={onDeleted}
-        onProfileChange={handleProfileChange}
-      />
-    </Suspense>
-  );
+
   const collaborationUnavailableCanvas = (
     <section className="product-domain-page product-status-page">
       <p className="eyebrow">COLLABORATION</p>
@@ -2301,62 +2350,6 @@ function AuthenticatedWorkspace({
       <p className="product-domain-lead">当前没有可用工作区或协作能力。选择其他产品区域不会更改你的笔记数据。</p>
     </section>
   );
-  const workspaceOverviewCanvas = (
-    <article className="editor-document">
-      <header className="editor-toolbar">
-        <span className="saved-state" role="status" aria-live="polite"><span /> 已保存</span>
-        <div>
-          <button type="button" aria-label="打开快速操作" aria-keyshortcuts="Control+K Meta+K" title="快速操作（Ctrl/Cmd+K）" onClick={openCommandPalette}><Command aria-hidden="true" size={17} /></button>
-          <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}><Bell aria-hidden="true" size={17} /></button>
-          <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>
-        </div>
-      </header>
-      <div className="editor-copy">
-        <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
-        <h1 ref={permanentDeleteFallbackRef} tabIndex={-1}>Public Beta 重写计划</h1>
-        <p className="lead">一个稳定、响应迅速、离线可恢复的知识工作台。</p>
-        <section className="workspace-quick-start" aria-label="快速开始">
-          <div className="workspace-quick-start-heading">
-            <div>
-              <p className="eyebrow">现在就开始</p>
-              <h2>快速开始</h2>
-            </div>
-            <p>常用入口集中在这里，不需要先找菜单。</p>
-          </div>
-          <div className="workspace-quick-start-actions">
-            <button className="workspace-quick-start-action workspace-quick-start-primary" type="button" aria-label={workbenchMode === "mobile" ? "新建笔记（快速开始）" : "新建笔记"} disabled={logoutPending} onClick={() => { void startNewNote(); }}>
-              <span className="workspace-quick-start-icon"><Plus aria-hidden="true" size={18} /></span>
-              <span><strong>新建笔记</strong><small>打开一篇空白笔记</small></span>
-            </button>
-            <div className="workspace-quick-start-create-center">
-              {createCenterQuickStartTrigger}
-              <small>笔记、快速捕获或数据库</small>
-            </div>
-            <button className="workspace-quick-start-action" type="button" aria-label="个人资料与设置" disabled={logoutPending} onClick={() => openAccountSubsection("personal")}>
-              <span className="workspace-quick-start-icon"><UserRound aria-hidden="true" size={18} /></span>
-              <span><strong>个人资料与设置</strong><small>资料、密码、安全和工作区</small></span>
-            </button>
-          </div>
-        </section>
-        <NoteOrganizationPanel
-          folders={folders}
-          selectedFolderId={noteFolderFilter}
-          loading={folderLoading}
-          disabled={logoutPending || !workspaceId}
-          onSelectFolder={selectFolderFilter}
-          onCreateFolder={createFolder}
-        />
-        {noteError && activePane !== "context" ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
-        <hr />
-        <h2>自适应工作台</h2>
-        <p>导航保持轻量，列表按需出现，主画布获得最多空间，检查器不再永久挤压编辑区域。</p>
-        <div className="callout"><Sparkles size={18} /><p>视觉风格继续使用原有蓝色强调、玻璃层级和舒适圆角。</p></div>
-        <FeatureHub availability={{ collaboration: collaborationEnabled, reminders: Boolean(workspaceId) }} onNavigate={navigateFeatureMap} />
-        {recoveryPanel}
-      </div>
-    </article>
-  );
-
   const collaborationRecords = resolvedNotificationRecord && !databaseRecords.some((record) => record.id === resolvedNotificationRecord.id)
     ? [...databaseRecords, resolvedNotificationRecord]
     : databaseRecords;
@@ -2485,124 +2478,7 @@ function AuthenticatedWorkspace({
         onInspectorClose={closeInspector}
       >
         <>
-        {activeDomain === "collaboration" ? collaborationEnabled && workspaceId ? <Suspense fallback={<p className="database-empty" role="status">正在加载协作中心…</p>}><LazyCollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /></Suspense> : collaborationUnavailableCanvas : activeDomain === "databases" ? databaseCanvas : activeDomain === "knowledge" ? knowledgeCanvas : activeDomain === "reminders" ? remindersCanvas : activeDomain === "ai" ? aiCanvas : activeDomain === "account" ? accountCanvas : featureMapOpen ? workspaceOverviewCanvas : selectedNote || creatingNote ? <article className="editor-document">
-          <header className="editor-toolbar">
-            <span className="saved-state" role="status" aria-live="polite"><span /> {noteSaving ? "保存中…" : noteMessage ?? "未保存更改"}</span>
-            <div>
-              {!creatingNote && selectedNote ? <>
-                <button type="button" aria-label={selectedNote.is_favorite ? "取消收藏" : "收藏笔记"} title={selectedNote.is_favorite ? "取消收藏" : "收藏笔记"} disabled={logoutPending || role === "viewer" || noteSaving || selectedNote.status === "trashed"} onClick={() => toggleSelectedNoteFlag("is_favorite")}><Star aria-hidden="true" size={17} fill={selectedNote.is_favorite ? "currentColor" : "none"} /></button>
-                <button type="button" aria-label={selectedNote.is_pinned ? "取消置顶" : "置顶笔记"} title={selectedNote.is_pinned ? "取消置顶" : "置顶笔记"} disabled={logoutPending || role === "viewer" || noteSaving || selectedNote.status === "trashed"} onClick={() => toggleSelectedNoteFlag("is_pinned")}><Pin aria-hidden="true" size={17} fill={selectedNote.is_pinned ? "currentColor" : "none"} /></button>
-                {selectedNote.status !== "trashed" ? <button type="button" aria-label={selectedNote.status === "archived" ? "取消归档" : "归档笔记"} title={selectedNote.status === "archived" ? "取消归档" : "归档笔记"} disabled={logoutPending || role === "viewer" || noteSaving} onClick={() => changeSelectedNoteStatus(selectedNote.status === "archived" ? "active" : "archived")}><Archive aria-hidden="true" size={17} /></button> : null}
-                <button type="button" aria-label="打开笔记分享" title="打开笔记分享" disabled={logoutPending || noteSaving} onClick={() => changeDomain("collaboration", { collaborationSection: "shares" })}><Share2 aria-hidden="true" size={17} /></button>
-              </> : null}
-              <button type="button" aria-label="打开快速操作" aria-keyshortcuts="Control+K Meta+K" title="快速操作（Ctrl/Cmd+K）" onClick={openCommandPalette}><Command aria-hidden="true" size={17} /></button>
-              <button type="button" aria-label={notificationButtonLabel(unreadCount)} onClick={(event) => toggleNotifications(event.currentTarget)}><Bell aria-hidden="true" size={17} /></button>
-              <button type="button" aria-label="打开检查器" onClick={(event) => openInspector(event.currentTarget)}><Boxes size={17} /></button>
-            </div>
-          </header>
-          <div className="editor-copy">
-            <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
-            <h1>{draftTitle.trim() || "未命名笔记"}</h1>
-            {editorMode === "edit" ? <>
-              <label className="note-editor-field">标题<input ref={titleInputRef} aria-label="笔记标题" disabled={logoutPending || selectedNote?.status === "trashed"} value={draftTitle} onChange={(event) => updateActiveDraftInput(event.target.value, draftContentRef.current)} /></label>
-              <label className="note-editor-field">文件夹<select aria-label="笔记文件夹" disabled={logoutPending || creatingNote || selectedNote?.status === "trashed"} value={draftFolderId ?? ""} onChange={(event) => { setDraftFolderId(event.target.value || null); setNoteMessage(null); }}><option value="">未分类</option>{folders.map((folder, index) => <option key={`${folder.id || "folder"}-${index}`} value={folder.id}>{folder.name}</option>)}</select></label>
-              {!creatingNote && selectedNote ? <>
-                <label className="note-editor-field">笔记数据库<select
-                  aria-label="笔记数据库"
-                  aria-busy={noteDatabasesLoading}
-                  disabled={logoutPending || role === "viewer" || noteSaving || selectedNote.status === "trashed" || noteDatabasesLoading}
-                  value={draftDatabaseId ?? ""}
-                  onChange={(event) => { setDraftDatabaseId(event.target.value || null); setNoteMessage(null); }}
-                >
-                  <option value="">未关联数据库</option>
-                  {noteDatabasesLoading ? <option value="__loading" disabled>加载数据库…</option> : null}
-                  {noteDatabases.map((database) => <option key={database.id} value={database.id}>{database.name}</option>)}
-                </select></label>
-                {noteDatabasesError ? <p className="database-operation-error" role="alert">{noteDatabasesError}</p> : null}
-              </> : null}
-              {!creatingNote && selectedNote ? <NoteTagPanel
-                tags={tags}
-                selectedTagIds={noteTagIds[selectedNote.id] ?? []}
-                saving={noteTagsLoading || noteTagsSaving}
-                readOnly={role === "viewer" || selectedNote.status === "trashed"}
-                error={noteTagsError}
-                onChange={updateSelectedNoteTags}
-                onCreateTag={role === "viewer" || selectedNote.status === "trashed" ? undefined : createNoteTag}
-              /> : null}
-              {!creatingNote && selectedNote ? <NoteLinksPanel
-                currentNoteId={selectedNote.id}
-                notes={notes}
-                linkedNoteIds={linkedNoteIds}
-                backlinks={backlinks}
-                loading={noteLinksLoading}
-                readOnly={role === "viewer" || selectedNote.status === "trashed"}
-                saving={noteLinksSaving}
-                error={noteLinksError}
-                onSave={saveSelectedNoteLinks}
-              /> : null}
-              {!creatingNote && selectedNote ? <NoteAiActions
-                key={selectedNote.id}
-                client={apiClient}
-                workspaceId={workspaceId ?? ""}
-                note={{ title: draftTitle, content: draftContent }}
-                disabled={logoutPending || role === "viewer" || noteSaving || selectedNote.status === "trashed"}
-                onApplyContent={applyAiContent}
-                onApplyTags={applyAiTags}
-              /> : null}
-              <label className="note-editor-field">内容<NoteEditorSurface
-                value={draftContent}
-                ariaLabel="笔记内容"
-                readOnly={logoutPending || selectedNote?.status === "trashed"}
-                onUploadAttachment={!creatingNote && selectedNote && role !== "viewer" && selectedNote.status !== "trashed" ? (file) => uploadAttachment(file, true) : undefined}
-                uploadingAttachment={uploadingAttachment}
-                onChange={(content) => updateActiveDraftInput(draftTitleRef.current, content)}
-              /></label>
-              {noteConflict && noteConflict.workspaceId === workspaceId && noteConflict.entityId === activeDraftId ? (
-                <NoteConflictPanel
-                  local={noteConflict.local}
-                  server={noteConflict.server}
-                  onKeepLocal={() => { void resolveNoteConflict("local"); }}
-                  onUseServer={() => { void resolveNoteConflict("server"); }}
-                />
-              ) : null}
-            </> : <MarkdownPreview content={draftContent} />}
-            <div className="note-editor-actions">
-              <button type="button" className="note-mode-action" onClick={() => setEditorMode((mode) => mode === "edit" ? "preview" : "edit")}>
-                {editorMode === "edit" ? "预览笔记" : "返回编辑器"}
-              </button>
-              {selectedNote?.status !== "trashed" ? (
-                editorMode === "edit" ? <button type="button" disabled={logoutPending || noteSaving || (!creatingNote && !draftTitle.trim() && !draftContent.trim())} onClick={saveNote}>{creatingNote && noteError ? "重试同步" : "保存笔记"}</button> : null
-              ) : null}
-              {!creatingNote && selectedNote ? (
-                <>
-                  <button type="button" className="note-lifecycle-action" disabled={logoutPending || role === "viewer" || noteSaving} onClick={() => changeSelectedNoteStatus(selectedNote.status === "trashed" ? "active" : "trashed")}>
-                    {selectedNote.status === "trashed" ? "恢复笔记" : "移入回收站"}
-                  </button>
-                  {selectedNote.status === "archived" ? <button type="button" className="note-lifecycle-action" disabled={logoutPending || role === "viewer" || noteSaving} onClick={() => changeSelectedNoteStatus("active")}>取消归档</button> : null}
-                </>
-              ) : null}
-              {selectedNote?.status === "trashed" ? (
-                <button type="button" className="note-lifecycle-action note-lifecycle-danger" disabled={logoutPending || noteSaving || permanentDeletePending} onClick={(event) => openPermanentDelete(event.currentTarget)}>永久删除</button>
-              ) : null}
-              {noteMessage ? <p role="status">{noteMessage}</p> : null}
-              {noteError && activePane !== "context" ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
-            </div>
-            {!creatingNote && selectedNote ? (
-              <NoteHistoryPanel
-                open={historyOpen}
-                revisions={noteRevisions}
-                loading={historyLoading}
-                error={historyError}
-                restoringRevision={restoringRevision}
-                readOnly={role === "viewer" || selectedNote.status === "trashed"}
-                onToggle={() => setHistoryOpen((open) => !open)}
-                onRetry={() => setHistoryRefreshVersion((version) => version + 1)}
-                onRestore={restoreSelectedRevision}
-              />
-            ) : null}
-            {recoveryPanel}
-          </div>
-        </article> : workspaceOverviewCanvas}
+        {activeDomain === "collaboration" ? collaborationEnabled && workspaceId ? <Suspense fallback={<p className="database-empty" role="status">正在加载协作中心…</p>}><LazyCollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /></Suspense> : collaborationUnavailableCanvas : activeDomain === "databases" ? databaseDomainCanvas : activeDomain === "knowledge" ? knowledgeDomainCanvas : activeDomain === "reminders" ? remindersCanvas : activeDomain === "ai" || activeDomain === "account" ? accountAndAIDomainCanvas : notesDomainCanvas}
         <NotificationCenter
           client={collaborationClient}
           open={notificationOpen}

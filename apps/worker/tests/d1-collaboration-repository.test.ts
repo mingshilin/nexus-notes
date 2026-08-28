@@ -288,6 +288,21 @@ describe("D1CollaborationRepository comments and notifications", () => {
       .rejects.toMatchObject({ code: "COMMENT_TARGET_NOT_FOUND" });
   });
 
+  it("rejects a notification replay when the deterministic id has a different payload", async () => {
+    const { repository } = await setup();
+    const first = {
+      notificationId: "ai-notification:action-1",
+      userId: "user-1",
+      title: "Original",
+      summary: "Original body",
+      deepLink: "/notifications",
+      now,
+    };
+    await expect(repository.createNotification(owner, first)).resolves.toBeDefined();
+    await expect(repository.createNotification(owner, { ...first, summary: "Changed body" }))
+      .rejects.toMatchObject({ code: "NOTIFICATION_IDEMPOTENCY_CONFLICT", status: 409 });
+  });
+
   it("requires comment parents to belong to the same workspace target", async () => {
     const { repository } = await setup();
     const parent = await repository.createComment(editor, {

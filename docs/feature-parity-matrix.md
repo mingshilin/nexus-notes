@@ -1,7 +1,7 @@
 # Nexus Notes 功能对齐矩阵
 
-更新时间：2026-08-25
-基线：`codex/public-beta-rewrite` 当前 worktree
+更新时间：2026-08-28
+基线：`codex/ai-assistant-fluency` 当前 worktree
 状态含义：`已验证` 表示有对应测试或验收证据；`已实现待验收` 表示源码入口存在但仍需要真实浏览器或失败路径证据；`缺口` 表示当前 Beta 还没有完整能力；`依赖配置` 表示代码存在但需要外部 Secret/绑定。
 
 ## 阶段 1 入口
@@ -52,6 +52,7 @@
 | --- | --- | --- |
 | AI 对话页面 | 已实现待验收 | `AIChatPanel` 已连接 `/api/v2/ai/chat` |
 | AI 配置状态 | 已实现待验收 | `/api/v2/ai/status` 和未配置状态文案 |
+| AI 工具写入确认 | 已验证 | `POST /api/v2/ai/actions/:actionId/confirm` / `reject` 在执行前重新校验 session、workspace membership、role 和 proposal revision；`send_email` 由 Worker 配置的 `EMAIL_FROM` 发出，不使用用户邮箱 |
 | Provider API key 安全 | 依赖配置 | 必须设置 Worker Secret，不能进入前端 bundle 或 Git |
 | OpenAI-compatible adapter | 已实现待验收 | Worker adapter 已有；需配置真实 provider 后跑 health/chat smoke |
 | 当前笔记总结/改写/提取任务 | 已实现待验收 | `NoteAiActions` 提供摘要、任务提取和标签建议；结果先预览，确认后才写入当前草稿或标签；`live-notes-flow.test.tsx`、`note-ai-actions.test.tsx` 覆盖，仍需真实 provider/browser 验收 |
@@ -67,17 +68,17 @@
 | 统一主滚动区域和 390px 溢出 | 已验证 | mobile overflow/core UX tests；真实浏览器确认产品导航仅横向滚动、底栏不增加第二个纵向滚动容器 |
 | 长列表分页/大数据库渲染 | 已实现待验收 | keyset/page-size code 已有；需 5,000 条性能场景 |
 | lazy Markdown/OCR/AI chunk | 已验证 | build/readiness 检查无初始 forbidden preload |
-| 静态资源缓存与公共壳负载 | 已验证 | 线上 390px public-shell smoke 通过，DOMContentLoaded 2691ms；正式 load gate 为 32 请求 p95 964ms，低于 2000ms 预算；直接 HTML/API/asset 采样 p95 1654.6ms。`/assets/*` 返回一年 `immutable`，HTML 返回 `max-age=0, must-revalidate` |
+| 静态资源缓存与公共壳负载 | 已验证 | Task 12 线上 390px public-shell smoke 通过，DOMContentLoaded 1461ms、FCP 1544ms；load gate 为 32 请求 p95 875ms，低于 2000ms 预算。`/assets/*` 返回一年 `immutable`，HTML 返回 `max-age=0, must-revalidate` |
 | 真实浏览器注册、登录、创建、分享、AI | 已实现待验收 | 真实 Chrome/CDP 已验证登录、创建笔记、丢失保存响应后的 IndexedDB 草稿恢复、reload 后 idempotency replay、资料保存、头像上传、200% zoom、390px 键盘布局和退出清理恢复；真实分享与 AI provider 仍需对应数据/外部配置 |
 
 ## Preview 与数据发布证据
 
 | 项目 | 当前状态 | 证据/约束 |
 | --- | --- | --- |
-| 线上 preview 前端 | 已验证 | `https://nexus-notes-public-beta-preview.shilinming9.workers.dev/` 已部署最新源码；部署版本 ID `30d3304b-002a-4213-8d2f-3895eb9be493`；`/api/v2/health` 返回 `status=ok, ocr=ready` |
-| Preview D1 备份 | 已验证 | 仓库外备份：`D:\mingSL\Documents\nexus-notes-beta-backups\20260825-013125\preview-data.sql`；40,844 bytes；SHA-256 `91E93FD5019E4C0CFB732F14B2DDFE9AD0F9A909FD7693428706A8E48E9D400D` |
-| D1 恢复演练 | 已验证 | 在全新仓库外恢复目录 `D:\mingSL\Documents\nexus-notes-restore-runtime\20260825-013125` 应用 13 个 migration 后成功读取 8 users、6 workspaces、5 notes、1 database；源备份哈希未变化 |
-| 远程 additive migrations | 已验证 | Preview D1 已应用 `0010_profile_account_center.sql` 至 `0016_user_ai_configs.sql`；`PRAGMA foreign_key_check` 无结果，迁移后 health 为 200 |
+| 线上 preview 前端 | 已验证 | `https://nexus-notes-public-beta-preview.shilinming9.workers.dev/` 已部署最新源码；Task 12 部署版本 ID `bcdf6053-25d4-4d55-8112-4936d4414f81`，回滚版本 `5c70961e-e737-4420-b5f9-754222a2ffe1`；`/api/v2/health` 返回 `status=ok, ocr=ready` |
+| Preview D1 备份 | 已验证 | 仓库外备份：`D:\mingSL\Documents\nexus-notes-beta-backups\20260828-171927\preview-data.sql`；323,638 bytes；SHA-256 `1CB5C34C27A64CD86FB6A34F5C406CDE3F56DE9B67982FD291B9A622634FA45F`；仅排除 FTS5 内部表、`_cf_KV` 与 `d1_migrations` |
+| D1 恢复演练 | 已验证 | 在全新仓库外恢复目录 `D:\mingSL\Documents\nexus-notes-restore-runtime\20260828-171927` 应用 Beta schema 后导入 60 个普通应用表；本地恢复读取 10 users、8 workspaces、25 notes、1 database、0 reminders、0 AI proposals/outbox，`PRAGMA foreign_key_check` 无结果；源备份哈希未变化 |
+| 远程 additive migrations | 已验证 | Preview D1 已应用 `0021_ai_trusted_mode.sql` 至 `0024_ai_reminder_actions.sql`，迁移记录完整为 `0001` 至 `0024`；`PRAGMA foreign_key_check` 无结果，迁移后 health 为 200 |
 | Preview R2 数据 | 无需复制 | 备份时 beta/legacy attachment 记录均为 0；当前没有需要同步的 R2 对象 |
 | 真实认证 smoke | 已验证 | `scripts/smoke-beta-browser.mjs --require-auth --authenticated` 使用仓库外 Chrome profile 完成认证与恢复场景；临时账号已清理，reset token/session 未写入仓库 |
 

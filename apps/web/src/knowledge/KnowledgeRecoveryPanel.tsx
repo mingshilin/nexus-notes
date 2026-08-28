@@ -78,6 +78,8 @@ export function KnowledgeRecoveryPanel({
 }) {
   const failed = attachments.filter((attachment) => attachment.ocr_status === "failed" || attachment.ocr_status === "dead_letter");
   const empty = attachments.length === 0 && diagnostics.length === 0;
+  const hasWriteDiagnostics = diagnostics.some((diagnostic) => diagnostic.kind === "unfiled_note" || diagnostic.kind === "orphan_note" || diagnostic.kind === "duplicate_title");
+  const recoveryActionsAvailable = Boolean(onClassifyUnfiled && onMoveOrphansToInbox && onIgnoreOrphans && onMergeDuplicate);
   const resetFilters = () => onFiltersChange({ mimeType: "", ocrStatus: "" });
 
   return (
@@ -130,6 +132,7 @@ export function KnowledgeRecoveryPanel({
           onMergeDuplicate={onMergeDuplicate}
         />
       ) : null}
+      {hasWriteDiagnostics && !recoveryActionsAvailable ? <p className="knowledge-recovery-state" role="status">当前权限仅允许查看诊断；需要编辑权限才能批量归类、移动或合并笔记，原笔记内容不会被修改。</p> : null}
       {loading && empty ? <p className="knowledge-recovery-state" role="status">正在加载附件与诊断…</p> : null}
       {refreshing ? <p className="knowledge-recovery-state" role="status">正在刷新，保留最近可用数据…</p> : null}
       {attachmentError ? <p className="knowledge-recovery-error" role="alert">{attachmentError}</p> : null}

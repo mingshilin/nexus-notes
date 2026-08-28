@@ -381,13 +381,22 @@ export function createRouteRegistry<TEnv = unknown>(options: RouteRegistryOption
       }
 
       const controller = new AbortController();
+      // Keep compatibility with lightweight Request-like test adapters while
+      // relaying cancellation from real Fetch requests when available.
+      const requestSignal = request.signal;
+      const relayRequestAbort = () => controller.abort(requestSignal?.reason);
+      if (requestSignal?.aborted) {
+        relayRequestAbort();
+      } else if (requestSignal) {
+        requestSignal.addEventListener("abort", relayRequestAbort, { once: true });
+      }
       const timeoutMs = matched.route.definition.timeoutMs ?? 15_000;
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         const deadline = new Promise<never>((_, reject) => {
           timeout = setTimeout(() => {
-            controller.abort(new DOMException("Request deadline exceeded", "TimeoutError"));
             reject(new RouteDeadlineError());
+            controller.abort(new DOMException("Request deadline exceeded", "TimeoutError"));
           }, timeoutMs);
         });
         const result = await Promise.race([
@@ -413,6 +422,7 @@ export function createRouteRegistry<TEnv = unknown>(options: RouteRegistryOption
       } catch (error) {
         return thrownErrorResponse(error, requestId);
       } finally {
+        requestSignal?.removeEventListener("abort", relayRequestAbort);
         if (timeout) clearTimeout(timeout);
       }
     },

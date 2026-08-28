@@ -25,6 +25,7 @@ import type {
 export interface KnowledgeActorContext {
   workspaceId: string;
   userId: string;
+  targetId?: string;
 }
 
 export interface KnowledgeRepository {
@@ -41,11 +42,12 @@ export interface KnowledgeRepository {
   }): Promise<SavedSearch>;
   deleteSavedSearch(workspaceId: string, userId: string, savedSearchId: string): Promise<void>;
   listFolders(workspaceId: string): Promise<Folder[]>;
-  createFolder(workspaceId: string, input: CreateFolderInput, now: string): Promise<Folder | null>;
+  createFolder(workspaceId: string, input: CreateFolderInput, now: string, targetId?: string): Promise<Folder | null>;
   listTags(workspaceId: string): Promise<Tag[]>;
   listNoteTags(workspaceId: string, noteId: string): Promise<Tag[]>;
   createTag(workspaceId: string, input: CreateTagInput, now: string): Promise<Tag>;
   setNoteTags(workspaceId: string, noteId: string, tagIds: string[], now: string): Promise<void>;
+  setNoteTagsBatch(workspaceId: string, noteIds: string[], tagIds: string[], now: string): Promise<{ entity_ids: string[] }>;
   setNoteLinks(workspaceId: string, noteId: string, targetNoteIds: string[], now: string): Promise<void>;
   listNoteLinks(workspaceId: string, noteId: string): Promise<NoteLink[]>;
   listBacklinks(workspaceId: string, noteId: string): Promise<NoteLink[]>;
@@ -58,6 +60,7 @@ export interface KnowledgeRepository {
     now: string,
   ): Promise<{ items: Reminder[]; nextCursor: string | null }>;
   createReminder(input: {
+    id?: string;
     workspaceId: string;
     userId: string;
     input: CreateReminderInput;
@@ -141,7 +144,7 @@ export class KnowledgeService {
   }
 
   async createFolder(context: KnowledgeActorContext, input: CreateFolderInput) {
-    const folder = await this.repository.createFolder(context.workspaceId, input, this.clock().toISOString());
+    const folder = await this.repository.createFolder(context.workspaceId, input, this.clock().toISOString(), context.targetId);
     if (!folder) {
       throw new KnowledgeServiceError("FOLDER_PARENT_NOT_FOUND", "Parent folder not found", 404);
     }
@@ -162,6 +165,10 @@ export class KnowledgeService {
 
   setNoteTags(context: KnowledgeActorContext, noteId: string, input: SetNoteTagsInput) {
     return this.repository.setNoteTags(context.workspaceId, noteId, input.tag_ids, this.clock().toISOString());
+  }
+
+  setNoteTagsBatch(context: KnowledgeActorContext, noteIds: string[], input: SetNoteTagsInput) {
+    return this.repository.setNoteTagsBatch(context.workspaceId, noteIds, input.tag_ids, this.clock().toISOString());
   }
 
   setNoteLinks(context: KnowledgeActorContext, noteId: string, input: SetNoteLinksInput) {
@@ -189,13 +196,15 @@ export class KnowledgeService {
     return this.repository.listReminders(context.workspaceId, context.userId, includeCompleted);
   }
 
-  async listReminderPage(context: KnowledgeActorContext, query: ReminderListQuery) {
+  async listReminderPage(context: KnowledgeActorContext, query: ReminderListQuery, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const result = await this.repository.listReminderPage(
       context.workspaceId,
       context.userId,
       query,
       this.clock().toISOString(),
     );
+    signal?.throwIfAborted();
     return { items: result.items, next_cursor: result.nextCursor };
   }
 
@@ -204,12 +213,21 @@ export class KnowledgeService {
   }
 
   async createReminder(context: KnowledgeActorContext, input: CreateReminderInput) {
-    const reminder = await this.repository.createReminder({
-      workspaceId: context.workspaceId,
-      userId: context.userId,
-      input,
-      now: this.clock().toISOString(),
-    });
+    let reminder: Reminder | null;
+    try {
+      reminder = await this.repository.createReminder({
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+        ...(context.targetId ? { id: context.targetId, idempotencyKey: context.targetId } : {}),
+        input,
+        now: this.clock().toISOString(),
+      });
+    } catch (error) {
+      if (error instanceof Error && /REMINDER_IDEMPOTENCY_CONFLICT/iu.test(error.message)) {
+        throw new KnowledgeServiceError("REMINDER_IDEMPOTENCY_CONFLICT", "Reminder creation request conflicts with an existing request", 409);
+      }
+      throw error;
+    }
     if (!reminder) {
       throw new KnowledgeServiceError("REMINDER_NOTE_NOT_FOUND", "Reminder note not found", 404);
     }

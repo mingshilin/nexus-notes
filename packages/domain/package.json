@@ -10,6 +10,7 @@
     "build": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@js-temporal/polyfill": "0.5.1"
+    "@js-temporal/polyfill": "0.5.1",
+    "@nexus/contracts": "*"
   }
 }

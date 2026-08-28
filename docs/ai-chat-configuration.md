@@ -1,6 +1,8 @@
 # AI Chat Configuration
 
-AI 助手通过 Worker 代理 OpenAI-compatible Chat Completions API。浏览器只发送工作区范围内的 conversation，不会读取或自动上传笔记内容；API key 只在 Worker 运行时使用。
+更新时间：2026-08-28
+
+AI 助手通过 Worker 代理 OpenAI-compatible Chat Completions API。当前 Preview 的 `AI_ENABLED=false`。浏览器只发送工作区范围内的 conversation，不会读取或自动上传笔记内容；API key 只在 Worker 运行时使用。
 
 ## Local
 
@@ -36,4 +38,8 @@ Provider 需要接受如下请求并返回 `choices[0].message.content`：
 }
 ```
 
-如果配置缺失，`POST /api/v2/ai/chat` 会返回 `AI_NOT_CONFIGURED`，前端保留用户输入并显示可恢复提示，不影响笔记和数据库功能。
+如果配置缺失，`POST /api/v2/ai/chat` 会返回 `AI_NOT_CONFIGURED`，前端保留用户输入并显示可恢复提示，不影响笔记和数据库功能。Task 12 Preview 当前明确保持 `AI_ENABLED=false`，因此线上验收只能验证禁用态与安全边界，不能宣称真实 provider/chat 已通过。
+
+## AI Actions
+
+只有在重新配置 provider（URL、model 和 Worker Secret）并通过 AI 确认与审计门禁后，才允许把 `AI_ENABLED` 切为 `true`。任何会写入笔记、提醒、通知或邮件的提案都必须先显示预览并等待用户显式确认；`/api/v2/ai/actions/:actionId/confirm` 在执行前会重新校验 session、workspace membership、role 和 proposal revision，未确认的提案不得直接落库或发信。
