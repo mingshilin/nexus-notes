@@ -170,6 +170,8 @@ export function useNoteInspectorData({
     setNoteRevisions([]);
     setHistoryError(null);
     setHistoryOpen(false);
+    setNoteTagsSaving(false);
+    setNoteLinksSaving(false);
     const noteId = selectedNoteId;
     if (!workspaceId || !noteId || creatingNote) {
       setLinkedNoteIds([]);
@@ -286,13 +288,15 @@ export function useNoteInspectorData({
     } catch {
       if (tagMutationRef.current.get(noteId) === sequence) {
         setNoteTagIds((current) => ({ ...current, [noteId]: previous }));
-        setNoteTagsError("标签保存失败，请重试。当前选择已恢复。");
+        if (scopeRef.current.workspaceId === workspaceId && scopeRef.current.selectedNoteId === noteId) {
+          setNoteTagsError("标签保存失败，请重试。当前选择已恢复。");
+        }
       }
       return false;
     } finally {
-      if (tagMutationRef.current.get(noteId) === sequence) setNoteTagsSaving(false);
+      if (tagMutationRef.current.get(noteId) === sequence && scopeRef.current.workspaceId === workspaceId && scopeRef.current.selectedNoteId === noteId) setNoteTagsSaving(false);
     }
-  }, [knowledgeClient]);
+  }, [knowledgeClient, workspaceId]);
 
   const saveLinks = useCallback(async (noteId: string, noteIds: string[]) => {
     const sequence = (linksMutationRef.current.get(noteId) ?? 0) + 1;
@@ -301,15 +305,15 @@ export function useNoteInspectorData({
     setNoteLinksError(null);
     try {
       await knowledgeClient.setNoteLinks(noteId, { target_note_ids: noteIds });
-      if (linksMutationRef.current.get(noteId) === sequence) setLinkedNoteIds([...noteIds]);
+      if (linksMutationRef.current.get(noteId) === sequence && scopeRef.current.workspaceId === workspaceId && scopeRef.current.selectedNoteId === noteId) setLinkedNoteIds([...noteIds]);
       return true;
     } catch {
-      if (linksMutationRef.current.get(noteId) === sequence) setNoteLinksError("笔记链接保存失败，请重试。当前选择已保留。");
+      if (linksMutationRef.current.get(noteId) === sequence && scopeRef.current.workspaceId === workspaceId && scopeRef.current.selectedNoteId === noteId) setNoteLinksError("笔记链接保存失败，请重试。当前选择已保留。");
       return false;
     } finally {
-      if (linksMutationRef.current.get(noteId) === sequence) setNoteLinksSaving(false);
+      if (linksMutationRef.current.get(noteId) === sequence && scopeRef.current.workspaceId === workspaceId && scopeRef.current.selectedNoteId === noteId) setNoteLinksSaving(false);
     }
-  }, [knowledgeClient]);
+  }, [knowledgeClient, workspaceId]);
 
   return {
     folders, setFolders, folderLoading, tags, setTags, noteTagIds, setNoteTagIds,

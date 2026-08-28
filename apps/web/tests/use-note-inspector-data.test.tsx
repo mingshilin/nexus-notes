@@ -114,4 +114,53 @@ describe("useNoteInspectorData", () => {
     await waitFor(() => expect(result.current.noteTagIds["note-1"]).toEqual(["tag-old"]));
     expect(result.current.noteTagsError).toContain("恢复");
   });
+
+  it("does not surface an old note mutation failure on the newly selected note", async () => {
+    const save = deferred<{ updated: true }>();
+    const api = clients({ setNoteTags: vi.fn(() => save.promise) });
+    const initialProps = { selectedNoteId: "note-old" };
+    const { result, rerender } = renderHook(
+      (props: typeof initialProps) => useNoteInspectorData({
+        knowledgeClient: api.knowledge as never,
+        databaseClient: api.databases as never,
+        notesClient: api.notes as never,
+        workspaceId: "ws-1",
+        selectedNoteId: props.selectedNoteId,
+        creatingNote: false,
+      }),
+      { initialProps },
+    );
+    let request!: Promise<boolean>;
+    act(() => { request = result.current.saveTags("note-old", ["tag-old"]); });
+    rerender({ selectedNoteId: "note-new" });
+    save.reject(new Error("old note offline"));
+    await expect(request).resolves.toBe(false);
+    await waitFor(() => {
+      expect(result.current.noteTagsError).toBeNull();
+      expect(result.current.noteTagsSaving).toBe(false);
+    });
+  });
+
+  it("does not apply an old note link mutation after selection changes", async () => {
+    const save = deferred<{ updated: true }>();
+    const api = clients({ setNoteLinks: vi.fn(() => save.promise) });
+    const initialProps = { selectedNoteId: "note-old" };
+    const { result, rerender } = renderHook(
+      (props: typeof initialProps) => useNoteInspectorData({
+        knowledgeClient: api.knowledge as never,
+        databaseClient: api.databases as never,
+        notesClient: api.notes as never,
+        workspaceId: "ws-1",
+        selectedNoteId: props.selectedNoteId,
+        creatingNote: false,
+      }),
+      { initialProps },
+    );
+    let request!: Promise<boolean>;
+    act(() => { request = result.current.saveLinks("note-old", ["old-target"]); });
+    rerender({ selectedNoteId: "note-new" });
+    save.resolve({ updated: true });
+    await expect(request).resolves.toBe(true);
+    await waitFor(() => expect(result.current.linkedNoteIds).toEqual([]));
+  });
 });
