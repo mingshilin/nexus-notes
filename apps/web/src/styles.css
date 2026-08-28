@@ -412,6 +412,16 @@ button { color: inherit; }
 .account-session-list > li small { color: hsl(var(--muted-foreground)); font-size: 11px; }
 .account-session-list > li button { min-height: 31px; border: 1px solid var(--border-subtle); border-radius: 9px; padding: 5px 9px; color: hsl(var(--destructive)); background: var(--surface-elevated); cursor: pointer; }
 .ai-config-panel { display: grid; gap: 14px; padding: 18px; border: 1px solid rgba(0,122,255,.16); border-radius: 18px; background: rgba(255,255,255,.52); }
+.ai-provider-config-stack { display: grid; gap: 14px; }
+.ai-provider-selector { display: grid; gap: 14px; padding: 18px; border: 1px solid rgba(0,122,255,.16); border-radius: 18px; background: rgba(255,255,255,.52); }
+.ai-provider-selector h2 { margin: 3px 0 5px; font-size: 19px; }
+.ai-provider-selector p { margin: 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
+.ai-provider-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.ai-provider-options button { display: grid; min-height: 66px; align-content: center; gap: 4px; border: 1px solid var(--border-subtle); border-radius: 13px; padding: 10px 12px; color: hsl(var(--foreground)); background: var(--surface-elevated); cursor: pointer; text-align: left; }
+.ai-provider-options button[aria-pressed="true"] { border-color: rgba(0,122,255,.48); color: var(--nexus-accent); background: rgba(0,122,255,.09); box-shadow: 0 8px 24px rgba(0,122,255,.08); }
+.ai-provider-options button:disabled { cursor: not-allowed; opacity: .56; }
+.ai-provider-options button:focus-visible { outline: 3px solid rgba(0,122,255,.25); outline-offset: 2px; }
+.ai-provider-options span { color: hsl(var(--muted-foreground)); font-size: 11px; }
 .ai-config-panel summary { cursor: pointer; color: hsl(var(--foreground)); font-size: 15px; font-weight: 780; }
 .ai-config-panel > p { margin: 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
 .ai-config-panel label { display: grid; gap: 6px; color: hsl(var(--muted-foreground)); font-size: 12px; font-weight: 700; }
