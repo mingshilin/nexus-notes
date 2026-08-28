@@ -1,7 +1,9 @@
-import { AI_ACTION_PROPOSAL_TTL_MS, type QueueJob, type WorkspaceContext } from "@nexus/contracts";
+import { evaluateAiToolPolicy } from "@nexus/domain";
+import { AI_ACTION_PROPOSAL_TTL_MS, type AiActionExecutionResult, type QueueJob, type WorkspaceContext } from "@nexus/contracts";
 
 import {
   AiToolError,
+  aiActionTargetId,
   assertAiToolName,
   type AiToolInput,
   type AiToolCall,
@@ -17,9 +19,15 @@ interface AiToolOrchestratorDependencies {
   clock?: () => Date;
 }
 
+interface AiActionPolicy {
+  trusted?: boolean;
+}
+
 interface AiToolExecutionDependencies {
   noteService: {
     create(context: WorkspaceContext & { requestId?: string; targetId?: string }, input: unknown): Promise<unknown>;
+    update(context: WorkspaceContext & { requestId?: string; targetId?: string }, noteId: string, input: unknown): Promise<unknown>;
+    get(context: WorkspaceContext, noteId: string): Promise<unknown>;
   };
   knowledgeService: {
     createReminder(context: { workspaceId: string; userId: string; targetId?: string }, input: unknown): Promise<unknown>;
@@ -57,7 +65,9 @@ interface AiToolExecutionDependencies {
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function pickInput(source: Record<string, unknown>, keys: readonly string[]) {
@@ -66,6 +76,13 @@ function pickInput(source: Record<string, unknown>, keys: readonly string[]) {
     if (key in source) target[key] = source[key];
   }
   return target;
+}
+
+function assertAllowedKeys(source: Record<string, unknown>, allowed: readonly string[]) {
+  const allowedKeys = new Set(allowed);
+  if (Object.keys(source).some((key) => !allowedKeys.has(key))) {
+    throw new AiToolError("AI_ACTION_TOOL_INVALID", "AI tool input contains an unknown field", 400);
+  }
 }
 
 function summaryForTool(tool: StoredAiActionProposal["tool"]) {
@@ -78,15 +95,21 @@ function summaryForTool(tool: StoredAiActionProposal["tool"]) {
       return "创建通知待确认";
     case "send_email":
       return "发送邮件待确认";
+    case "update_note":
+      return "更新笔记待确认";
+    case "move_note":
+      return "移动笔记待确认";
+    case "archive_note":
+      return "归档笔记待确认";
+    case "restore_note":
+      return "恢复笔记待确认";
+    case "delete_note":
+      return "移入回收站待确认";
   }
 }
 
 function proposalExpiry(clock: () => Date) {
   return new Date(clock().getTime() + AI_ACTION_PROPOSAL_TTL_MS).toISOString();
-}
-
-function targetIdFor(tool: StoredAiActionProposal["tool"], actionId: string) {
-  return `${tool.replaceAll("_", "-")}:${actionId}`;
 }
 
 function requireWorkspaceContext(context: WorkspaceContext) {
@@ -96,16 +119,85 @@ function requireWorkspaceContext(context: WorkspaceContext) {
   return context;
 }
 
+const EXECUTION_POLL_INTERVAL_MS = 25;
+const EXECUTION_POLL_TIMEOUT_MS = 8_000;
+
+function wait(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function requiredCapability(tool: StoredAiActionProposal["tool"]) {
+  switch (tool) {
+    case "create_note":
+    case "update_note":
+    case "move_note":
+    case "archive_note":
+    case "restore_note":
+    case "delete_note":
+      return "notes.write";
+    case "create_reminder":
+      return "reminders.write";
+    case "create_notification":
+      return "notifications.write";
+    case "send_email":
+      return "email.write";
+  }
+}
+
+function assertActionPermission(context: WorkspaceContext, tool: StoredAiActionProposal["tool"]) {
+  if (context.role === "viewer") {
+    throw new AiToolError("AI_ACTION_PERMISSION_DENIED", "Viewer permission is insufficient", 403);
+  }
+  const capability = requiredCapability(tool);
+  if (context.role !== "owner" && !context.capabilities.has(capability)) {
+    throw new AiToolError("AI_ACTION_PERMISSION_DENIED", "AI action capability is unavailable", 403);
+  }
+}
+
 function normalizedInput(name: string, raw: unknown): { tool: ReturnType<typeof assertAiToolName>; input: AiToolInput } {
   const tool = assertAiToolName(name);
-  const argumentsObject = isPlainObject(raw) ? raw : {};
+  if (!isPlainObject(raw)) {
+    throw new AiToolError("AI_ACTION_TOOL_INVALID", "AI tool arguments must be an object", 400);
+  }
+  const argumentsObject = raw;
+  const commonKeys = ["workspace_id"] as const;
+  const allowedKeys = tool === "create_note"
+    ? [...commonKeys, "title", "content", "folder_id", "database_id", "daily_date"]
+    : tool === "create_reminder"
+      ? [...commonKeys, "note_id", "title", "remind_at", "timezone"]
+      : tool === "create_notification"
+        ? [...commonKeys, "title", "body_text"]
+        : tool === "send_email"
+          ? [...commonKeys, "to_email", "subject", "body_text"]
+          : [...commonKeys, "target_note_id", "base_revision", "patch"];
+  assertAllowedKeys(argumentsObject, allowedKeys);
+  if (["update_note", "move_note"].includes(tool)) {
+    if (!isPlainObject(argumentsObject.patch)) {
+      throw new AiToolError("AI_ACTION_TOOL_INVALID", "AI note update requires a patch object", 400);
+    }
+    const allowedPatchKeys = tool === "move_note"
+      ? ["folder_id"]
+      : ["title", "content", "folder_id", "database_id", "daily_date", "is_favorite", "is_pinned"];
+    assertAllowedKeys(argumentsObject.patch, allowedPatchKeys);
+  } else if (["archive_note", "restore_note", "delete_note"].includes(tool) && "patch" in argumentsObject) {
+    throw new AiToolError("AI_ACTION_TOOL_INVALID", "Lifecycle status is derived from the selected tool", 400);
+  }
   const input = tool === "create_note"
-    ? pickInput(argumentsObject, ["title", "content", "folder_id", "daily_date"])
+    ? pickInput(argumentsObject, ["title", "content", "folder_id", "database_id", "daily_date"])
     : tool === "create_reminder"
       ? pickInput(argumentsObject, ["note_id", "title", "remind_at", "timezone"])
       : tool === "create_notification"
         ? pickInput(argumentsObject, ["title", "body_text"])
-        : pickInput(argumentsObject, ["to_email", "subject", "body_text"]);
+        : tool === "send_email"
+          ? pickInput(argumentsObject, ["to_email", "subject", "body_text"])
+          : (() => {
+            const target = pickInput(argumentsObject, ["target_note_id", "base_revision"]);
+            const rawPatch = isPlainObject(argumentsObject.patch) ? argumentsObject.patch : {};
+            if (tool === "update_note") return { ...target, patch: pickInput(rawPatch, ["title", "content", "folder_id", "database_id", "daily_date", "is_favorite", "is_pinned", "status"]) };
+            if (tool === "move_note") return { ...target, patch: pickInput(rawPatch, ["folder_id"]) };
+            const status = tool === "archive_note" ? "archived" : tool === "delete_note" ? "trashed" : "active";
+            return { ...target, patch: { status } };
+          })();
   try {
     const validated = validateAiActionProposal("normalize", tool, input, "2026-08-25T00:10:00.000Z", summaryForTool(tool));
     return { tool, input: validated.input };
@@ -123,12 +215,12 @@ export class AiToolOrchestrator {
     this.clock = dependencies.clock ?? (() => new Date());
   }
 
-  async propose(context: Parameters<typeof requireWorkspaceContext>[0], toolCall: AiToolCall) {
-    const [proposal] = await this.proposeMany(context, [toolCall]);
+  async propose(context: Parameters<typeof requireWorkspaceContext>[0], toolCall: AiToolCall, policy?: AiActionPolicy) {
+    const [proposal] = await this.proposeMany(context, [toolCall], policy);
     return proposal;
   }
 
-  async proposeMany(context: Parameters<typeof requireWorkspaceContext>[0], toolCalls: AiToolCall[]) {
+  async proposeMany(context: Parameters<typeof requireWorkspaceContext>[0], toolCalls: AiToolCall[], policy: AiActionPolicy = {}) {
     const actor = requireWorkspaceContext(context);
     const prepared = toolCalls.map((toolCall) => {
       const argumentsObject = isPlainObject(toolCall.arguments) ? toolCall.arguments : {};
@@ -136,14 +228,30 @@ export class AiToolOrchestrator {
       if (requestedWorkspace && requestedWorkspace !== actor.workspaceId) {
         throw new AiToolError("AI_ACTION_WORKSPACE_DENIED", "AI action cannot target another workspace", 403);
       }
-      return normalizedInput(toolCall.name, toolCall.arguments);
+      const normalized = normalizedInput(toolCall.name, toolCall.arguments);
+      assertActionPermission(actor, normalized.tool);
+      const target = ["update_note", "move_note", "archive_note", "restore_note", "delete_note"].includes(normalized.tool)
+        ? "selected" as const
+        : "workspace" as const;
+      let requiresConfirmation: boolean;
+      try {
+        requiresConfirmation = evaluateAiToolPolicy({
+          tool: normalized.tool,
+          trusted: policy.trusted === true && normalized.tool === "create_note",
+          target,
+          externalRecipient: normalized.tool === "send_email",
+        }).requiresConfirmation;
+      } catch (error) {
+        throw new AiToolError("AI_ACTION_TOOL_INVALID", error instanceof Error ? error.message : "AI tool policy rejected the action", 400);
+      }
+      return { ...normalized, requiresConfirmation };
     });
 
     const now = this.clock().toISOString();
     const expiresAt = proposalExpiry(this.clock);
-    const proposals = prepared.map(({ tool, input }) => {
+    const proposals = prepared.map(({ tool, input, requiresConfirmation }) => {
       const actionId = this.createId();
-      const proposal = validateAiActionProposal(actionId, tool, input, expiresAt, summaryForTool(tool));
+      const proposal = validateAiActionProposal(actionId, tool, input, expiresAt, summaryForTool(tool), requiresConfirmation);
       return {
         proposal,
         actionId,
@@ -153,10 +261,11 @@ export class AiToolOrchestrator {
         input: proposal.input,
         expiresAt,
         now,
+        requiresConfirmation,
       };
     });
     await this.dependencies.repository.insertProposals(proposals.map(({ proposal: _proposal, ...input }) => input));
-    return proposals.map(({ proposal }) => proposal);
+    return proposals.map(({ proposal }) => ({ ...proposal, proposal_revision: 1 }));
   }
 
   async confirm(context: Parameters<typeof requireWorkspaceContext>[0], actionId: string, baseRevision: number) {
@@ -169,6 +278,7 @@ export class AiToolOrchestrator {
       throw new AiToolError("AI_ACTION_CONFLICT", "AI action proposal changed before confirmation", 409);
     }
 
+    assertActionPermission(actor, proposal.tool);
     await this.dependencies.assertFreshPermission(actor, proposal);
     const claimed = await this.dependencies.repository.claimConfirmation({
       userId: actor.userId,
@@ -208,30 +318,98 @@ export class AiToolOrchestrator {
     return { rejected: true as const };
   }
 
-  async execute(context: Parameters<typeof requireWorkspaceContext>[0], actionId: string, dependencies: AiToolExecutionDependencies) {
+  async execute(context: Parameters<typeof requireWorkspaceContext>[0], actionId: string, dependencies: AiToolExecutionDependencies): Promise<AiActionExecutionResult> {
     const actor = requireWorkspaceContext(context);
     const now = (dependencies.clock ?? this.clock)().toISOString();
-    const proposal = await this.dependencies.repository.getOwned(actor.userId, actor.workspaceId, actionId);
+    let proposal = await this.dependencies.repository.getOwned(actor.userId, actor.workspaceId, actionId);
     if (!proposal) throw new AiToolError("AI_ACTION_NOT_FOUND", "AI action was not found", 404);
-    if (proposal.status === "executed") return proposal;
-    if (proposal.status !== "confirmed") {
+    if (proposal.status === "executed") return proposal.execution_result ?? { action_id: proposal.action_id, status: "executed" };
+    if (proposal.status === "failed" || proposal.status === "conflict") return storedExecutionResult(proposal);
+    assertActionPermission(actor, proposal.tool);
+    if (proposal.status === "proposed" && !proposal.requires_confirmation) {
+      const claimed = await this.dependencies.repository.claimConfirmation({
+        userId: actor.userId,
+        workspaceId: actor.workspaceId,
+        actionId,
+        baseRevision: proposal.revision,
+        now,
+      });
+      if (claimed?.status === "expired") {
+        throw new AiToolError("AI_ACTION_EXPIRED", "AI action proposal expired", 409);
+      }
+      if (!claimed || claimed.status !== "confirmed") {
+        const replay = await this.dependencies.repository.getOwned(actor.userId, actor.workspaceId, actionId);
+        if (replay?.status === "executed") return replay.execution_result ?? { action_id: replay.action_id, status: "executed" };
+        throw new AiToolError("AI_ACTION_CONFLICT", "AI action proposal changed before execution", 409);
+      }
+      proposal = claimed;
+    }
+    if (proposal.status !== "confirmed" && proposal.status !== "executing") {
       if (proposal.status === "expired") throw new AiToolError("AI_ACTION_EXPIRED", "AI action proposal expired", 409);
       throw new AiToolError("AI_ACTION_CONFLICT", "AI action proposal changed before execution", 409);
     }
-    await this.dependencies.assertFreshPermission(actor, proposal);
 
+    if (proposal.status === "executing") {
+      const leaseUntil = proposal.execution_lease_until ? Date.parse(proposal.execution_lease_until) : Number.NaN;
+      if (Number.isFinite(leaseUntil) && leaseUntil > Date.parse(now)) {
+        return this.waitForExecutionResult(actor, actionId);
+      }
+    }
+    const executionClaim = await this.dependencies.repository.claimExecution({
+      userId: actor.userId,
+      workspaceId: actor.workspaceId,
+      actionId,
+      baseRevision: proposal.revision,
+      now,
+    });
+    if (!executionClaim) {
+      const current = await this.dependencies.repository.getOwned(actor.userId, actor.workspaceId, actionId);
+      if (current?.status === "executed" || current?.status === "failed" || current?.status === "conflict") {
+        return current.status === "executed" ? (current.execution_result ?? { action_id: current.action_id, status: "executed" }) : storedExecutionResult(current);
+      }
+      if (current?.status === "executing") {
+        return this.waitForExecutionResult(actor, actionId);
+      }
+      throw new AiToolError("AI_ACTION_CONFLICT", "AI action proposal changed before execution", 409);
+    }
+    proposal = executionClaim;
+    const executionClaimToken = proposal.execution_claim_token;
+    if (!executionClaimToken) {
+      throw new AiToolError("AI_ACTION_CONFLICT", "AI action execution claim is invalid", 409);
+    }
     const requestId = dependencies.requestId ?? proposal.action_id;
+    let executionResult: AiActionExecutionResult;
     try {
+      await this.dependencies.assertFreshPermission(actor, proposal);
       switch (proposal.tool) {
-        case "create_note":
-          await dependencies.noteService.create(
-            { ...actor, requestId, targetId: targetIdFor("create_note", proposal.action_id) },
+        case "create_note": {
+          const note = await dependencies.noteService.create(
+            { ...actor, requestId, targetId: aiActionTargetId("create_note", proposal.action_id) },
             proposal.input,
           );
+          executionResult = noteResult(proposal.action_id, note, aiActionTargetId("create_note", proposal.action_id));
           break;
+        }
+        case "update_note":
+        case "move_note":
+        case "archive_note":
+        case "restore_note":
+        case "delete_note": {
+          const note = await dependencies.noteService.update(
+            { ...actor, requestId, targetId: aiActionTargetId(proposal.tool, proposal.action_id) },
+            proposal.input.target_note_id,
+            {
+              ...proposal.input.patch,
+              base_revision: proposal.input.base_revision,
+              source: proposal.tool === "restore_note" ? "restore" : "manual",
+            },
+          );
+          executionResult = noteResult(proposal.action_id, note, proposal.input.target_note_id);
+          break;
+        }
         case "create_reminder":
           await dependencies.knowledgeService.createReminder(
-            { workspaceId: actor.workspaceId, userId: actor.userId, targetId: targetIdFor("create_reminder", proposal.action_id) },
+            { workspaceId: actor.workspaceId, userId: actor.userId, targetId: aiActionTargetId("create_reminder", proposal.action_id) },
             {
               note_id: proposal.input.note_id ?? null,
               title: proposal.input.title,
@@ -242,6 +420,7 @@ export class AiToolOrchestrator {
               delivery_enabled: true,
             },
           );
+          executionResult = { action_id: proposal.action_id, status: "executed", entity_id: aiActionTargetId("create_reminder", proposal.action_id) };
           break;
         case "create_notification":
           await dependencies.collaborationRepository.createNotification(
@@ -256,6 +435,7 @@ export class AiToolOrchestrator {
               requestId,
             },
           );
+          executionResult = { action_id: proposal.action_id, status: "executed", entity_id: `ai-notification:${proposal.action_id}` };
           break;
         case "send_email": {
           if (!dependencies.queue) {
@@ -267,6 +447,7 @@ export class AiToolOrchestrator {
             actionId,
             baseRevision: proposal.revision,
             now,
+            executionClaimToken,
           }, {
             actionId: proposal.action_id,
             userId: actor.userId,
@@ -277,31 +458,54 @@ export class AiToolOrchestrator {
             now,
           });
           if (!completed) throw new AiToolError("AI_ACTION_CONFLICT", "AI action proposal changed before email outbox commit could be recorded", 409);
-          return completed;
+          return completed.execution_result ?? { action_id: proposal.action_id, status: "executed", entity_id: `ai-email:${proposal.action_id}` };
         }
       }
     } catch (error) {
-      const failed = await this.dependencies.repository.markFailed({
+      const actionError = error instanceof AiToolError
+        ? error
+        : error && typeof error === "object" && "code" in error && typeof error.code === "string"
+          ? Object.assign(new AiToolError(error.code, error instanceof Error ? error.message : "AI action failed", "status" in error && typeof error.status === "number" ? error.status : 500), {})
+          : new AiToolError("AI_ACTION_EXECUTION_FAILED", "AI action execution failed", 500);
+      const isNoteConflict = actionError.status === 409
+        && ["NOTE_CONFLICT", "AI_ACTION_NOTE_CONFLICT", "DAILY_NOTE_CONFLICT", "NOTE_IDEMPOTENCY_CONFLICT"].includes(actionError.code);
+      const errorRecord = {
+        code: isNoteConflict ? "AI_ACTION_NOTE_CONFLICT" : actionError.code,
+        message: isNoteConflict ? "The note changed before the AI action could be executed" : "AI action execution failed",
+        status: actionError.status,
+      };
+      const mark = isNoteConflict ? this.dependencies.repository.markConflict.bind(this.dependencies.repository) : this.dependencies.repository.markFailed.bind(this.dependencies.repository);
+      const stored = await mark({
         userId: actor.userId,
         workspaceId: actor.workspaceId,
         actionId,
         baseRevision: proposal.revision,
         now,
-      });
-      if (!failed) throw new AiToolError("AI_ACTION_CONFLICT", "AI action proposal changed before failure could be recorded", 409);
-      throw error;
+        executionClaimToken,
+      }, errorRecord);
+      if (!stored) {
+        const current = await this.dependencies.repository.getOwned(actor.userId, actor.workspaceId, actionId);
+        if (current?.status === "executed") return current.execution_result ?? { action_id: current.action_id, status: "executed" };
+        if (current?.status === "conflict" || current?.status === "failed") return storedExecutionResult(current);
+        throw new AiToolError("AI_ACTION_CONFLICT", "AI action proposal changed before failure could be recorded", 409);
+      }
+      return isNoteConflict
+        ? { action_id: proposal.action_id, status: "conflict", error: errorRecord }
+        : { action_id: proposal.action_id, status: "failed", error: errorRecord };
     }
 
+    const completedResult = executionResult!;
     let completed = await this.dependencies.repository.markCompleted({
       userId: actor.userId,
       workspaceId: actor.workspaceId,
       actionId,
       baseRevision: proposal.revision,
       now,
-    });
+      executionClaimToken,
+    }, completedResult);
     if (!completed) {
       const current = await this.dependencies.repository.getOwned(actor.userId, actor.workspaceId, actionId);
-      if (current?.status === "executed") return current;
+      if (current?.status === "executed") return current.execution_result ?? completedResult;
       if (current?.status === "confirmed") {
         completed = await this.dependencies.repository.markCompleted({
           userId: actor.userId,
@@ -309,10 +513,54 @@ export class AiToolOrchestrator {
           actionId,
           baseRevision: current.revision,
           now,
-        });
+          executionClaimToken,
+        }, completedResult);
       }
     }
-    if (!completed) throw new AiToolError("AI_ACTION_CONFLICT", "AI action proposal changed before completion could be recorded", 409);
-    return completed;
+    if (!completed) {
+      const current = await this.dependencies.repository.getOwned(actor.userId, actor.workspaceId, actionId);
+      if (current?.status === "executed" || current?.status === "failed" || current?.status === "conflict") {
+        return current.status === "executed" ? (current.execution_result ?? completedResult) : storedExecutionResult(current);
+      }
+      if (current?.status === "executing") {
+        return this.waitForExecutionResult(actor, actionId);
+      }
+      throw new AiToolError("AI_ACTION_CONFLICT", "AI action proposal changed before completion could be recorded", 409);
+    }
+    return completed.execution_result ?? completedResult;
   }
+
+  private async waitForExecutionResult(actor: WorkspaceContext, actionId: string): Promise<AiActionExecutionResult> {
+    const deadline = Date.now() + EXECUTION_POLL_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await wait(EXECUTION_POLL_INTERVAL_MS);
+      const current = await this.dependencies.repository.getOwned(actor.userId, actor.workspaceId, actionId);
+      if (!current) throw new AiToolError("AI_ACTION_NOT_FOUND", "AI action was not found", 404);
+      if (current.status === "executed") return current.execution_result ?? { action_id: current.action_id, status: "executed" };
+      if (current.status === "failed" || current.status === "conflict") return storedExecutionResult(current);
+    }
+    throw new AiToolError("AI_ACTION_IN_PROGRESS", "AI action is still executing", 409, undefined, true);
+  }
+}
+
+function noteResult(actionId: string, value: unknown, fallbackEntityId: string): AiActionExecutionResult {
+  const note = value && typeof value === "object" ? value as { id?: unknown; revision?: unknown } : {};
+  return {
+    action_id: actionId,
+    status: "executed",
+    entity_id: typeof note.id === "string" ? note.id : fallbackEntityId,
+    ...(typeof note.revision === "number" ? { revision: note.revision } : {}),
+  };
+}
+
+function storedExecutionResult(proposal: StoredAiActionProposal): AiActionExecutionResult {
+  if (proposal.execution_result) return proposal.execution_result;
+  const status = proposal.status === "conflict" ? "conflict" : "failed";
+  return {
+    action_id: proposal.action_id,
+    status,
+    ...(proposal.error_code && proposal.error_message && proposal.error_status
+      ? { error: { code: proposal.error_code, message: proposal.error_message, status: proposal.error_status } }
+      : {}),
+  };
 }

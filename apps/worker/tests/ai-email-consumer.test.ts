@@ -18,7 +18,7 @@ function deferred() {
 }
 
 async function setup() {
-  const testD1 = await createTestD1({ through: 20 });
+  const testD1 = await createTestD1({ through: 22 });
   disposals.push(testD1.dispose);
   await seedTenants(testD1.db);
 

@@ -62,6 +62,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260417.0",
     "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/dom": "^10.4.0",
     "@testing-library/react": "^16.3.0",
     "@types/node": "^22.15.18",
     "@types/react": "^19.1.6",

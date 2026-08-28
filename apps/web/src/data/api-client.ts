@@ -1,6 +1,7 @@
 import type {
   ApiErrorPayload,
   ApiResponse,
+  AiActionExecutionResult,
   RequestClass,
   RequestPolicy,
 } from "@nexus/contracts";
@@ -30,11 +31,7 @@ export interface ApiDownloadOptions {
 }
 
 export interface ConfirmAiActionResult {
-  action: {
-    action_id: string;
-    revision?: number;
-    status?: string;
-  };
+  action: AiActionExecutionResult;
 }
 
 export interface RejectAiActionResult {

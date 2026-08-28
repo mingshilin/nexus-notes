@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   AI_ACTION_PROPOSAL_TTL_MS,
   AiActionConfirmSchema,
+  AiActionExecutionResultSchema,
+  AiActionInputSchema,
   AiActionProposalSchema,
   AiActionRejectSchema,
 } from "../src";
@@ -15,12 +17,13 @@ describe("AI action contracts", () => {
   it("accepts only the four side-effect tools with tool-specific inputs", () => {
     expect(AiActionProposalSchema.parse({
       action_id: "note-1",
+      proposal_revision: 1,
       tool: "create_note",
       summary: "创建笔记",
       input: { title: "周会", content: "整理议程", daily_date: "2026-08-25" },
       requires_confirmation: true,
       expires_at: "2026-08-25T00:10:00.000Z",
-    }).tool).toBe("create_note");
+    }).proposal_revision).toBe(1);
 
     expect(AiActionProposalSchema.parse({
       action_id: "reminder-1",
@@ -99,5 +102,92 @@ describe("AI action contracts", () => {
 
     expect(() => AiActionConfirmSchema.parse({ action_id: "a1", base_revision: 0 })).toThrow();
     expect(() => AiActionRejectSchema.parse({ action_id: "a1", base_revision: -1 })).toThrow();
+  });
+
+  it("accepts normalized note lifecycle inputs and rejects unknown patch keys", () => {
+    expect(AiActionInputSchema.parse({
+      tool: "update_note",
+      input: {
+        target_note_id: "note-1",
+        base_revision: 3,
+        patch: { title: "Renamed", content: "Body" },
+      },
+    })).toEqual({
+      tool: "update_note",
+      input: {
+        target_note_id: "note-1",
+        base_revision: 3,
+        patch: { title: "Renamed", content: "Body" },
+      },
+    });
+    expect(AiActionProposalSchema.parse({
+      action_id: "archive-1",
+      tool: "archive_note",
+      summary: "归档笔记",
+      input: { target_note_id: "note-1", base_revision: 3, patch: { status: "archived" } },
+      requires_confirmation: true,
+      expires_at: "2026-08-25T00:10:00.000Z",
+    }).input.patch).toEqual({ status: "archived" });
+    expect(() => AiActionInputSchema.parse({
+      tool: "move_note",
+      input: {
+        target_note_id: "note-1",
+        base_revision: 3,
+        patch: { folder_id: "folder-1", ignored: true },
+      },
+    })).toThrow();
+  });
+
+  it("rejects impossible lifecycle note dates while accepting leap-day dates", () => {
+    expect(AiActionInputSchema.parse({
+      tool: "update_note",
+      input: {
+        target_note_id: "note-1",
+        base_revision: 3,
+        patch: { daily_date: "2028-02-29" },
+      },
+    })).toBeDefined();
+    for (const dailyDate of ["2026-02-29", "2026-04-31", "2026-13-01"]) {
+      expect(() => AiActionInputSchema.parse({
+        tool: "update_note",
+        input: {
+          target_note_id: "note-1",
+          base_revision: 3,
+          patch: { daily_date: dailyDate },
+        },
+      })).toThrow();
+    }
+    expect(() => AiActionInputSchema.parse({
+      tool: "create_note",
+      input: { daily_date: "2026-02-30" },
+    })).toThrow();
+  });
+
+  it("allows trusted create proposals and validates execution results", () => {
+    expect(AiActionProposalSchema.parse({
+      action_id: "create-1",
+      tool: "create_note",
+      summary: "创建笔记",
+      input: { title: "Trusted", content: "Body" },
+      requires_confirmation: false,
+      expires_at: "2026-08-25T00:10:00.000Z",
+    }).requires_confirmation).toBe(false);
+    expect(AiActionExecutionResultSchema.parse({
+      action_id: "create-1",
+      status: "executed",
+      entity_id: "note-1",
+      revision: 1,
+    })).toEqual({
+      action_id: "create-1",
+      status: "executed",
+      entity_id: "note-1",
+      revision: 1,
+    });
+    expect(AiActionExecutionResultSchema.parse({
+      action_id: "create-1",
+      status: "failed",
+      retryable: true,
+      error: { code: "AI_ACTION_IN_PROGRESS", message: "仍在执行", status: 409 },
+    })).toMatchObject({ retryable: true });
   });
 });

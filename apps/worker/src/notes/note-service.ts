@@ -38,7 +38,15 @@ export interface CreateNoteRecordInput {
 export interface NoteRepository {
   createNote(input: CreateNoteRecordInput): Promise<Note>;
   openOrCreateDaily(input: CreateNoteRecordInput): Promise<Note>;
+  hasFolder(workspaceId: string, folderId: string): Promise<boolean>;
   hasDatabase(workspaceId: string, databaseId: string): Promise<boolean>;
+  getIdempotentNote?(input: {
+    workspaceId: string;
+    noteId: string;
+    idempotencyKey: string;
+    baseRevision: number;
+    requestJson: string;
+  }): Promise<Note | null>;
   getNote(workspaceId: string, noteId: string): Promise<Note | null>;
   listNotes(input: {
     workspaceId: string;
@@ -94,6 +102,17 @@ export class NoteServiceError extends Error {
   }
 }
 
+export function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new TypeError("Value is not JSON serializable");
+    return serialized;
+  }
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+}
+
 export interface NoteServiceOptions {
   createId(): string;
   clock(): Date;
@@ -142,6 +161,9 @@ function mapRepositoryError(error: unknown): never {
   if (error instanceof Error && /NOTE_IDEMPOTENCY_CONFLICT/iu.test(error.message)) {
     throw new NoteServiceError("NOTE_IDEMPOTENCY_CONFLICT", "Note creation request conflicts with an existing request", 409);
   }
+  if (error instanceof Error && /note_revisions\.note_id, note_revisions\.revision/iu.test(error.message)) {
+    throw new NoteServiceError("NOTE_CONFLICT", "The note changed before this update could be saved", 409);
+  }
   throw error;
 }
 
@@ -160,6 +182,31 @@ export class NoteService {
 
   async create(context: NoteActorContext, input: CreateNoteInput) {
     try {
+      const requestJson = stableJson({
+        title: input.title,
+        content: input.content,
+        folder_id: input.folder_id ?? null,
+        database_id: input.database_id ?? null,
+        daily_date: input.daily_date ?? null,
+        is_favorite: input.is_favorite ?? false,
+        is_pinned: input.is_pinned ?? false,
+      });
+      if (context.targetId && this.repository.getIdempotentNote) {
+        const replay = await this.repository.getIdempotentNote({
+          workspaceId: context.workspaceId,
+          noteId: context.targetId,
+          idempotencyKey: context.targetId,
+          baseRevision: 1,
+          requestJson,
+        });
+        if (replay) return replay;
+      }
+      if (input.folder_id && !(await this.repository.hasFolder(context.workspaceId, input.folder_id))) {
+        throw new NoteServiceError("FOLDER_NOT_FOUND", "Folder not found", 404);
+      }
+      if (input.database_id && !(await this.repository.hasDatabase(context.workspaceId, input.database_id))) {
+        throw new NoteServiceError("DATABASE_NOT_FOUND", "Database not found", 404);
+      }
       return await this.repository.createNote({
         id: context.targetId ?? this.options.createId(),
         workspaceId: context.workspaceId,
@@ -177,6 +224,7 @@ export class NoteService {
         ...(context.targetId ? { idempotencyKey: context.targetId } : {}),
       });
     } catch (error) {
+      if (error instanceof NoteServiceError) throw error;
       return mapRepositoryError(error);
     }
   }
@@ -302,8 +350,25 @@ export class NoteService {
 
   async update(context: NoteActorContext, noteId: string, input: UpdateNoteInput) {
     const { base_revision: baseRevision, ...patch } = input;
+    const { source: _source, ...idempotencyPatch } = patch;
     let result: Awaited<ReturnType<NoteRepository["updateNote"]>>;
     try {
+      if (context.targetId && this.repository.getIdempotentNote) {
+        const replay = await this.repository.getIdempotentNote({
+          workspaceId: context.workspaceId,
+          noteId,
+          idempotencyKey: context.targetId,
+          baseRevision,
+          requestJson: stableJson(idempotencyPatch),
+        });
+        if (replay) return replay;
+      }
+      if (input.folder_id && !(await this.repository.hasFolder(context.workspaceId, input.folder_id))) {
+        throw new NoteServiceError("FOLDER_NOT_FOUND", "Folder not found", 404);
+      }
+      if (input.database_id && !(await this.repository.hasDatabase(context.workspaceId, input.database_id))) {
+        throw new NoteServiceError("DATABASE_NOT_FOUND", "Database not found", 404);
+      }
       result = await this.repository.updateNote({
         workspaceId: context.workspaceId,
         userId: context.userId,
@@ -312,8 +377,10 @@ export class NoteService {
         patch,
         now: this.options.clock().toISOString(),
         requestId: context.requestId,
+        ...(context.targetId ? { idempotencyKey: context.targetId } : {}),
       });
     } catch (error) {
+      if (error instanceof NoteServiceError) throw error;
       return mapRepositoryError(error);
     }
     if (!result.note) {

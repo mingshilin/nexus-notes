@@ -34,7 +34,7 @@ function context(role: WorkspaceContext["role"] = "owner"): WorkspaceContext {
 }
 
 async function setup(options: { queue?: { send: (message: unknown) => Promise<unknown> } } = {}) {
-  const testD1 = await createTestD1({ through: 20 });
+  const testD1 = await createTestD1({ through: 22 });
   disposals.push(testD1.dispose);
   await seedTenants(testD1.db);
   const currentTime = new Date("2026-08-25T00:00:00.000Z");
@@ -170,7 +170,7 @@ describe("AI tool execution", () => {
     expect(queue.send).not.toHaveBeenCalled();
   });
 
-  it("marks a confirmed note action failed when the service raises an idempotency conflict", async () => {
+  it("marks a confirmed note action conflicted when the service raises an idempotency conflict", async () => {
     const { testD1, orchestrator, execution } = await setup();
     const proposal = await orchestrator.propose(context(), { name: "create_note", arguments: { title: "Roadmap", content: "Outline" } });
     await orchestrator.confirm(context(), proposal.action_id, 1);
@@ -181,10 +181,14 @@ describe("AI tool execution", () => {
       noteService: {
         create: async () => { throw conflict; },
       } as any,
-    })).rejects.toMatchObject({ code: "NOTE_IDEMPOTENCY_CONFLICT", status: 409 });
+    })).resolves.toMatchObject({
+      action_id: proposal.action_id,
+      status: "conflict",
+      error: { code: "AI_ACTION_NOTE_CONFLICT", status: 409 },
+    });
 
     const stored = await testD1.db.prepare("SELECT status FROM ai_action_proposals WHERE id = ?").bind(proposal.action_id).first<{ status: string }>();
-    expect(stored?.status).toBe("failed");
+    expect(stored?.status).toBe("conflict");
   });
 
   it("denies execution for a viewer before writing side effects", async () => {
@@ -204,7 +208,11 @@ describe("AI tool execution", () => {
       arguments: { note_id: "missing-note", title: "Follow up", remind_at: "2026-08-25T09:00:00.000Z", timezone: "Asia/Shanghai" },
     });
     await orchestrator.confirm(context(), missingNote.action_id, 1);
-    await expect(orchestrator.execute(context(), missingNote.action_id, execution)).rejects.toMatchObject({ code: "REMINDER_NOTE_NOT_FOUND" });
+    await expect(orchestrator.execute(context(), missingNote.action_id, execution)).resolves.toMatchObject({
+      action_id: missingNote.action_id,
+      status: "failed",
+      error: { code: "REMINDER_NOTE_NOT_FOUND" },
+    });
 
     const invalidRecurrence = await orchestrator.propose(context(), {
       name: "create_reminder",
@@ -216,7 +224,11 @@ describe("AI tool execution", () => {
       knowledgeService: {
         createReminder: async () => { throw Object.assign(new Error("invalid recurrence"), { code: "REMINDER_RECURRENCE_INVALID" }); },
       } as any,
-    })).rejects.toMatchObject({ code: "REMINDER_RECURRENCE_INVALID" });
+    })).resolves.toMatchObject({
+      action_id: invalidRecurrence.action_id,
+      status: "failed",
+      error: { code: "REMINDER_RECURRENCE_INVALID" },
+    });
   });
 
   it("replays an executed action without creating duplicates", async () => {
@@ -267,8 +279,10 @@ describe("AI tool execution", () => {
     });
 
     await orchestrator.confirm(context(), proposal.action_id, 1);
-    await expect(orchestrator.execute(context(), proposal.action_id, { ...execution, queue: undefined })).rejects.toMatchObject({
-      code: "AI_ACTION_QUEUE_UNAVAILABLE",
+    await expect(orchestrator.execute(context(), proposal.action_id, { ...execution, queue: undefined })).resolves.toMatchObject({
+      action_id: proposal.action_id,
+      status: "failed",
+      error: { code: "AI_ACTION_QUEUE_UNAVAILABLE" },
     });
 
     const stored = await testD1.db.prepare("SELECT status FROM ai_action_proposals WHERE id = ?").bind(proposal.action_id).first<{ status: string }>();

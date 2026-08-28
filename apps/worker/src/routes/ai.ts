@@ -1,12 +1,14 @@
 import {
   AiActionConfirmSchema,
   AiActionRejectSchema,
+  AiActionExecutionResultSchema,
   AiChatInputSchema,
   DeleteAiUserConfigInputSchema,
   TestAiUserConfigInputSchema,
   UpsertAiUserConfigInputSchema,
   type AiChatInput,
   type AiChatResponse,
+  type AiActionExecutionResult,
   type AiStatus,
   type DeleteAiUserConfigInput,
   type TestAiUserConfigInput,
@@ -32,7 +34,7 @@ export interface AiChatRouteService {
     actionId: string,
     baseRevision: number,
     requestId: string,
-  ): Promise<unknown>;
+  ): Promise<AiActionExecutionResult>;
   rejectAction?(
     userId: string,
     workspace: WorkspaceContext,
@@ -109,7 +111,9 @@ export function registerAiRoutes<TEnv>(registry: AiRegistry<TEnv>, createService
       }
       return {
         data: {
-          action: await confirmAction(principal!.userId, workspace!, params.actionId!, body.base_revision, requestId),
+          action: AiActionExecutionResultSchema.parse(
+            await confirmAction(principal!.userId, workspace!, params.actionId!, body.base_revision, requestId),
+          ),
         },
       };
     },

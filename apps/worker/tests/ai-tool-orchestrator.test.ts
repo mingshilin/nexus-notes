@@ -26,7 +26,7 @@ function context(workspaceId = "ws-1", userId = "user-1"): WorkspaceContext {
 }
 
 async function setupOrchestrator() {
-  const testD1 = await createTestD1({ through: 18 });
+  const testD1 = await createTestD1({ through: 22 });
   disposals.push(testD1.dispose);
   await seedTenants(testD1.db);
 
@@ -73,7 +73,24 @@ describe("AiToolOrchestrator", () => {
     expect(count?.count).toBe(0);
   });
 
-  it("rejects unsupported tools and strips unknown proposal input keys before persistence", async () => {
+  it("rejects proposals before persistence when the actor lacks the action capability", async () => {
+    const { db, orchestrator } = await setupOrchestrator();
+    const editor: WorkspaceContext = {
+      ...context(),
+      role: "editor",
+      capabilities: new Set(["email.write"]),
+    };
+
+    await expect(orchestrator.propose(editor, {
+      name: "create_note",
+      arguments: { title: "Should not be proposed", content: "No access" },
+    })).rejects.toMatchObject({ code: "AI_ACTION_PERMISSION_DENIED", status: 403 });
+
+    const count = await db.prepare("SELECT COUNT(*) AS count FROM ai_action_proposals").first<{ count: number }>();
+    expect(count?.count).toBe(0);
+  });
+
+  it("rejects unsupported tools and unknown proposal input keys before persistence", async () => {
     const { db, orchestrator } = await setupOrchestrator();
 
     await expect(orchestrator.propose(context(), {
@@ -81,7 +98,7 @@ describe("AiToolOrchestrator", () => {
       arguments: { sql: "DROP TABLE notes" },
     })).rejects.toMatchObject({ code: "AI_ACTION_TOOL_INVALID" });
 
-    const proposal = await orchestrator.propose(context(), {
+    await expect(orchestrator.propose(context(), {
       name: "send_email",
       arguments: {
         workspace_id: "ws-1",
@@ -89,6 +106,15 @@ describe("AiToolOrchestrator", () => {
         subject: "Planning",
         body_text: "Sensitive body",
         ignored: "do-not-persist",
+      },
+    })).rejects.toMatchObject({ code: "AI_ACTION_TOOL_INVALID" });
+
+    const proposal = await orchestrator.propose(context(), {
+      name: "send_email",
+      arguments: {
+        to_email: "user@example.test",
+        subject: "Planning",
+        body_text: "Sensitive body",
       },
     });
 
@@ -169,7 +195,7 @@ describe("AiToolOrchestrator", () => {
   });
 
   it("denies confirmation when the fresh permission check fails", async () => {
-    const testD1 = await createTestD1({ through: 18 });
+    const testD1 = await createTestD1({ through: 22 });
     disposals.push(testD1.dispose);
     await seedTenants(testD1.db);
 

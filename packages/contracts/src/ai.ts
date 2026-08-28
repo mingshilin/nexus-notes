@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DailyDateSchema } from "./notes";
 
 const EntityIdSchema = z.string().trim().min(1).max(128);
 const TimestampSchema = z.string().datetime({ offset: true });
@@ -52,6 +53,7 @@ export const AiChatResponseSchema = z.object({
   message: z.string().trim().min(1).max(8_000),
   model: z.string().trim().min(1).max(128),
   action_proposals: z.array(z.lazy(() => AiActionProposalSchema)).optional(),
+  action_results: z.array(z.lazy(() => AiActionExecutionResultSchema)).max(20).optional(),
   read_results: z.array(z.lazy(() => AiReadResultSchema)).max(5).optional(),
 }).strict();
 export type AiChatResponse = z.infer<typeof AiChatResponseSchema>;
@@ -182,6 +184,11 @@ export const AiActionToolNameSchema = z.enum([
   "create_reminder",
   "create_notification",
   "send_email",
+  "update_note",
+  "move_note",
+  "archive_note",
+  "restore_note",
+  "delete_note",
 ]);
 export type AiActionToolName = z.infer<typeof AiActionToolNameSchema>;
 
@@ -262,39 +269,83 @@ const AiActionReasonSchema = z.string().trim().min(1).max(500);
 const NoteTitleSchema = z.string().trim().max(160);
 const NoteContentSchema = z.string().max(20_000);
 
-export const AiActionStatusSchema = z.enum(["proposed", "confirmed", "rejected", "expired", "executed", "failed"]);
+export const AiActionStatusSchema = z.enum(["proposed", "confirmed", "executing", "rejected", "expired", "executed", "failed", "conflict"]);
 export type AiActionStatus = z.infer<typeof AiActionStatusSchema>;
 
-const CreateNoteActionInputSchema = z.object({
+export const CreateNoteActionInputSchema = z.object({
   title: NoteTitleSchema.default(""),
   content: NoteContentSchema.default(""),
   folder_id: EntityIdSchema.nullable().optional(),
-  daily_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u).nullable().optional(),
+  database_id: EntityIdSchema.nullable().optional(),
+  daily_date: DailyDateSchema.nullable().optional(),
 }).strict();
 
-const CreateReminderActionInputSchema = z.object({
+export const CreateReminderActionInputSchema = z.object({
   note_id: EntityIdSchema.nullable().optional(),
   title: z.string().trim().max(160).default(""),
   remind_at: TimestampSchema,
   timezone: z.string().trim().min(1).max(64).default("UTC"),
 }).strict();
 
-const CreateNotificationActionInputSchema = z.object({
+export const CreateNotificationActionInputSchema = z.object({
   title: z.string().trim().min(1).max(160),
   body_text: z.string().trim().min(1).max(2_000),
 }).strict();
 
-const SendEmailActionInputSchema = z.object({
+export const SendEmailActionInputSchema = z.object({
   to_email: EmailSchema,
   subject: z.string().trim().min(1).max(160),
   body_text: z.string().trim().min(1).max(8_000),
 }).strict();
 
-const AiActionInputSchema = z.discriminatedUnion("tool", [
+const NoteActionTargetSchema = z.object({
+  target_note_id: EntityIdSchema,
+  base_revision: PositiveRevisionSchema,
+}).strict();
+
+const NoteActionPatchSchema = z.object({
+  title: NoteTitleSchema.optional(),
+  content: NoteContentSchema.optional(),
+  folder_id: EntityIdSchema.nullable().optional(),
+  database_id: EntityIdSchema.nullable().optional(),
+  daily_date: DailyDateSchema.nullable().optional(),
+  is_favorite: z.boolean().optional(),
+  is_pinned: z.boolean().optional(),
+}).strict().refine(
+  (patch) => Object.values(patch).some((value) => value !== undefined),
+  { message: "At least one note field must change" },
+);
+
+export const UpdateNoteActionInputSchema = NoteActionTargetSchema.extend({
+  patch: NoteActionPatchSchema,
+}).strict();
+
+export const MoveNoteActionInputSchema = NoteActionTargetSchema.extend({
+  patch: z.object({ folder_id: EntityIdSchema.nullable() }).strict(),
+}).strict();
+
+export const ArchiveNoteActionInputSchema = NoteActionTargetSchema.extend({
+  patch: z.object({ status: z.literal("archived") }).strict(),
+}).strict();
+
+export const RestoreNoteActionInputSchema = NoteActionTargetSchema.extend({
+  patch: z.object({ status: z.literal("active") }).strict(),
+}).strict();
+
+export const DeleteNoteActionInputSchema = NoteActionTargetSchema.extend({
+  patch: z.object({ status: z.literal("trashed") }).strict(),
+}).strict();
+
+export const AiActionInputSchema = z.discriminatedUnion("tool", [
   z.object({ tool: z.literal("create_note"), input: CreateNoteActionInputSchema }).strict(),
   z.object({ tool: z.literal("create_reminder"), input: CreateReminderActionInputSchema }).strict(),
   z.object({ tool: z.literal("create_notification"), input: CreateNotificationActionInputSchema }).strict(),
   z.object({ tool: z.literal("send_email"), input: SendEmailActionInputSchema }).strict(),
+  z.object({ tool: z.literal("update_note"), input: UpdateNoteActionInputSchema }).strict(),
+  z.object({ tool: z.literal("move_note"), input: MoveNoteActionInputSchema }).strict(),
+  z.object({ tool: z.literal("archive_note"), input: ArchiveNoteActionInputSchema }).strict(),
+  z.object({ tool: z.literal("restore_note"), input: RestoreNoteActionInputSchema }).strict(),
+  z.object({ tool: z.literal("delete_note"), input: DeleteNoteActionInputSchema }).strict(),
 ]).superRefine((value, context) => {
   const result = BoundedJsonSchema.safeParse(value.input);
   if (!result.success) {
@@ -304,10 +355,27 @@ const AiActionInputSchema = z.discriminatedUnion("tool", [
   }
 });
 
+export type AiActionInput = z.infer<typeof AiActionInputSchema>;
+
+export const AiActionExecutionResultSchema = z.object({
+  action_id: EntityIdSchema,
+  status: z.enum(["executed", "failed", "conflict"]),
+  retryable: z.boolean().optional(),
+  entity_id: EntityIdSchema.optional(),
+  revision: PositiveRevisionSchema.optional(),
+  error: z.object({
+    code: z.string().trim().min(1).max(128),
+    message: z.string().trim().min(1).max(500),
+    status: z.number().int().min(400).max(599),
+  }).strict().optional(),
+}).strict();
+export type AiActionExecutionResult = z.infer<typeof AiActionExecutionResultSchema>;
+
 export const AiActionProposalSchema = z.object({
   action_id: EntityIdSchema,
+  proposal_revision: PositiveRevisionSchema.optional(),
   summary: AiActionSummarySchema,
-  requires_confirmation: z.literal(true),
+  requires_confirmation: z.boolean(),
   expires_at: TimestampSchema,
 }).and(AiActionInputSchema);
 export type AiActionProposal = z.infer<typeof AiActionProposalSchema>;

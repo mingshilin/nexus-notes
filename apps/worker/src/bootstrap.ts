@@ -1,5 +1,5 @@
-import { normalizeEmail } from "@nexus/domain";
-import { CreateJobInputSchema, FeedbackInputSchema, type OperationsStatus, type WorkspaceContext } from "@nexus/contracts";
+import { isAiTrustedModeActive, normalizeEmail } from "@nexus/domain";
+import { CreateJobInputSchema, FeedbackInputSchema, type AiActionExecutionResult, type OperationsStatus, type WorkspaceContext } from "@nexus/contracts";
 import { AuthService } from "./auth/auth-service";
 import { SecureTokenService, WebCryptoPasswordHasher } from "./auth/crypto";
 import { D1AuthRepository } from "./auth/d1-auth-repository";
@@ -10,7 +10,7 @@ import { TurnstileVerifier } from "./auth/turnstile";
 import { createRouteRegistry, type GatewayHookContext } from "./http/route-registry";
 import { createSecureGateway } from "./http/security-gateway";
 import { D1NoteRepository } from "./notes/d1-note-repository";
-import { NoteService } from "./notes/note-service";
+import { NoteService, NoteServiceError, stableJson } from "./notes/note-service";
 import { D1AiToolRepository } from "./ai/ai-tool-repository";
 import { D1KnowledgeRepository } from "./knowledge/d1-knowledge-repository";
 import { D1GraphRepository } from "./knowledge/d1-graph-repository";
@@ -53,7 +53,7 @@ import { AiEmailOutboxRepository } from "./ai/ai-email-outbox-repository";
 import { AiEmailOutboxDispatcher } from "./ai/ai-email-outbox-dispatcher";
 import { AiEmailConsumer } from "./ai/ai-email-consumer";
 import { AiToolOrchestrator } from "./ai/ai-tool-orchestrator";
-import { AiToolError } from "./ai/ai-tool-model";
+import { AiToolError, aiActionTargetId, type StoredAiActionProposal } from "./ai/ai-tool-model";
 import { AiReadTools } from "./ai/ai-read-tools";
 import { registerAiRoutes } from "./routes/ai";
 import { registerAccountRoutes } from "./routes/account";
@@ -87,6 +87,78 @@ function clientIp(request: Request) {
   return request.headers.get("cf-connecting-ip")
     ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
     ?? "0.0.0.0";
+}
+
+async function trustedAiModeEnabled(db: D1Database, workspaceId: string, now = new Date()) {
+  try {
+    const row = await db.prepare(
+      "SELECT enabled, expires_at, revision FROM ai_trusted_modes WHERE workspace_id = ? LIMIT 1",
+    ).bind(workspaceId).first<{ enabled: number; expires_at: string | null; revision: number }>();
+    if (!row) return false;
+    return isAiTrustedModeActive({
+      workspace_id: workspaceId,
+      enabled: Boolean(row.enabled),
+      expires_at: row.expires_at,
+      revision: row.revision,
+    }, now, workspaceId);
+  } catch {
+    // Older preview databases may not have the additive trusted-mode table.
+    return false;
+  }
+}
+
+type NoteLifecycleProposal = Extract<StoredAiActionProposal, {
+  tool: "update_note" | "move_note" | "archive_note" | "restore_note" | "delete_note";
+}>;
+
+function isNoteLifecycleProposal(proposal: StoredAiActionProposal): proposal is NoteLifecycleProposal {
+  return proposal.tool === "update_note"
+    || proposal.tool === "move_note"
+    || proposal.tool === "archive_note"
+    || proposal.tool === "restore_note"
+    || proposal.tool === "delete_note";
+}
+
+async function isCommittedNoteAction(db: D1Database, proposal: NoteLifecycleProposal) {
+  const row = await db.prepare(
+    `SELECT patch_json FROM ai_note_action_idempotency
+     WHERE idempotency_key = ? AND workspace_id = ? AND note_id = ? AND base_revision = ?
+     LIMIT 1`,
+  ).bind(
+    aiActionTargetId(proposal.tool, proposal.action_id),
+    proposal.workspace_id,
+    proposal.input.target_note_id,
+    proposal.input.base_revision,
+  ).first<{ patch_json: string }>();
+  return row?.patch_json === stableJson(proposal.input.patch);
+}
+
+function actionResultFromError(actionId: string, error: unknown): AiActionExecutionResult {
+  const candidate = error && typeof error === "object" ? error as { code?: unknown; status?: unknown; retryable?: unknown } : {};
+  const code = typeof candidate.code === "string" && candidate.code.length > 0
+    ? candidate.code.slice(0, 128)
+    : "AI_ACTION_EXECUTION_FAILED";
+  const status = typeof candidate.status === "number" && Number.isInteger(candidate.status) && candidate.status >= 400 && candidate.status <= 599
+    ? candidate.status
+    : 500;
+  const conflict = [
+    "AI_ACTION_CONFLICT",
+    "AI_ACTION_NOTE_CONFLICT",
+    "NOTE_CONFLICT",
+    "DAILY_NOTE_CONFLICT",
+    "NOTE_IDEMPOTENCY_CONFLICT",
+  ].includes(code);
+  const retryable = candidate.retryable === true || code === "AI_ACTION_IN_PROGRESS";
+  return {
+    action_id: actionId,
+    status: conflict ? "conflict" : "failed",
+    ...(retryable ? { retryable: true } : {}),
+    error: {
+      code: conflict ? "AI_ACTION_NOTE_CONFLICT" : code,
+      message: conflict ? "The note changed before the AI action could be executed" : "AI action execution failed",
+      status,
+    },
+  };
 }
 
 function withStaticAssetCachePolicy(request: Request, response: Response) {
@@ -297,6 +369,7 @@ function createOcrExtractor(env: BetaWorkerEnv) {
 }
 
 function createAiChatService(env: BetaWorkerEnv) {
+  const aiEnabled = env.AI_ENABLED?.trim().toLowerCase() === "true";
   const fallback = {
     apiUrl: env.AI_CHAT_API_URL,
     apiKey: env.AI_CHAT_API_KEY,
@@ -312,9 +385,13 @@ function createAiChatService(env: BetaWorkerEnv) {
     if (!personal) throw new ConfigurationError("User secret encryption is not configured");
     return personal;
   };
+  const assertAiEnabled = () => {
+    if (!aiEnabled) throw new ConfigurationError("AI service is disabled");
+  };
   const fallbackStatus = () => new AiChatService(fallback).status();
   return {
     async status(userId?: string) {
+      if (!aiEnabled) throw new ConfigurationError("AI service is disabled");
       if (personal && userId) {
         const status = await personal.status(userId);
         if (status.configured) return status;
@@ -323,23 +400,31 @@ function createAiChatService(env: BetaWorkerEnv) {
       return { ...status, source: status.configured ? "server_default" as const : "unconfigured" as const };
     },
     async getConfig(userId: string) {
+      if (!aiEnabled) throw new ConfigurationError("AI service is disabled");
       const status = personal ? await personal.status(userId) : { configured: false, source: "unconfigured" as const };
       if (status.configured) return status;
       const fallbackConfigured = fallbackStatus().configured;
       return fallbackConfigured ? { configured: true, source: "server_default" as const } : status;
     },
-    saveConfig: (userId: string, input: Parameters<UserAiConfigService["saveConfig"]>[1], requestId: string) =>
-      requirePersonal().saveConfig(userId, input, requestId),
-    testConfig: (userId: string, input: Parameters<UserAiConfigService["testConfig"]>[1], signal: AbortSignal, requestId: string) =>
-      requirePersonal().testConfig(userId, input, signal, requestId),
-    deleteConfig: (userId: string, input: Parameters<UserAiConfigService["deleteConfig"]>[1], requestId: string) =>
-      requirePersonal().deleteConfig(userId, input, requestId),
+    saveConfig(userId: string, input: Parameters<UserAiConfigService["saveConfig"]>[1], requestId: string) {
+      assertAiEnabled();
+      return requirePersonal().saveConfig(userId, input, requestId);
+    },
+    testConfig(userId: string, input: Parameters<UserAiConfigService["testConfig"]>[1], signal: AbortSignal, requestId: string) {
+      assertAiEnabled();
+      return requirePersonal().testConfig(userId, input, signal, requestId);
+    },
+    deleteConfig(userId: string, input: Parameters<UserAiConfigService["deleteConfig"]>[1], requestId: string) {
+      assertAiEnabled();
+      return requirePersonal().deleteConfig(userId, input, requestId);
+    },
     async chat(
       input: Parameters<AiChatService["chat"]>[0],
       signal: AbortSignal,
       userId?: string,
       options?: Parameters<AiChatService["chat"]>[2],
     ) {
+      if (!aiEnabled) throw new ConfigurationError("AI service is disabled");
       const resolved = personal && userId ? await personal.resolve(userId) : null;
       return new AiChatService(resolved ?? fallback).chat(input, signal, options);
     },
@@ -362,12 +447,35 @@ function createAiActionService(env: BetaWorkerEnv) {
   const queue = env.JOBS ? {
     send: (message: any) => env.JOBS!.send(message),
   } : undefined;
+  const actionExecution = {
+    noteService,
+    knowledgeService,
+    collaborationRepository,
+    emailOutboxRepository,
+    queue,
+  };
   const orchestrator = new AiToolOrchestrator({
     repository,
     clock: () => new Date(),
     assertFreshPermission: async (context, proposal) => {
       if (context.role === "viewer") {
         throw new AiToolError("AI_ACTION_PERMISSION_DENIED", "Viewer permission is insufficient", 403);
+      }
+      if (isNoteLifecycleProposal(proposal)) {
+        if (await isCommittedNoteAction(env.DB, proposal)) return;
+        const noteService = createNoteService(env);
+        try {
+          const note = await noteService.get(context, proposal.input.target_note_id);
+          if (note.revision !== proposal.input.base_revision) {
+            throw new AiToolError("AI_ACTION_NOTE_CONFLICT", "The note changed before this AI action was confirmed", 409);
+          }
+        } catch (error) {
+          if (error instanceof AiToolError) throw error;
+          if (error instanceof NoteServiceError && error.code === "NOTE_NOT_FOUND") {
+            throw new AiToolError("AI_ACTION_PERMISSION_DENIED", "The target note is not available in this workspace", 403);
+          }
+          throw error;
+        }
       }
       if (proposal.tool === "send_email" && proposal.input.to_email.endsWith("@blocked.test")) {
         throw new AiToolError("AI_ACTION_RECIPIENT_MISMATCH", "Email recipient changed before execution", 409);
@@ -377,36 +485,54 @@ function createAiActionService(env: BetaWorkerEnv) {
   return {
     ...chat,
     async chat(input: Parameters<AiChatService["chat"]>[0], signal: AbortSignal, userId?: string, workspace?: WorkspaceContext) {
-      return chat.chat(input, signal, userId, userId && workspace ? {
-        proposeActions: async (toolCalls) => orchestrator.proposeMany({
-          workspaceId: workspace.workspaceId,
-          userId,
-          role: workspace.role,
-          capabilities: workspace.capabilities,
-        }, toolCalls),
+      if (env.AI_ENABLED?.trim().toLowerCase() !== "true") {
+        throw new ConfigurationError("AI service is disabled");
+      }
+      const actor = userId && workspace ? {
+        workspaceId: workspace.workspaceId,
+        userId,
+        role: workspace.role,
+        capabilities: workspace.capabilities,
+      } : null;
+      return chat.chat(input, signal, userId, actor ? {
+        proposeActions: async (toolCalls) => orchestrator.proposeMany(
+          actor,
+          toolCalls,
+          { trusted: await trustedAiModeEnabled(env.DB, actor.workspaceId) },
+        ),
+        executeActions: async (proposals) => {
+          const settled = await Promise.allSettled(
+            proposals.map((proposal) => orchestrator.execute(actor, proposal.action_id, actionExecution)),
+          );
+          return settled.map((result, index) => result.status === "fulfilled"
+            ? result.value
+            : actionResultFromError(proposals[index]!.action_id, result.reason));
+        },
         ...(input.read_context ? {
           readTools,
           readContext: {
-            workspaceId: workspace.workspaceId,
-            userId,
+            workspaceId: actor.workspaceId,
+            userId: actor.userId,
             selectedNoteIds: input.read_context.selected_note_ids,
             selectedDatabaseIds: input.read_context.selected_database_ids,
             allowWorkspaceSearch: input.read_context.allow_workspace_search,
-            role: workspace.role,
-            capabilities: workspace.capabilities,
+            role: actor.role,
+            capabilities: actor.capabilities,
           },
         } : {}),
       } : undefined);
     },
     async confirmAction(userId: string, workspace: WorkspaceContext, actionId: string, baseRevision: number, requestId: string) {
+      if (env.AI_ENABLED?.trim().toLowerCase() !== "true") {
+        throw new ConfigurationError("AI service is disabled");
+      }
       const actor = { workspaceId: workspace.workspaceId, userId, role: workspace.role, capabilities: workspace.capabilities };
       try {
         await orchestrator.confirm(actor, actionId, baseRevision);
       } catch (error) {
         if (error instanceof AiToolError && error.code === "AI_ACTION_CONFLICT") {
           const current = await repository.getOwned(userId, workspace.workspaceId, actionId);
-          if (current?.status === "executed") return current;
-          if (current?.status !== "confirmed") throw error;
+          if (!current || !["confirmed", "executing", "executed", "failed", "conflict"].includes(current.status)) throw error;
         } else {
           throw error;
         }
@@ -421,6 +547,9 @@ function createAiActionService(env: BetaWorkerEnv) {
       });
     },
     async rejectAction(userId: string, workspace: WorkspaceContext, actionId: string, baseRevision: number, requestId: string) {
+      if (env.AI_ENABLED?.trim().toLowerCase() !== "true") {
+        throw new ConfigurationError("AI service is disabled");
+      }
       const actor = { workspaceId: workspace.workspaceId, userId, role: workspace.role, capabilities: workspace.capabilities };
       return orchestrator.reject(actor, actionId, baseRevision);
     },

@@ -36,6 +36,7 @@ describe("AI chat tool protocol", () => {
       expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
         "search_notes", "get_note", "list_reminders", "search_databases", "get_database_record",
         "create_note", "create_reminder", "create_notification", "send_email",
+        "update_note", "move_note", "archive_note", "restore_note", "delete_note",
       ]);
       const searchNotesTool = body.tools.find((tool: { function: { name: string } }) => tool.function.name === "search_notes");
       expect(searchNotesTool.function.description).toContain("same query and selected-note scope");
@@ -93,6 +94,7 @@ describe("AI chat tool protocol", () => {
       const body = JSON.parse(String(init?.body));
       expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
         "create_note", "create_reminder", "create_notification", "send_email",
+        "update_note", "move_note", "archive_note", "restore_note", "delete_note",
       ]);
       return Response.json({ choices: [{ message: { content: "ok", tool_calls: [{ id: "read-1", type: "function", function: { name: "search_notes", arguments: "{}" } }] } }] });
     });
@@ -225,12 +227,17 @@ describe("AI chat tool protocol", () => {
         stream: false,
         tool_choice: "auto",
       });
-      expect(body.tools).toHaveLength(4);
+      expect(body.tools).toHaveLength(9);
       expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
         "create_note",
         "create_reminder",
         "create_notification",
         "send_email",
+        "update_note",
+        "move_note",
+        "archive_note",
+        "restore_note",
+        "delete_note",
       ]);
       expect(JSON.stringify(body)).not.toContain("server-only-key");
       return Response.json({ choices: [{ message: { content: "先列出三个最重要的任务。" } }] });
@@ -323,8 +330,36 @@ describe("AI chat tool protocol", () => {
     expect(proposeActions).not.toHaveBeenCalled();
   });
 
+  it("rejects missing, null, empty, and non-object provider arguments", async () => {
+    for (const argumentsValue of [undefined, null, "", "[]", "null", "1"]) {
+      const proposeActions = vi.fn();
+      const service = new AiChatService({
+        apiUrl: "https://ai.example.test/v1/chat/completions",
+        apiKey: "server-only-key",
+        model: "beta-model",
+        fetchImpl: vi.fn(async () => Response.json({
+          choices: [{ message: {
+            content: "invalid",
+            tool_calls: [{
+              id: "bad-args",
+              type: "function",
+              function: { name: "create_note", ...(argumentsValue === undefined ? {} : { arguments: argumentsValue }) },
+            }],
+          } }],
+        })),
+      });
+
+      await expect(service.chat(
+        { messages: [{ role: "user", content: "执行" }] },
+        new AbortController().signal,
+        { proposeActions },
+      )).rejects.toMatchObject({ code: "AI_PROVIDER_INVALID_RESPONSE" });
+      expect(proposeActions).not.toHaveBeenCalled();
+    }
+  });
+
   it("leaves no proposal behind when a later provider tool call is malformed", async () => {
-    const testD1 = await createTestD1({ through: 18 });
+    const testD1 = await createTestD1({ through: 22 });
     disposals.push(testD1.dispose);
     await seedTenants(testD1.db);
     const repository = new D1AiToolRepository(testD1.db);

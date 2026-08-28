@@ -28,6 +28,7 @@ function createRepository(overrides: Record<string, unknown> = {}) {
   return {
     createNote: vi.fn(async (input) => ({ ...serverNote, ...input, revision: 1 })),
     openOrCreateDaily: vi.fn(async (input) => ({ ...serverNote, ...input, daily_date: input.dailyDate, revision: 1 })),
+    hasFolder: vi.fn(async () => true),
     hasDatabase: vi.fn(async () => true),
     getNote: vi.fn(async () => serverNote),
     listNotes: vi.fn(async () => ({ items: [serverNote], nextCursor: null })),
@@ -221,6 +222,38 @@ describe("NoteService", () => {
       { content: "Captured body", target: "database", database_id: "db-other" },
     )).rejects.toMatchObject({ code: "DATABASE_NOT_FOUND", status: 404 });
     expect(repository.createNote).not.toHaveBeenCalled();
+  });
+
+  it("rejects note create and update references outside the current workspace", async () => {
+    const worker = await loadWorker();
+    const repository = createRepository({
+      hasFolder: vi.fn(async (_workspaceId: string, folderId: string) => folderId !== "folder-other"),
+      hasDatabase: vi.fn(async (_workspaceId: string, databaseId: string) => databaseId !== "database-other"),
+    });
+    const Service = worker.NoteService as new (...args: any[]) => any;
+    const service = new Service(repository);
+    const context = { workspaceId: "ws-1", userId: "user-1" };
+
+    await expect(service.create(context, {
+      title: "Cross tenant",
+      content: "Body",
+      folder_id: "folder-other",
+    })).rejects.toMatchObject({ code: "FOLDER_NOT_FOUND", status: 404 });
+    await expect(service.create(context, {
+      title: "Cross tenant",
+      content: "Body",
+      database_id: "database-other",
+    })).rejects.toMatchObject({ code: "DATABASE_NOT_FOUND", status: 404 });
+    await expect(service.update(context, "note-1", {
+      base_revision: 3,
+      folder_id: "folder-other",
+    })).rejects.toMatchObject({ code: "FOLDER_NOT_FOUND", status: 404 });
+    await expect(service.update(context, "note-1", {
+      base_revision: 3,
+      database_id: "database-other",
+    })).rejects.toMatchObject({ code: "DATABASE_NOT_FOUND", status: 404 });
+    expect(repository.createNote).not.toHaveBeenCalled();
+    expect(repository.updateNote).not.toHaveBeenCalled();
   });
 
   it("returns both server and submitted revisions when an update conflicts", async () => {

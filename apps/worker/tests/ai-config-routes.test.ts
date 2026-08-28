@@ -12,7 +12,7 @@ function setup(role: "viewer" | "owner" = "owner") {
     testConfig: vi.fn(async () => ({ ok: true, model: "model", latency_ms: 12 })),
     deleteConfig: vi.fn(async () => ({ deleted: true })),
     chat: vi.fn(async () => ({ message: "已完成", model: "model" })),
-    confirmAction: vi.fn(async (_userId: string, _workspace: unknown, actionId: string, _baseRevision: number) => ({ action_id: actionId, status: "confirmed" })),
+    confirmAction: vi.fn(async (_userId: string, _workspace: unknown, actionId: string, _baseRevision: number) => ({ action_id: actionId, status: "executed" as const })),
     rejectAction: vi.fn(async (_userId: string, _workspace: unknown, actionId: string, _baseRevision: number) => ({ action_id: actionId, rejected: true })),
   };
   const definitions: Array<{ method: string; path: string; minimumRole?: string }> = [];

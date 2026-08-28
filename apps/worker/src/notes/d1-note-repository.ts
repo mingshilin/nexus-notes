@@ -1,5 +1,6 @@
-import type { Note, NoteRevision, UpdateNoteInput } from "@nexus/contracts";
+import { NoteSchema, type Note, type NoteRevision, type UpdateNoteInput } from "@nexus/contracts";
 
+import { stableJson } from "./note-service";
 import type {
   CreateNoteRecordInput,
   NoteRepository,
@@ -34,6 +35,15 @@ function toNote(row: NoteRow): Note {
     is_favorite: Boolean(row.is_favorite),
     is_pinned: Boolean(row.is_pinned),
   };
+}
+
+function parseIdempotentNote(resultJson: string): Note {
+  const value = JSON.parse(resultJson) as Record<string, unknown>;
+  return NoteSchema.parse({
+    ...value,
+    is_favorite: Boolean(value.is_favorite),
+    is_pinned: Boolean(value.is_pinned),
+  });
 }
 
 function isSameCreate(input: CreateNoteRecordInput, existing: Note) {
@@ -85,6 +95,23 @@ export class D1NoteRepository implements NoteRepository {
 
   async createNote(input: CreateNoteRecordInput) {
     if (input.idempotencyKey) {
+      const requestJson = stableJson({
+        title: input.title,
+        content: input.content,
+        folder_id: input.folderId,
+        database_id: input.databaseId,
+        daily_date: input.dailyDate,
+        is_favorite: input.isFavorite,
+        is_pinned: input.isPinned,
+      });
+      const replay = await this.getIdempotentNote({
+        workspaceId: input.workspaceId,
+        noteId: input.id,
+        idempotencyKey: input.idempotencyKey,
+        baseRevision: 1,
+        requestJson,
+      });
+      if (replay) return replay;
       const existing = await this.getNote(input.workspaceId, input.id);
       if (existing) {
         if (isSameCreate(input, existing)) return existing;
@@ -112,7 +139,14 @@ export class D1NoteRepository implements NoteRepository {
       `INSERT INTO notes (
          id, workspace_id, folder_id, database_id, created_by, updated_by, title, content,
          status, is_favorite, is_pinned, daily_date, revision, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, 1, ?, ?)`,
+       )
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, 1, ?, ?
+       WHERE (? IS NULL OR EXISTS (
+         SELECT 1 FROM folders WHERE id = ? AND workspace_id = ?
+       ))
+         AND (? IS NULL OR EXISTS (
+           SELECT 1 FROM databases WHERE id = ? AND workspace_id = ?
+         ))`,
     ).bind(
       note.id,
       note.workspace_id,
@@ -127,6 +161,12 @@ export class D1NoteRepository implements NoteRepository {
       note.daily_date,
       note.created_at,
       note.updated_at,
+      note.folder_id,
+      note.folder_id,
+      note.workspace_id,
+      note.database_id,
+      note.database_id,
+      note.workspace_id,
     );
     const insertRevision = this.db.prepare(
       `INSERT INTO note_revisions (
@@ -153,6 +193,31 @@ export class D1NoteRepository implements NoteRepository {
          attachment_names, ocr_text, revision, updated_at
        ) VALUES (?, ?, 'note', ?, ?, ?, '', '', '', '', 1, ?)`,
     ).bind(`search:note:${note.id}`, note.workspace_id, note.id, note.title, note.content, note.updated_at);
+    const idempotencyMarker = input.idempotencyKey
+      ? this.db.prepare(
+        `INSERT INTO ai_note_action_idempotency
+           (idempotency_key, workspace_id, note_id, base_revision, result_revision, patch_json, result_json, created_at)
+         SELECT ?, workspace_id, id, 1, revision, ?, ?, ?
+         FROM notes
+         WHERE workspace_id = ? AND id = ? AND revision = 1 AND deleted_at IS NULL
+         ON CONFLICT(idempotency_key) DO NOTHING`,
+      ).bind(
+        input.idempotencyKey,
+        stableJson({
+          title: input.title,
+          content: input.content,
+          folder_id: input.folderId,
+          database_id: input.databaseId,
+          daily_date: input.dailyDate,
+          is_favorite: input.isFavorite,
+          is_pinned: input.isPinned,
+        }),
+        JSON.stringify(note),
+        input.now,
+        input.workspaceId,
+        input.id,
+      )
+      : null;
 
     try {
       await this.db.batch([
@@ -161,9 +226,26 @@ export class D1NoteRepository implements NoteRepository {
         insertSyncChange,
         insertSearchDocument,
         ...this.auditStatements(input, "note.created", note.id, 1, input.now),
+        ...(idempotencyMarker ? [idempotencyMarker] : []),
       ]);
     } catch (error) {
       if (input.idempotencyKey) {
+        const committedReplay = await this.getIdempotentNote({
+          workspaceId: input.workspaceId,
+          noteId: input.id,
+          idempotencyKey: input.idempotencyKey,
+          baseRevision: 1,
+          requestJson: stableJson({
+            title: input.title,
+            content: input.content,
+            folder_id: input.folderId,
+            database_id: input.databaseId,
+            daily_date: input.dailyDate,
+            is_favorite: input.isFavorite,
+            is_pinned: input.isPinned,
+          }),
+        });
+        if (committedReplay) return committedReplay;
         const replay = await this.getNote(input.workspaceId, input.id);
         if (replay && isSameCreate(input, replay)) return replay;
       }
@@ -194,6 +276,13 @@ export class D1NoteRepository implements NoteRepository {
     return Boolean(row);
   }
 
+  async hasFolder(workspaceId: string, folderId: string) {
+    const row = await this.db.prepare(
+      "SELECT 1 AS present FROM folders WHERE workspace_id = ? AND id = ? LIMIT 1",
+    ).bind(workspaceId, folderId).first<{ present: number }>();
+    return Boolean(row);
+  }
+
   getNote(workspaceId: string, noteId: string) {
     return this.db.prepare(
       `SELECT ${NOTE_COLUMNS}
@@ -201,6 +290,35 @@ export class D1NoteRepository implements NoteRepository {
        WHERE workspace_id = ? AND id = ? AND deleted_at IS NULL
        LIMIT 1`,
     ).bind(workspaceId, noteId).first<NoteRow>().then((row) => row ? toNote(row) : null);
+  }
+
+  async getIdempotentNote(input: {
+    workspaceId: string;
+    noteId: string;
+    idempotencyKey: string;
+    baseRevision: number;
+    requestJson: string;
+  }) {
+    const row = await this.db.prepare(
+      `SELECT workspace_id, note_id, base_revision, patch_json, result_json
+       FROM ai_note_action_idempotency
+       WHERE idempotency_key = ?
+       LIMIT 1`,
+    ).bind(input.idempotencyKey).first<{
+      workspace_id: string;
+      note_id: string;
+      base_revision: number;
+      patch_json: string;
+      result_json: string;
+    }>();
+    if (!row) return null;
+    if (row.workspace_id !== input.workspaceId
+      || row.note_id !== input.noteId
+      || row.base_revision !== input.baseRevision
+      || row.patch_json !== input.requestJson) {
+      throw new Error("NOTE_IDEMPOTENCY_CONFLICT");
+    }
+    return parseIdempotentNote(row.result_json);
   }
 
   private activeDailyNote(workspaceId: string, dailyDate: string | null) {
@@ -308,8 +426,21 @@ export class D1NoteRepository implements NoteRepository {
     patch: Omit<UpdateNoteInput, "base_revision">;
     now: string;
     requestId?: string;
+    idempotencyKey?: string;
   }) {
     const { source = "autosave", ...changes } = input.patch;
+    const patchJson = stableJson(changes);
+    const mutationToken = input.idempotencyKey ? crypto.randomUUID() : undefined;
+    if (input.idempotencyKey) {
+      const replay = await this.getIdempotentNote({
+        workspaceId: input.workspaceId,
+        noteId: input.noteId,
+        idempotencyKey: input.idempotencyKey,
+        baseRevision: input.baseRevision,
+        requestJson: patchJson,
+      });
+      if (replay) return { note: replay, current: null };
+    }
     const assignments: string[] = [];
     const bindings: unknown[] = [];
     const add = (column: string, value: unknown) => {
@@ -327,20 +458,36 @@ export class D1NoteRepository implements NoteRepository {
     if (changes.status !== undefined) add("status", changes.status);
 
     const nextRevision = input.baseRevision + 1;
+    const idempotencyGuard = input.idempotencyKey
+      ? " AND NOT EXISTS (SELECT 1 FROM ai_note_action_idempotency WHERE idempotency_key = ?)"
+      : "";
+    const actionAssignment = mutationToken ? ", ai_last_mutation_token = ?" : "";
     const update = this.db.prepare(
       `UPDATE notes
        SET ${assignments.join(", ")}, updated_by = ?, updated_at = ?, revision = revision + 1
+           ${actionAssignment}
        WHERE workspace_id = ? AND id = ? AND revision = ? AND deleted_at IS NULL
+         AND (? IS NULL OR EXISTS (SELECT 1 FROM folders WHERE id = ? AND workspace_id = ?))
+         AND (? IS NULL OR EXISTS (SELECT 1 FROM databases WHERE id = ? AND workspace_id = ?))
+         ${idempotencyGuard}
        RETURNING ${NOTE_COLUMNS}`,
     ).bind(
       ...bindings,
       input.userId,
       input.now,
+      ...(mutationToken ? [mutationToken] : []),
       input.workspaceId,
       input.noteId,
       input.baseRevision,
+      changes.folder_id ?? null,
+      changes.folder_id ?? null,
+      input.workspaceId,
+      changes.database_id ?? null,
+      changes.database_id ?? null,
+      input.workspaceId,
+      ...(input.idempotencyKey ? [input.idempotencyKey] : []),
     );
-    const insertRevision = this.revisionFromCurrentNote(input, source, nextRevision);
+    const insertRevision = this.revisionFromCurrentNote(input, source, nextRevision, mutationToken);
     const insertSyncChange = this.syncFromCurrentNote(
       input.workspaceId,
       input.noteId,
@@ -349,8 +496,34 @@ export class D1NoteRepository implements NoteRepository {
       "update",
       JSON.stringify(changes),
       input.now,
+      mutationToken,
     );
-    const upsertSearchDocument = this.searchFromCurrentNote(input, nextRevision);
+    const upsertSearchDocument = this.searchFromCurrentNote(input, nextRevision, mutationToken);
+    const marker = input.idempotencyKey
+      ? this.db.prepare(
+        `INSERT INTO ai_note_action_idempotency
+           (idempotency_key, workspace_id, note_id, base_revision, result_revision, patch_json, result_json, created_at)
+         SELECT ?, workspace_id, id, ?, revision, ?, json_object(
+           'id', id, 'workspace_id', workspace_id, 'folder_id', folder_id, 'database_id', database_id,
+           'created_by', created_by, 'updated_by', updated_by, 'title', title, 'content', content,
+           'status', status, 'is_favorite', is_favorite, 'is_pinned', is_pinned,
+           'daily_date', daily_date, 'revision', revision, 'created_at', created_at, 'updated_at', updated_at
+         ), ?
+         FROM notes
+         WHERE workspace_id = ? AND id = ? AND revision = ?
+           AND ai_last_mutation_token = ? AND deleted_at IS NULL
+           ON CONFLICT(idempotency_key) DO NOTHING`,
+      ).bind(
+        input.idempotencyKey,
+        input.baseRevision,
+        patchJson,
+        input.now,
+        input.workspaceId,
+        input.noteId,
+        nextRevision,
+        mutationToken,
+      )
+      : null;
     const results = await this.db.batch<NoteRow>([
       update,
       insertRevision,
@@ -362,15 +535,45 @@ export class D1NoteRepository implements NoteRepository {
         input.noteId,
         nextRevision,
         input.now,
-        `EXISTS (SELECT 1 FROM notes
-          WHERE workspace_id = ? AND id = ? AND revision = ?
-            AND updated_by = ? AND updated_at = ? AND deleted_at IS NULL)`,
-        [input.workspaceId, input.noteId, nextRevision, input.userId, input.now],
+        input.idempotencyKey
+          ? `EXISTS (SELECT 1 FROM notes
+              WHERE workspace_id = ? AND id = ? AND revision = ?
+                AND ai_last_mutation_token = ? AND deleted_at IS NULL)
+             AND NOT EXISTS (
+               SELECT 1 FROM ai_note_action_idempotency WHERE idempotency_key = ?
+             )`
+          : `EXISTS (SELECT 1 FROM notes
+              WHERE workspace_id = ? AND id = ? AND revision = ?
+                AND updated_by = ? AND updated_at = ? AND deleted_at IS NULL)`,
+        input.idempotencyKey
+          ? [input.workspaceId, input.noteId, nextRevision, mutationToken, input.idempotencyKey]
+          : [input.workspaceId, input.noteId, nextRevision, input.userId, input.now],
       ),
+      ...(marker ? [marker] : []),
     ]);
     const row = firstResultRow(results[0]);
 
     if (!row) {
+      if (input.idempotencyKey) {
+        const committed = await this.db.prepare(
+          `SELECT workspace_id, note_id, base_revision, result_revision, patch_json, result_json
+           FROM ai_note_action_idempotency WHERE idempotency_key = ? LIMIT 1`,
+        ).bind(input.idempotencyKey).first<{
+          workspace_id: string;
+          note_id: string;
+          base_revision: number;
+          result_revision: number;
+          patch_json: string;
+          result_json: string;
+        }>();
+        if (committed
+          && committed.workspace_id === input.workspaceId
+          && committed.note_id === input.noteId
+          && committed.base_revision === input.baseRevision
+          && committed.patch_json === patchJson) {
+          return { note: parseIdempotentNote(committed.result_json), current: null };
+        }
+      }
       return { note: null, current: await this.getNote(input.workspaceId, input.noteId) };
     }
     const note = toNote(row);
@@ -524,10 +727,14 @@ export class D1NoteRepository implements NoteRepository {
   }
 
   private revisionFromCurrentNote(
-    input: { workspaceId: string; noteId: string; userId: string; now: string },
+    input: { workspaceId: string; noteId: string; userId: string; now: string; idempotencyKey?: string },
     source: NoteRevision["source"],
     revision: number,
+    mutationToken?: string,
   ) {
+    const mutationCondition = mutationToken
+      ? " AND ai_last_mutation_token = ?"
+      : " AND updated_by = ? AND updated_at = ?";
     return this.db.prepare(
       `INSERT INTO note_revisions (
          id, workspace_id, note_id, revision, title, content, source, created_by, created_at
@@ -535,7 +742,9 @@ export class D1NoteRepository implements NoteRepository {
        SELECT ?, workspace_id, id, revision, title, content, ?, ?, ?
        FROM notes
        WHERE workspace_id = ? AND id = ? AND revision = ?
-         AND updated_by = ? AND updated_at = ? AND deleted_at IS NULL`,
+         AND deleted_at IS NULL
+         AND NOT EXISTS (SELECT 1 FROM note_revisions WHERE note_id = ? AND revision = ?)
+         ${mutationCondition}`,
     ).bind(
       this.createId(),
       source,
@@ -544,8 +753,9 @@ export class D1NoteRepository implements NoteRepository {
       input.workspaceId,
       input.noteId,
       revision,
-      input.userId,
-      input.now,
+      input.noteId,
+      revision,
+      ...(mutationToken ? [mutationToken] : [input.userId, input.now]),
     );
   }
 
@@ -557,7 +767,11 @@ export class D1NoteRepository implements NoteRepository {
     kind: "update",
     payload: string,
     now: string,
+    mutationToken?: string,
   ) {
+    const mutationCondition = mutationToken
+      ? " AND ai_last_mutation_token = ?"
+      : " AND updated_by = ? AND updated_at = ?";
     return this.db.prepare(
       `INSERT INTO sync_changes (
          workspace_id, entity_type, entity_id, revision, kind, payload_json, created_at
@@ -565,14 +779,19 @@ export class D1NoteRepository implements NoteRepository {
        SELECT workspace_id, 'note', id, revision, ?, ?, ?
        FROM notes
        WHERE workspace_id = ? AND id = ? AND revision = ?
-         AND updated_by = ? AND updated_at = ? AND deleted_at IS NULL`,
-    ).bind(kind, payload, now, workspaceId, noteId, revision, userId, now);
+         AND deleted_at IS NULL
+         ${mutationCondition}`,
+    ).bind(kind, payload, now, workspaceId, noteId, revision, ...(mutationToken ? [mutationToken] : [userId, now]));
   }
 
   private searchFromCurrentNote(
-    input: { workspaceId: string; noteId: string; userId: string; now: string },
+    input: { workspaceId: string; noteId: string; userId: string; now: string; idempotencyKey?: string },
     revision: number,
+    mutationToken?: string,
   ) {
+    const mutationCondition = mutationToken
+      ? " AND ai_last_mutation_token = ?"
+      : " AND updated_by = ? AND updated_at = ?";
     return this.db.prepare(
       `INSERT INTO search_documents (
          id, workspace_id, entity_type, entity_id, title, content, tags, properties,
@@ -581,13 +800,14 @@ export class D1NoteRepository implements NoteRepository {
        SELECT 'search:note:' || id, workspace_id, 'note', id, title, content, '', '', '', '', revision, updated_at
        FROM notes
        WHERE workspace_id = ? AND id = ? AND revision = ?
-         AND updated_by = ? AND updated_at = ? AND deleted_at IS NULL
+         AND deleted_at IS NULL
+         ${mutationCondition}
        ON CONFLICT(workspace_id, entity_type, entity_id) DO UPDATE SET
          title = excluded.title,
          content = excluded.content,
          revision = excluded.revision,
          updated_at = excluded.updated_at`,
-    ).bind(input.workspaceId, input.noteId, revision, input.userId, input.now);
+    ).bind(input.workspaceId, input.noteId, revision, ...(mutationToken ? [mutationToken] : [input.userId, input.now]));
   }
 
   private auditStatements(

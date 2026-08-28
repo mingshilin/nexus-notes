@@ -70,6 +70,11 @@ describe("AI chat proxy", () => {
         "create_reminder",
         "create_notification",
         "send_email",
+        "update_note",
+        "move_note",
+        "archive_note",
+        "restore_note",
+        "delete_note",
       ]);
       expect(JSON.stringify(body)).not.toContain("server-only-key");
       return Response.json({
@@ -86,6 +91,125 @@ describe("AI chat proxy", () => {
     await expect(service.chat({ messages: [{ role: "user", content: "整理我的任务" }] }, new AbortController().signal))
       .resolves.toEqual({ message: "先列出三个最重要的任务。", model: "beta-model" });
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("executes trusted safe-write proposals through the supplied action runner", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({
+      choices: [{
+        message: {
+          content: "已创建笔记。",
+          tool_calls: [{
+            id: "call-1",
+            type: "function",
+            function: { name: "create_note", arguments: JSON.stringify({ title: "Roadmap", content: "Body" }) },
+          }],
+        },
+      }],
+    }));
+    const proposal = {
+      action_id: "action-1",
+      tool: "create_note" as const,
+      summary: "创建笔记待确认",
+      input: { title: "Roadmap", content: "Body" },
+      requires_confirmation: false,
+      expires_at: "2099-08-25T01:00:00.000Z",
+    };
+    const executeActions = vi.fn(async () => [{ action_id: "action-1", status: "executed" as const, entity_id: "note-1", revision: 1 }]);
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl,
+    });
+
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "创建路线图" }] },
+      new AbortController().signal,
+      { proposeActions: vi.fn(async () => [proposal]), executeActions },
+    )).resolves.toEqual({
+      message: "已创建笔记。",
+      model: "beta-model",
+      action_results: [{ action_id: "action-1", status: "executed", entity_id: "note-1", revision: 1 }],
+    });
+    expect(executeActions).toHaveBeenCalledWith([proposal]);
+  });
+
+  it("returns trusted business failures without hiding partial action results", async () => {
+    const proposal = {
+      action_id: "action-failed",
+      tool: "create_note" as const,
+      summary: "创建笔记待确认",
+      input: { title: "Roadmap", content: "Body" },
+      requires_confirmation: false,
+      expires_at: "2099-08-25T01:00:00.000Z",
+    };
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: "已创建笔记。",
+        tool_calls: [{
+          id: "call-failed", type: "function",
+          function: { name: "create_note", arguments: JSON.stringify({ title: "Roadmap", content: "Body" }) },
+        }],
+      } }] })),
+    });
+
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "创建路线图" }] },
+      new AbortController().signal,
+      {
+        proposeActions: vi.fn(async () => [proposal]),
+        executeActions: vi.fn(async () => [{
+          action_id: "action-failed",
+          status: "failed" as const,
+          error: { code: "AI_ACTION_EXECUTION_FAILED", message: "safe", status: 500 },
+        }]),
+      },
+    )).resolves.toMatchObject({
+      message: "AI 操作完成 0 个，1 个未执行。",
+      action_results: [{ action_id: "action-failed", status: "failed" }],
+    });
+  });
+
+  it("preserves retryable in-progress results in the chat response", async () => {
+    const proposal = {
+      action_id: "action-in-progress",
+      tool: "create_note" as const,
+      summary: "创建笔记待确认",
+      input: { title: "Roadmap", content: "Body" },
+      requires_confirmation: false,
+      expires_at: "2099-08-25T01:00:00.000Z",
+    };
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: "创建路线图",
+        tool_calls: [{
+          id: "call-in-progress", type: "function",
+          function: { name: "create_note", arguments: JSON.stringify({ title: "Roadmap", content: "Body" }) },
+        }],
+      } }] })),
+    });
+
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "创建路线图" }] },
+      new AbortController().signal,
+      {
+        proposeActions: vi.fn(async () => [proposal]),
+        executeActions: vi.fn(async () => [{
+          action_id: "action-in-progress",
+          status: "failed" as const,
+          retryable: true,
+          error: { code: "AI_ACTION_IN_PROGRESS", message: "safe", status: 409 },
+        }]),
+      },
+    )).resolves.toMatchObject({
+      action_results: [{ action_id: "action-in-progress", retryable: true }],
+    });
   });
 
   it("rejects an HTTP provider URL before sending the API key", async () => {

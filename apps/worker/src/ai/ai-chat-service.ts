@@ -1,8 +1,10 @@
 import {
   AiChatResponseSchema,
   AiActionToolNameSchema,
+  AiActionExecutionResultSchema,
   AiReadResultSchema,
   AiReadToolNameSchema,
+  type AiActionExecutionResult,
   type AiActionProposal,
   type AiChatInput,
   type AiChatResponse,
@@ -23,6 +25,7 @@ export interface AiChatServiceOptions {
 
 export interface AiChatToolProposalOptions {
   proposeActions?(toolCalls: Array<{ name: string; arguments: unknown }>): Promise<AiActionProposal[]>;
+  executeActions?(proposals: AiActionProposal[]): Promise<AiActionExecutionResult[]>;
   readTools?: {
     execute(tool: AiReadToolName, input: unknown, context: AiReadExecutionContext, signal?: AbortSignal): Promise<AiReadResult>;
   };
@@ -71,7 +74,9 @@ function providerMessage(payload: unknown) {
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function toolParameters(properties: Record<string, unknown>, required: string[] = []) {
@@ -83,16 +88,21 @@ function toolParameters(properties: Record<string, unknown>, required: string[] 
   };
 }
 
+function actionToolParameters(properties: Record<string, unknown>, required: string[] = []) {
+  return toolParameters({ workspace_id: { type: "string", minLength: 1, maxLength: 128 }, ...properties }, required);
+}
+
 const ACTION_TOOL_DEFINITIONS = [
   {
     type: "function",
     function: {
       name: "create_note",
       description: "Propose creating a note.",
-      parameters: toolParameters({
+      parameters: actionToolParameters({
         title: { type: "string" },
         content: { type: "string" },
         folder_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+        database_id: { anyOf: [{ type: "string" }, { type: "null" }] },
         daily_date: { anyOf: [{ type: "string" }, { type: "null" }] },
       }),
     },
@@ -102,7 +112,7 @@ const ACTION_TOOL_DEFINITIONS = [
     function: {
       name: "create_reminder",
       description: "Propose creating a reminder.",
-      parameters: toolParameters({
+      parameters: actionToolParameters({
         note_id: { anyOf: [{ type: "string" }, { type: "null" }] },
         title: { type: "string" },
         remind_at: { type: "string" },
@@ -115,7 +125,7 @@ const ACTION_TOOL_DEFINITIONS = [
     function: {
       name: "create_notification",
       description: "Propose creating a notification.",
-      parameters: toolParameters({
+      parameters: actionToolParameters({
         title: { type: "string" },
         body_text: { type: "string" },
       }),
@@ -126,11 +136,86 @@ const ACTION_TOOL_DEFINITIONS = [
     function: {
       name: "send_email",
       description: "Propose sending an email.",
-      parameters: toolParameters({
+      parameters: actionToolParameters({
         to_email: { type: "string" },
         subject: { type: "string" },
         body_text: { type: "string" },
       }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_note",
+      description: "Propose updating fields on a note. The target note ID and current base revision are required; unknown patch fields are rejected.",
+      parameters: actionToolParameters({
+        target_note_id: { type: "string", minLength: 1 },
+        base_revision: { type: "integer", minimum: 1 },
+        patch: {
+          type: "object",
+          additionalProperties: false,
+          minProperties: 1,
+          properties: {
+            title: { type: "string", maxLength: 160 },
+            content: { type: "string", maxLength: 20000 },
+            folder_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+            database_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+            daily_date: { anyOf: [{ type: "string" }, { type: "null" }] },
+            is_favorite: { type: "boolean" },
+            is_pinned: { type: "boolean" },
+          },
+        },
+      }, ["target_note_id", "base_revision", "patch"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "move_note",
+      description: "Propose moving a note to a folder. The target note ID, current base revision, and folder ID are required.",
+      parameters: actionToolParameters({
+        target_note_id: { type: "string", minLength: 1 },
+        base_revision: { type: "integer", minimum: 1 },
+        patch: {
+          type: "object",
+          additionalProperties: false,
+          properties: { folder_id: { anyOf: [{ type: "string" }, { type: "null" }] } },
+          required: ["folder_id"],
+        },
+      }, ["target_note_id", "base_revision", "patch"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "archive_note",
+      description: "Propose archiving a note. This action always requires confirmation.",
+      parameters: actionToolParameters({
+        target_note_id: { type: "string", minLength: 1 },
+        base_revision: { type: "integer", minimum: 1 },
+      }, ["target_note_id", "base_revision"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "restore_note",
+      description: "Propose restoring a note to active status. This action always requires confirmation.",
+      parameters: actionToolParameters({
+        target_note_id: { type: "string", minLength: 1 },
+        base_revision: { type: "integer", minimum: 1 },
+      }, ["target_note_id", "base_revision"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "delete_note",
+      description: "Propose moving a note to the trash without permanently deleting its content or database membership. This action always requires confirmation.",
+      parameters: actionToolParameters({
+        target_note_id: { type: "string", minLength: 1 },
+        base_revision: { type: "integer", minimum: 1 },
+      }, ["target_note_id", "base_revision"]),
     },
   },
 ] as const;
@@ -229,8 +314,11 @@ function providerToolCalls(payload: unknown, allowedTools: ReadonlySet<string>):
     seenIds.add(id);
     const rawArguments = functionCall.arguments;
     if (typeof rawArguments === "string") {
+      if (!rawArguments.trim()) return null;
       try {
-        toolCalls.push({ id, name, arguments: rawArguments.trim() ? JSON.parse(rawArguments) : {} });
+        const parsedArguments = JSON.parse(rawArguments);
+        if (!isPlainObject(parsedArguments)) return null;
+        toolCalls.push({ id, name, arguments: parsedArguments });
         continue;
       } catch {
         return null;
@@ -240,10 +328,6 @@ function providerToolCalls(payload: unknown, allowedTools: ReadonlySet<string>):
       toolCalls.push({ id, name, arguments: rawArguments });
       continue;
     }
-    if (rawArguments === undefined || rawArguments === null) {
-      toolCalls.push({ id, name, arguments: {} });
-      continue;
-    }
     return null;
   }
   return toolCalls;
@@ -251,6 +335,17 @@ function providerToolCalls(payload: unknown, allowedTools: ReadonlySet<string>):
 
 function toolFallbackMessage(count: number) {
   return count === 1 ? "已生成 1 个待确认操作。" : `已生成 ${count} 个待确认操作。`;
+}
+
+function toolCompletedMessage(count: number) {
+  return count === 1 ? "已完成 1 个 AI 操作。" : `已完成 ${count} 个 AI 操作。`;
+}
+
+function toolResultMessage(results: AiActionExecutionResult[]) {
+  const completed = results.filter((result) => result.status === "executed").length;
+  const incomplete = results.length - completed;
+  if (incomplete === 0) return toolCompletedMessage(completed);
+  return `AI 操作完成 ${completed} 个，${incomplete} 个未执行。`;
 }
 
 export class AiChatService {
@@ -407,6 +502,7 @@ export class AiChatService {
         }
 
         let proposals: AiActionProposal[] = [];
+        let actionResults: AiActionExecutionResult[] = [];
         if (actionCalls.length > 0) {
           if (!options.proposeActions) {
             throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned tool calls without a proposal handler", 502, false);
@@ -422,9 +518,25 @@ export class AiChatService {
           if (!Array.isArray(proposals) || proposals.length !== actionCalls.length) {
             throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned an invalid tool call", 502, false);
           }
+          const autoProposals = proposals.filter((proposal) => !proposal.requires_confirmation);
+          if (autoProposals.length > 0 && options.executeActions) {
+            const executionResults = await options.executeActions(autoProposals);
+            if (executionResults.length !== autoProposals.length
+              || executionResults.some((result) => !AiActionExecutionResultSchema.safeParse(result).success)) {
+              throw new AiChatServiceError("AI_ACTION_EXECUTION_FAILED", "A trusted AI action could not be completed", 502, true);
+            }
+            actionResults = executionResults.map((result) => AiActionExecutionResultSchema.parse(result));
+            proposals = proposals.filter((proposal) => proposal.requires_confirmation);
+          }
         }
 
-        const message = providerMessage(payload) ?? (actionCalls.length > 0 ? toolFallbackMessage(actionCalls.length) : null);
+        const hasIncompleteAction = actionResults.some((result) => result.status !== "executed");
+        const message = hasIncompleteAction
+          ? toolResultMessage(actionResults)
+          : providerMessage(payload)
+          ?? (proposals.length > 0
+            ? toolFallbackMessage(proposals.length)
+            : actionResults.length > 0 ? toolResultMessage(actionResults) : null);
         if (!message || message.length > 8_000) {
           throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned no usable message", 502, false);
         }
@@ -432,6 +544,7 @@ export class AiChatService {
           message,
           model,
           ...(proposals.length ? { action_proposals: proposals } : {}),
+          ...(actionResults.length ? { action_results: actionResults } : {}),
           ...(readResults.length ? { read_results: readResults } : {}),
         });
         if (!result.success) {

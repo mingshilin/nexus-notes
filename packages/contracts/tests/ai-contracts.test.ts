@@ -25,6 +25,15 @@ describe("AI chat contracts", () => {
       message: "建议先处理今天的三项任务。",
       model: "beta-model",
     });
+    expect(AiChatResponseSchema.parse({
+      message: "部分操作未执行。",
+      model: "beta-model",
+      action_results: [{
+        action_id: "action-1",
+        status: "failed",
+        error: { code: "AI_ACTION_EXECUTION_FAILED", message: "safe", status: 500 },
+      }],
+    }).action_results).toHaveLength(1);
   });
 
   it("keeps AI read scopes and page sizes within the runtime bounds", () => {

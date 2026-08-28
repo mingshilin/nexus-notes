@@ -11,6 +11,7 @@ export interface BetaWorkerEnv {
   AI_CHAT_API_URL?: string;
   AI_CHAT_API_KEY?: string;
   AI_CHAT_MODEL?: string;
+  AI_ENABLED?: string;
   USER_SECRETS_ENCRYPTION_KEY?: string;
   WEB_PUSH_VAPID_PUBLIC_KEY?: string;
   WEB_PUSH_VAPID_PRIVATE_KEY?: string;

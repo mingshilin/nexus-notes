@@ -1,5 +1,6 @@
 import {
   AiActionProposalSchema,
+  type AiActionExecutionResult,
   AiActionToolNameSchema,
   type AiActionProposal,
   type AiActionStatus,
@@ -17,11 +18,18 @@ type StoredProposalBase = {
   user_id: string;
   workspace_id: string;
   status: AiActionStatus;
+  requires_confirmation: boolean;
   idempotency_key: string;
   revision: number;
   expires_at: string;
   created_at: string;
   updated_at: string;
+  execution_result: AiActionExecutionResult | null;
+  error_code: string | null;
+  error_message: string | null;
+  error_status: number | null;
+  execution_claim_token: string | null;
+  execution_lease_until: string | null;
 };
 
 type StoredProposalByTool<TTool extends AiActionToolName> = StoredProposalBase & {
@@ -39,6 +47,7 @@ export interface ProposalMutationInput {
   actionId: string;
   baseRevision: number;
   now: string;
+  executionClaimToken?: string;
 }
 
 export interface InsertProposalInput {
@@ -49,6 +58,13 @@ export interface InsertProposalInput {
   input: AiToolInput;
   expiresAt: string;
   now: string;
+  requiresConfirmation?: boolean;
+}
+
+export interface AiActionErrorRecord {
+  code: string;
+  message: string;
+  status: number;
 }
 
 export interface AiToolRepositoryPort {
@@ -56,7 +72,7 @@ export interface AiToolRepositoryPort {
   insertProposal(input: InsertProposalInput): Promise<StoredAiActionProposal>;
   insertProposals(input: InsertProposalInput[]): Promise<StoredAiActionProposal[]>;
   claimConfirmation(input: ProposalMutationInput): Promise<StoredAiActionProposal | null>;
-  markCompleted(input: ProposalMutationInput): Promise<StoredAiActionProposal | null>;
+  claimExecution(input: ProposalMutationInput): Promise<StoredAiActionProposal | null>;
   completeEmailAction(input: ProposalMutationInput, outbox: {
     actionId: string;
     userId: string;
@@ -67,20 +83,24 @@ export interface AiToolRepositoryPort {
     now: string;
   }): Promise<StoredAiActionProposal | null>;
   markRejected(input: ProposalMutationInput): Promise<StoredAiActionProposal | null>;
-  markFailed(input: ProposalMutationInput): Promise<StoredAiActionProposal | null>;
+  markCompleted(input: ProposalMutationInput, result?: AiActionExecutionResult): Promise<StoredAiActionProposal | null>;
+  markFailed(input: ProposalMutationInput, error?: AiActionErrorRecord): Promise<StoredAiActionProposal | null>;
+  markConflict(input: ProposalMutationInput, error?: AiActionErrorRecord): Promise<StoredAiActionProposal | null>;
 }
 
 export class AiToolError extends Error {
-  readonly retryable = false;
+  readonly retryable: boolean;
 
   constructor(
     readonly code: string,
     message: string,
     readonly status = 400,
     readonly details?: Record<string, unknown>,
+    retryable = false,
   ) {
     super(message);
     this.name = "AiToolError";
+    this.retryable = retryable;
   }
 }
 
@@ -92,13 +112,24 @@ export function assertAiToolName(name: string): AiActionToolName {
   return parsed.data;
 }
 
-export function validateAiActionProposal(actionId: string, tool: AiActionToolName, input: unknown, expiresAt: string, summary: string) {
+export function aiActionTargetId(tool: AiActionToolName, actionId: string) {
+  return `${tool.replaceAll("_", "-")}:${actionId}`;
+}
+
+export function validateAiActionProposal(
+  actionId: string,
+  tool: AiActionToolName,
+  input: unknown,
+  expiresAt: string,
+  summary: string,
+  requiresConfirmation = true,
+) {
   return AiActionProposalSchema.parse({
     action_id: actionId,
     tool,
     input,
     summary,
-    requires_confirmation: true,
+    requires_confirmation: requiresConfirmation,
     expires_at: expiresAt,
   });
 }

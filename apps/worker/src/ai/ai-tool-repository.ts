@@ -1,4 +1,4 @@
-import type { AiActionStatus } from "@nexus/contracts";
+import { AiActionExecutionResultSchema, type AiActionExecutionResult, type AiActionStatus } from "@nexus/contracts";
 
 import {
   type AiToolRepositoryPort,
@@ -18,6 +18,16 @@ function summaryForTool(tool: StoredAiActionProposal["tool"]) {
       return "创建通知待确认";
     case "send_email":
       return "发送邮件待确认";
+    case "update_note":
+      return "更新笔记待确认";
+    case "move_note":
+      return "移动笔记待确认";
+    case "archive_note":
+      return "归档笔记待确认";
+    case "restore_note":
+      return "恢复笔记待确认";
+    case "delete_note":
+      return "移入回收站待确认";
   }
 }
 
@@ -28,15 +38,23 @@ interface ProposalRow {
   tool: StoredAiActionProposal["tool"];
   input_json: string;
   status: AiActionStatus;
+  requires_confirmation: number;
   idempotency_key: string;
   revision: number;
   expires_at: string;
   created_at: string;
   updated_at: string;
+  result_json: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  error_status: number | null;
+  execution_claim_token: string | null;
+  execution_lease_until: string | null;
 }
 
 const proposalColumns = `id, user_id, workspace_id, tool, input_json, status,
-  idempotency_key, revision, expires_at, created_at, updated_at`;
+  requires_confirmation, idempotency_key, revision, expires_at, created_at, updated_at,
+  result_json, error_code, error_message, error_status, execution_claim_token, execution_lease_until`;
 
 function parseStoredProposal(row: ProposalRow): StoredAiActionProposal {
   const validated = validateAiActionProposal(
@@ -45,17 +63,28 @@ function parseStoredProposal(row: ProposalRow): StoredAiActionProposal {
     JSON.parse(row.input_json),
     row.expires_at,
     summaryForTool(row.tool),
+    Boolean(row.requires_confirmation),
   );
+  const executionResult = row.result_json
+    ? AiActionExecutionResultSchema.parse(JSON.parse(row.result_json))
+    : null;
   const base = {
     action_id: row.id,
     user_id: row.user_id,
     workspace_id: row.workspace_id,
     status: row.status,
+    requires_confirmation: Boolean(row.requires_confirmation),
     idempotency_key: row.idempotency_key,
     revision: row.revision,
     expires_at: row.expires_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    execution_result: executionResult,
+    error_code: row.error_code,
+    error_message: row.error_message,
+    error_status: row.error_status,
+    execution_claim_token: row.execution_claim_token,
+    execution_lease_until: row.execution_lease_until,
   };
   switch (validated.tool) {
     case "create_note":
@@ -66,11 +95,28 @@ function parseStoredProposal(row: ProposalRow): StoredAiActionProposal {
       return { ...base, tool: validated.tool, input: validated.input };
     case "send_email":
       return { ...base, tool: validated.tool, input: validated.input };
+    case "update_note":
+      return { ...base, tool: validated.tool, input: validated.input };
+    case "move_note":
+      return { ...base, tool: validated.tool, input: validated.input };
+    case "archive_note":
+      return { ...base, tool: validated.tool, input: validated.input };
+    case "restore_note":
+      return { ...base, tool: validated.tool, input: validated.input };
+    case "delete_note":
+      return { ...base, tool: validated.tool, input: validated.input };
   }
 }
 
 export class D1AiToolRepository implements AiToolRepositoryPort {
-  constructor(private readonly db: D1Database) {}
+  private readonly createId: () => string;
+
+  constructor(
+    private readonly db: D1Database,
+    createId: () => string = () => crypto.randomUUID(),
+  ) {
+    this.createId = createId;
+  }
 
   async getOwned(userId: string, workspaceId: string, actionId: string) {
     const row = await this.db.prepare(
@@ -90,10 +136,10 @@ export class D1AiToolRepository implements AiToolRepositoryPort {
   async insertProposals(inputs: InsertProposalInput[]) {
     if (inputs.length === 0) return [];
     const results = await this.db.batch(inputs.map((input) => this.db.prepare(
-      `INSERT INTO ai_action_proposals (
+       `INSERT INTO ai_action_proposals (
          id, user_id, workspace_id, tool, input_json, status, idempotency_key,
-         revision, expires_at, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, 'proposed', ?, 1, ?, ?, ?)
+         revision, expires_at, created_at, updated_at, requires_confirmation
+       ) VALUES (?, ?, ?, ?, ?, 'proposed', ?, 1, ?, ?, ?, ?)
        RETURNING ${proposalColumns}`,
     ).bind(
       input.actionId,
@@ -105,6 +151,7 @@ export class D1AiToolRepository implements AiToolRepositoryPort {
       input.expiresAt,
       input.now,
       input.now,
+      Number(input.requiresConfirmation ?? true),
     )));
     return results.map((result) => {
       const row = result.results?.[0] as ProposalRow | undefined;
@@ -132,8 +179,35 @@ export class D1AiToolRepository implements AiToolRepositoryPort {
     return row ? parseStoredProposal(row) : null;
   }
 
-  markCompleted(input: ProposalMutationInput) {
-    return this.updateOwnedStatus(input, "executed", "confirmed");
+  async claimExecution(input: ProposalMutationInput) {
+    const claimToken = this.createId();
+    const leaseUntil = new Date(Date.parse(input.now) + 30_000).toISOString();
+    const row = await this.db.prepare(
+      `UPDATE ai_action_proposals
+       SET status = 'executing', execution_claim_token = ?, execution_lease_until = ?,
+           revision = revision + 1, updated_at = ?
+       WHERE user_id = ? AND workspace_id = ? AND id = ? AND (
+         (status = 'confirmed' AND revision = ?)
+         OR (status = 'executing' AND (execution_lease_until IS NULL OR execution_lease_until <= ?)
+             AND revision = ?)
+       )
+       RETURNING ${proposalColumns}`,
+    ).bind(
+      claimToken,
+      leaseUntil,
+      input.now,
+      input.userId,
+      input.workspaceId,
+      input.actionId,
+      input.baseRevision,
+      input.now,
+      input.baseRevision,
+    ).first<ProposalRow>();
+    return row ? parseStoredProposal(row) : null;
+  }
+
+  markCompleted(input: ProposalMutationInput, result?: AiActionExecutionResult) {
+    return this.updateExecutionStatus(input, "executed", result);
   }
 
   async completeEmailAction(
@@ -151,21 +225,32 @@ export class D1AiToolRepository implements AiToolRepositoryPort {
     const id = `ai-email:${outbox.actionId}`;
     const update = this.db.prepare(
       `UPDATE ai_action_proposals
-       SET status = 'executed', revision = revision + 1, updated_at = ?
-       WHERE user_id = ? AND workspace_id = ? AND id = ? AND revision = ? AND status = 'confirmed'
+       SET status = 'executed', revision = revision + 1, updated_at = ?,
+           execution_claim_token = NULL, execution_lease_until = NULL,
+           result_json = ?, error_code = NULL, error_message = NULL, error_status = NULL
+       WHERE user_id = ? AND workspace_id = ? AND id = ? AND revision = ? AND status = 'executing'
+         AND execution_claim_token = ?
        RETURNING ${proposalColumns}`,
     ).bind(
       input.now,
+      JSON.stringify({ action_id: input.actionId, status: "executed", entity_id: id }),
       input.userId,
       input.workspaceId,
       input.actionId,
       input.baseRevision,
+      input.executionClaimToken ?? "",
     );
     const insertOutbox = this.db.prepare(
       `INSERT INTO ai_email_outbox (
          id, action_id, user_id, workspace_id, to_email, subject, body_text,
          status, attempt_count, available_at, sent_at, last_error_code, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?, ?)
+       )
+       SELECT ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?, ?
+       WHERE EXISTS (
+         SELECT 1 FROM ai_action_proposals
+         WHERE id = ? AND user_id = ? AND workspace_id = ?
+           AND status = 'executed' AND revision = ?
+       )
        ON CONFLICT(id) DO NOTHING`,
     ).bind(
       id,
@@ -178,6 +263,10 @@ export class D1AiToolRepository implements AiToolRepositoryPort {
       outbox.now,
       outbox.now,
       outbox.now,
+      input.actionId,
+      input.userId,
+      input.workspaceId,
+      input.baseRevision + 1,
     );
     const results = await this.db.batch<ProposalRow>([update, insertOutbox]);
     const row = results[0]?.results?.[0];
@@ -188,8 +277,47 @@ export class D1AiToolRepository implements AiToolRepositoryPort {
     return this.updateOwnedStatus(input, "rejected", "proposed");
   }
 
-  markFailed(input: ProposalMutationInput) {
-    return this.updateOwnedStatus(input, "failed", "confirmed");
+  markFailed(input: ProposalMutationInput, error?: { code: string; message: string; status: number }) {
+    return this.updateExecutionStatus(input, "failed", undefined, error);
+  }
+
+  markConflict(input: ProposalMutationInput, error?: { code: string; message: string; status: number }) {
+    return this.updateExecutionStatus(input, "conflict", undefined, error);
+  }
+
+  private async updateExecutionStatus(
+    input: ProposalMutationInput,
+    nextStatus: "executed" | "failed" | "conflict",
+    result?: AiActionExecutionResult,
+    error?: { code: string; message: string; status: number },
+  ) {
+    const executionResult = result ?? {
+      action_id: input.actionId,
+      status: nextStatus,
+      ...(error ? { error } : {}),
+    } satisfies AiActionExecutionResult;
+    const row = await this.db.prepare(
+      `UPDATE ai_action_proposals
+       SET status = ?, revision = revision + 1, updated_at = ?, result_json = ?,
+           execution_claim_token = NULL, execution_lease_until = NULL,
+           error_code = ?, error_message = ?, error_status = ?
+       WHERE user_id = ? AND workspace_id = ? AND id = ? AND revision = ? AND status = 'executing'
+         AND execution_claim_token = ?
+       RETURNING ${proposalColumns}`,
+    ).bind(
+      nextStatus,
+      input.now,
+      JSON.stringify(executionResult),
+      error?.code ?? null,
+      error?.message.slice(0, 500) ?? null,
+      error?.status ?? null,
+      input.userId,
+      input.workspaceId,
+      input.actionId,
+      input.baseRevision,
+      input.executionClaimToken ?? "",
+    ).first<ProposalRow>();
+    return row ? parseStoredProposal(row) : null;
   }
 
   private async updateOwnedStatus(

@@ -15,7 +15,7 @@ function isValidDailyDate(value: string) {
   return day <= daysInMonth;
 }
 
-const DailyDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isValidDailyDate, "daily_date must be a valid calendar date");
+export const DailyDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isValidDailyDate, "daily_date must be a valid calendar date");
 
 export const NoteStatusSchema = z.enum(["active", "archived", "trashed"]);
 export const NoteRevisionSourceSchema = z.enum(["autosave", "manual", "restore", "conflict", "import"]);

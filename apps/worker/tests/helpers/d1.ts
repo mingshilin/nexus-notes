@@ -25,6 +25,7 @@ export const migrationPaths = [
   "../../migrations/0019_ai_email_dispatch_leases.sql",
   "../../migrations/0020_ai_email_delivery_leases.sql",
   "../../migrations/0021_ai_trusted_mode.sql",
+  "../../migrations/0022_ai_note_actions.sql",
 ];
 
 export function splitMigration(sql: string) {
@@ -49,7 +50,8 @@ export function splitMigration(sql: string) {
 
 export async function applyMigration(db: D1Database, migrationPath: string) {
   const sql = readFileSync(resolve(import.meta.dirname, migrationPath), "utf8");
-  for (const statement of splitMigration(sql)) await db.prepare(statement).run();
+  const statements = splitMigration(sql).map((statement) => db.prepare(statement));
+  if (statements.length > 0) await db.batch(statements);
 }
 
 export async function createTestD1(options: { through?: number } = {}) {
