@@ -71,6 +71,25 @@ afterEach(() => {
 });
 
 describe("core UX mobile", () => {
+  it("keeps note metadata out of the writing surface until note information opens", async () => {
+    renderMobile();
+    fireEvent.click(await screen.findByRole("button", { name: "新建笔记" }));
+
+    const content = await screen.findByRole("textbox", { name: "笔记内容" });
+    expect(content).toBeVisible();
+    expect(screen.queryByLabelText("笔记文件夹")).not.toBeInTheDocument();
+
+    const opener = screen.getByRole("button", { name: "打开笔记信息" });
+    fireEvent.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "检查器" });
+    expect(within(dialog).getByLabelText("笔记文件夹")).toBeVisible();
+    expect(dialog).toHaveAttribute("data-scroll-owner", "inspector");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭检查器" }));
+    expect(opener).toHaveFocus();
+    expect(screen.queryByLabelText("笔记文件夹")).not.toBeInTheDocument();
+  });
+
   it("opens the create center from mobile navigation and restores focus to its opener", async () => {
     renderMobile();
     const navigation = await screen.findByRole("navigation", { name: "移动端主导航" });
@@ -133,7 +152,7 @@ describe("core UX mobile", () => {
     expect(navigation).toHaveAttribute("data-visible", "true");
     expect(fabChrome).toHaveAttribute("data-visible", "true");
 
-    const opener = screen.getByRole("button", { name: "打开检查器" });
+    const opener = screen.getByRole("button", { name: "打开笔记信息" });
     fireEvent.click(opener);
     expect(screen.getByRole("dialog", { name: "检查器" })).toBeInTheDocument();
     expect(navigation).toHaveAttribute("data-visible", "false");
