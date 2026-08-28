@@ -169,8 +169,6 @@ export const AI_TOOL_CATALOG = [
   { name: "apply_template", risk: "confirmed_write" },
   { name: "complete_reminder", risk: "confirmed_write" },
   { name: "send_email", risk: "external_or_destructive" },
-  { name: "change_permissions", risk: "external_or_destructive" },
-  { name: "delete_database", risk: "external_or_destructive" },
 ] as const satisfies readonly { name: string; risk: AiToolRisk }[];
 
 type AiCatalogToolName = typeof AI_TOOL_CATALOG[number]["name"];
