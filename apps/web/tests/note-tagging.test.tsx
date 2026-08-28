@@ -56,6 +56,7 @@ describe("App note tags", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
     fireEvent.click(await screen.findByRole("button", { name: /带标签的笔记/u }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记信息" }));
     expect(await screen.findByRole("checkbox", { name: "标签：研究" })).toBeChecked();
 
     fireEvent.click(screen.getByRole("checkbox", { name: "标签：研究" }));
