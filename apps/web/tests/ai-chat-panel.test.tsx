@@ -902,7 +902,7 @@ describe("AIChatPanel", () => {
     expect(await screen.findByText("AI 操作已完成。")).toBeInTheDocument();
     expect(await screen.findByText("AI 操作执行失败，请重新发起。")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重新发起" }));
-    expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("请重新发起刚才未完成的 AI 操作");
+    expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("执行两个操作");
   });
 
   it("automatically expires proposals after their expires_at without waiting for a server rejection", async () => {

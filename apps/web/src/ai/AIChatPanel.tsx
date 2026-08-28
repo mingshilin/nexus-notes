@@ -9,6 +9,7 @@ import { AIActionCard, type AIActionCardStatus } from "./AIActionCard";
 
 const QUICK_PROMPTS = ["制定今日计划", "整理我的任务", "如何改进这篇笔记"] as const;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const MAX_RECOVERY_PROMPT_LENGTH = 4_000;
 
 export interface AIChatReadContext {
   selected_note_ids: readonly string[];
@@ -118,6 +119,17 @@ function actionResultText(result: AiActionExecutionResult) {
   if (result.status === "conflict") return "AI 操作未执行：目标内容已发生变化。";
   if (result.retryable === true || result.error?.code === "AI_ACTION_IN_PROGRESS") return "AI 操作仍在执行，请稍后重试。";
   return "AI 操作执行失败，请重新发起。";
+}
+
+function recoveryPromptForEntry(entries: TranscriptEntry[], entryIndex: number) {
+  for (let index = entryIndex - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.kind !== "message" || entry.message.role !== "user") continue;
+    const prompt = entry.message.content.trim();
+    if (prompt.length <= MAX_RECOVERY_PROMPT_LENGTH) return prompt;
+    return `${prompt.slice(0, MAX_RECOVERY_PROMPT_LENGTH - 1)}…`;
+  }
+  return null;
 }
 
 type AIConfigurationState = "checking" | "configured" | "unconfigured" | "disabled" | null;
@@ -481,7 +493,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
                   </div>
                 </div>
               </div>
-            ) : entries.map((entry) => {
+            ) : entries.map((entry, entryIndex) => {
               if (entry.kind === "message") {
                 return (
                   <article className={`ai-chat-message ai-chat-message-${entry.message.role}`} key={entry.id}>
@@ -492,15 +504,17 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
               }
               if (entry.kind === "action_result") {
                 const retryable = entry.result.retryable === true || entry.result.error?.code === "AI_ACTION_IN_PROGRESS";
+                const recoveryPrompt = recoveryPromptForEntry(entries, entryIndex);
                 return (
                   <article className={`ai-chat-action-result ai-chat-action-result-${retryable ? "in-progress" : entry.result.status}`} key={entry.id} role="status">
                     <small>AI 操作结果</small>
                     <p>{actionResultText(entry.result)}</p>
-                    {!retryable && entry.result.status !== "executed" ? (
+                    {retryable ? <p className="ai-chat-action-result-warning" role="note">上一次 AI 操作可能仍在完成，请勿重复提交。</p> : null}
+                    {entry.result.status !== "executed" && recoveryPrompt !== null ? (
                       <button
                         type="button"
                         onClick={() => {
-                          setDraft("请重新发起刚才未完成的 AI 操作");
+                          setDraft(recoveryPrompt);
                           inputRef.current?.focus();
                         }}
                       >重新发起</button>
@@ -509,6 +523,7 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
                 );
               }
               const state = actionStates[entry.proposal.action_id] ?? { status: "proposed", baseRevision: 1, error: null };
+              const recoveryPrompt = recoveryPromptForEntry(entries, entryIndex);
               return (
                 <AIActionCard
                   key={entry.id}
@@ -518,8 +533,8 @@ export function AIChatPanel({ client, workspaceId, showStatus = false, readConte
                   autoFocus={entry.proposal.action_id === firstActionId}
                   onConfirm={() => { void confirmProposal(entry.proposal); }}
                   onReject={() => { void rejectProposal(entry.proposal); }}
-                  onRegenerate={() => {
-                    setDraft(`请重新生成：${entry.proposal.summary}`);
+                  onRegenerate={recoveryPrompt === null ? undefined : () => {
+                    setDraft(recoveryPrompt);
                     inputRef.current?.focus();
                   }}
                 />
