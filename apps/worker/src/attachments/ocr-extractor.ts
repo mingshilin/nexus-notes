@@ -14,6 +14,7 @@ export interface OcrObjectStore {
 
 export interface OcrAiBinding {
   toMarkdown(file: { name: string; blob: Blob }, options?: OcrOperationOptions): Promise<unknown>;
+  run?(model: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
 }
 
 export interface OcrExtractionRequest {

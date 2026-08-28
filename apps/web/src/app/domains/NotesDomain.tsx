@@ -18,13 +18,10 @@ import type { ApiClient } from "../../data/api-client";
 import { FeatureHub, type FeatureId } from "../../features";
 import { NotificationCenter, notificationButtonLabel } from "../../collaboration/NotificationCenter";
 import { MarkdownPreview } from "../../notes/MarkdownPreview";
-import { NoteAiActions } from "../../ai/NoteAiActions";
 import { NoteConflictPanel } from "../../notes/NoteConflictPanel";
 import { NoteEditorSurface } from "../../notes/NoteEditorSurface";
 import { NoteHistoryPanel } from "../../notes/NoteHistoryPanel";
-import { NoteLinksPanel } from "../../notes/NoteLinksPanel";
 import { NoteOrganizationPanel } from "../../notes/NoteOrganizationPanel";
-import { NoteTagPanel } from "../../notes/NoteTagPanel";
 
 export interface WorkspaceDomainProps<Client, SelectedEntity, Callbacks> {
   client: Client;
@@ -211,22 +208,13 @@ function NotesEditor({ client, workspaceId, role, state, callbacks }: { client: 
           </> : null}
           <button type="button" aria-label="打开快速操作" aria-keyshortcuts="Control+K Meta+K" title="快速操作（Ctrl/Cmd+K）" onClick={callbacks.onOpenCommandPalette}><Command aria-hidden="true" size={17} /></button>
           <button type="button" aria-label={notificationButtonLabel(state.unreadCount)} onClick={(event) => callbacks.onToggleNotifications(event.currentTarget)}><Bell aria-hidden="true" size={17} /></button>
-          <button type="button" aria-label="打开检查器" onClick={(event) => callbacks.onOpenInspector(event.currentTarget)}><Boxes size={17} aria-hidden="true" /></button>
+          <button type="button" aria-label="打开笔记信息" aria-expanded="false" onClick={(event) => callbacks.onOpenInspector(event.currentTarget)}><Boxes size={17} aria-hidden="true" /></button>
         </div>
       </header>
-      <div className="editor-copy">
-        <p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p>
-        <h1>{state.draftTitle.trim() || "未命名笔记"}</h1>
+      <div className="editor-copy note-editor-copy">
+        {state.editorMode === "preview" ? <><p className="eyebrow">NEXUS NOTES / PUBLIC BETA</p><h1>{state.draftTitle.trim() || "未命名笔记"}</h1></> : <h1 className="note-editor-title-heading">{state.draftTitle.trim() || "未命名笔记"}</h1>}
         {state.editorMode === "edit" ? <>
           <label className="note-editor-field">标题<input ref={state.titleInputRef} aria-label="笔记标题" disabled={state.logoutPending || selectedNote?.status === "trashed"} value={state.draftTitle} onChange={(event) => callbacks.onDraftTitleChange(event.target.value)} /></label>
-          <label className="note-editor-field">文件夹<select aria-label="笔记文件夹" disabled={state.logoutPending || state.creatingNote || selectedNote?.status === "trashed"} value={state.draftFolderId ?? ""} onChange={(event) => callbacks.onDraftFolderChange(event.target.value || null)}><option value="">未分类</option>{state.folders.map((folder, index) => <option key={`${folder.id || "folder"}-${index}`} value={folder.id}>{folder.name}</option>)}</select></label>
-          {!state.creatingNote && selectedNote ? <>
-            <label className="note-editor-field">笔记数据库<select aria-label="笔记数据库" aria-busy={state.noteDatabasesLoading} disabled={state.logoutPending || role === "viewer" || state.noteSaving || selectedNote.status === "trashed" || state.noteDatabasesLoading} value={state.draftDatabaseId ?? ""} onChange={(event) => callbacks.onDraftDatabaseChange(event.target.value || null)}><option value="">未关联数据库</option>{state.noteDatabasesLoading ? <option value="__loading" disabled>加载数据库…</option> : null}{state.noteDatabases.map((database) => <option key={database.id} value={database.id}>{database.name}</option>)}</select></label>
-            {state.noteDatabasesError ? <p className="database-operation-error" role="alert">{state.noteDatabasesError}</p> : null}
-            <NoteTagPanel tags={state.tags} selectedTagIds={state.noteTagIds[selectedNote.id] ?? []} saving={state.noteTagsLoading || state.noteTagsSaving} readOnly={role === "viewer" || selectedNote.status === "trashed"} error={state.noteTagsError} onChange={callbacks.onUpdateTags} onCreateTag={role === "viewer" || selectedNote.status === "trashed" ? undefined : callbacks.onCreateTag} />
-            <NoteLinksPanel currentNoteId={selectedNote.id} notes={state.notes} linkedNoteIds={state.linkedNoteIds} backlinks={state.backlinks} loading={state.noteLinksLoading} readOnly={role === "viewer" || selectedNote.status === "trashed"} saving={state.noteLinksSaving} error={state.noteLinksError} onSave={callbacks.onSaveLinks} />
-            <NoteAiActions key={selectedNote.id} client={client} workspaceId={workspaceId} note={{ title: state.draftTitle, content: state.draftContent }} disabled={state.logoutPending || role === "viewer" || state.noteSaving || selectedNote.status === "trashed"} onApplyContent={callbacks.onApplyAIContent} onApplyTags={callbacks.onApplyAITags} />
-          </> : null}
           <label className="note-editor-field">内容<NoteEditorSurface value={state.draftContent} ariaLabel="笔记内容" readOnly={state.logoutPending || selectedNote?.status === "trashed"} onUploadAttachment={!state.creatingNote && selectedNote && role !== "viewer" && selectedNote.status !== "trashed" ? callbacks.onUploadAttachment : undefined} uploadingAttachment={state.uploadingAttachment} onChange={callbacks.onDraftContentChange} /></label>
           {state.noteConflict && state.noteConflict.workspaceId === workspaceId && state.noteConflict.entityId === state.activeDraftId ? <NoteConflictPanel local={state.noteConflict.local} server={state.noteConflict.server} onKeepLocal={() => { void callbacks.onResolveConflict("local"); }} onUseServer={() => { void callbacks.onResolveConflict("server"); }} /> : null}
         </> : <MarkdownPreview content={state.draftContent} />}

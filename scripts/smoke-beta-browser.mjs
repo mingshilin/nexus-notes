@@ -879,7 +879,7 @@ export async function runAuthenticated(cdp, options, evidence) {
 
   await getByRole(cdp, "button", "笔记").waitFor();
   await getByRole(cdp, "button", "笔记").click();
-  const inspectorOpener = getByRole(cdp, "button", "打开检查器");
+  const inspectorOpener = getByRole(cdp, "button", "打开笔记信息");
   await inspectorOpener.waitFor();
   await inspectorOpener.click();
   await getByRole(cdp, "dialog", "检查器").waitFor();
@@ -892,7 +892,7 @@ export async function runAuthenticated(cdp, options, evidence) {
   if (!tabContained || !shiftTabContained) throw new Error("Inspector Tab/Shift+Tab focus escaped the dialog");
   await pressKey(cdp, "Escape");
   await waitFor(cdp, "!document.querySelector('[role=dialog][aria-label=\\\"检查器\\\"]')", "inspector Escape close");
-  if (!await evaluate(cdp, "document.activeElement === document.querySelector('button[aria-label=\\\"打开检查器\\\"]')")) throw new Error("Inspector opener focus was not restored");
+  if (!await evaluate(cdp, "document.activeElement === document.querySelector('button[aria-label=\\\"打开笔记信息\\\"]')")) throw new Error("Inspector opener focus was not restored");
 
   const editor = getByLabel(cdp, "笔记内容");
   await editor.waitFor();

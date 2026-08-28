@@ -297,6 +297,13 @@ button { color: inherit; }
 .saved-state { color: hsl(var(--muted-foreground)); font-size: 12px; }
 .saved-state span { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: #34c759; }
 .editor-copy { width: min(760px, calc(100% - 48px)); margin: 0 auto; padding: 76px 0 180px; }
+.note-editor-copy { width: min(900px, calc(100% - 48px)); padding: 32px 0 80px; }
+.note-editor-title-heading { margin: 0 0 12px; font-size: clamp(24px, 3vw, 34px); line-height: 1.15; letter-spacing: -.035em; }
+.note-editor-copy .note-editor-field { margin: 14px 0; }
+.note-editor-copy .note-editor-surface-body > textarea { min-height: min(62vh, 720px); }
+.note-inspector-content { display: grid; gap: 14px; }
+.note-inspector-content > p { margin: 0; }
+.note-inspector-content .note-editor-field { margin: 0; }
 .product-domain-page { width: min(880px, calc(100% - 48px)); min-height: 100%; margin: 0 auto; padding: clamp(54px, 8vw, 100px) 0 160px; }
 .ai-chat-page { display: grid; gap: 22px; padding-bottom: max(48px, env(safe-area-inset-bottom)); }
 .ai-chat-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
@@ -412,6 +419,16 @@ button { color: inherit; }
 .account-session-list > li small { color: hsl(var(--muted-foreground)); font-size: 11px; }
 .account-session-list > li button { min-height: 31px; border: 1px solid var(--border-subtle); border-radius: 9px; padding: 5px 9px; color: hsl(var(--destructive)); background: var(--surface-elevated); cursor: pointer; }
 .ai-config-panel { display: grid; gap: 14px; padding: 18px; border: 1px solid rgba(0,122,255,.16); border-radius: 18px; background: rgba(255,255,255,.52); }
+.ai-provider-config-stack { display: grid; gap: 14px; }
+.ai-provider-selector { display: grid; gap: 14px; padding: 18px; border: 1px solid rgba(0,122,255,.16); border-radius: 18px; background: rgba(255,255,255,.52); }
+.ai-provider-selector h2 { margin: 3px 0 5px; font-size: 19px; }
+.ai-provider-selector p { margin: 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
+.ai-provider-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.ai-provider-options button { display: grid; min-height: 66px; align-content: center; gap: 4px; border: 1px solid var(--border-subtle); border-radius: 13px; padding: 10px 12px; color: hsl(var(--foreground)); background: var(--surface-elevated); cursor: pointer; text-align: left; }
+.ai-provider-options button[aria-pressed="true"] { border-color: rgba(0,122,255,.48); color: var(--nexus-accent); background: rgba(0,122,255,.09); box-shadow: 0 8px 24px rgba(0,122,255,.08); }
+.ai-provider-options button:disabled { cursor: not-allowed; opacity: .56; }
+.ai-provider-options button:focus-visible { outline: 3px solid rgba(0,122,255,.25); outline-offset: 2px; }
+.ai-provider-options span { color: hsl(var(--muted-foreground)); font-size: 11px; }
 .ai-config-panel summary { cursor: pointer; color: hsl(var(--foreground)); font-size: 15px; font-weight: 780; }
 .ai-config-panel > p { margin: 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
 .ai-config-panel label { display: grid; gap: 6px; color: hsl(var(--muted-foreground)); font-size: 12px; font-weight: 700; }
@@ -931,6 +948,8 @@ button { color: inherit; }
   .adaptive-workbench[data-mode="mobile"] button { min-width: 40px; min-height: 40px; }
   input, textarea, select { font-size: 16px; }
   .editor-copy { width: min(calc(100% - 34px), 720px); padding-top: 46px; }
+  .note-editor-copy { width: min(calc(100% - 34px), 900px); padding-top: 24px; padding-bottom: 56px; }
+  .note-editor-copy .note-editor-surface-body > textarea { min-height: max(55dvh, 360px); }
   .editor-copy h1 { font-size: 38px; }
   .product-domain-page { width: min(calc(100% - 34px), 720px); padding-top: 46px; }
   .ai-chat-heading { gap: 12px; }

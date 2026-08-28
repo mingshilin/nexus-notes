@@ -189,7 +189,7 @@ describe("AIChatPanel", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "你好" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("AI 服务尚未配置");
+    expect(await screen.findByRole("alert")).toHaveTextContent("当前没有可用的 AI");
     expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("你好");
   });
 

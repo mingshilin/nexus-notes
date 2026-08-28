@@ -24,6 +24,9 @@ import { ProductNavigation, type AccountSubsection, type ProductDomain } from ".
 import { QuickCapturePanel } from "../notes/QuickCapturePanel";
 import { WebClipperPanel } from "../notes/WebClipperPanel";
 import { NoteOrganizationPanel } from "../notes/NoteOrganizationPanel";
+import { NoteLinksPanel } from "../notes/NoteLinksPanel";
+import { NoteTagPanel } from "../notes/NoteTagPanel";
+import { NoteAiActions } from "../ai/NoteAiActions";
 import { CommandPalette, type CommandAction } from "../commands/CommandPalette";
 import { CreateCenter, ImportExportCenter, type CreateActionResult } from "../create";
 import { InviteRedemptionPage } from "../collaboration/InviteRedemptionPage";
@@ -594,7 +597,7 @@ function AuthenticatedWorkspace({
     if (!inspectorOpen && inspectorOpenerRef.current) {
       const opener = inspectorOpenerRef.current.isConnected
         ? inspectorOpenerRef.current
-        : document.querySelector<HTMLElement>('button[aria-label="打开检查器"]');
+        : document.querySelector<HTMLElement>('button[aria-label="打开笔记信息"], button[aria-label="打开检查器"]');
       if (opener && !opener.closest("[inert]")) opener.focus();
       inspectorOpenerRef.current = null;
     }
@@ -2279,6 +2282,33 @@ function AuthenticatedWorkspace({
     />
   );
 
+  const noteInspector = notesEditorState ? (
+    <div className="inspector-content note-inspector-content">
+      <small>NOTE INFO</small>
+      <h3>笔记信息</h3>
+      <p>写作区保持最大空间，文件夹、数据库、标签、链接和 AI 工具按需打开。</p>
+      <label className="note-editor-field">文件夹
+        <select aria-label="笔记文件夹" disabled={logoutPending || notesEditorState.creatingNote || selectedNote?.status === "trashed"} value={notesEditorState.draftFolderId ?? ""} onChange={(event) => notesDomainCallbacks.onDraftFolderChange(event.target.value || null)}>
+          <option value="">未分类</option>
+          {notesEditorState.folders.map((folder, index) => <option key={`${folder.id || "folder"}-${index}`} value={folder.id}>{folder.name}</option>)}
+        </select>
+      </label>
+      {selectedNote ? <>
+        <label className="note-editor-field">笔记数据库
+          <select aria-label="笔记数据库" aria-busy={notesEditorState.noteDatabasesLoading} disabled={logoutPending || role === "viewer" || notesEditorState.noteSaving || selectedNote.status === "trashed" || notesEditorState.noteDatabasesLoading} value={notesEditorState.draftDatabaseId ?? ""} onChange={(event) => notesDomainCallbacks.onDraftDatabaseChange(event.target.value || null)}>
+            <option value="">未关联数据库</option>
+            {notesEditorState.noteDatabasesLoading ? <option value="__loading" disabled>加载数据库…</option> : null}
+            {notesEditorState.noteDatabases.map((database) => <option key={database.id} value={database.id}>{database.name}</option>)}
+          </select>
+        </label>
+        {notesEditorState.noteDatabasesError ? <p className="database-operation-error" role="alert">{notesEditorState.noteDatabasesError}</p> : null}
+        <NoteTagPanel tags={notesEditorState.tags} selectedTagIds={notesEditorState.noteTagIds[selectedNote.id] ?? []} saving={notesEditorState.noteTagsLoading || notesEditorState.noteTagsSaving} readOnly={role === "viewer" || selectedNote.status === "trashed"} error={notesEditorState.noteTagsError} onChange={notesDomainCallbacks.onUpdateTags} onCreateTag={role === "viewer" || selectedNote.status === "trashed" ? undefined : notesDomainCallbacks.onCreateTag} />
+        <NoteLinksPanel currentNoteId={selectedNote.id} notes={notesEditorState.notes} linkedNoteIds={notesEditorState.linkedNoteIds} backlinks={notesEditorState.backlinks} loading={notesEditorState.noteLinksLoading} readOnly={role === "viewer" || selectedNote.status === "trashed"} saving={notesEditorState.noteLinksSaving} error={notesEditorState.noteLinksError} onSave={notesDomainCallbacks.onSaveLinks} />
+        <NoteAiActions key={selectedNote.id} client={apiClient} workspaceId={workspaceId ?? ""} note={{ title: notesEditorState.draftTitle, content: notesEditorState.draftContent }} disabled={logoutPending || role === "viewer" || notesEditorState.noteSaving || selectedNote.status === "trashed"} onApplyContent={notesDomainCallbacks.onApplyAIContent} onApplyTags={notesDomainCallbacks.onApplyAITags} />
+      </> : null}
+    </div>
+  ) : null;
+
   const databaseDomainCallbacks: DatabaseDomainCallbacks = {
     onFirstDatabaseNameChange: setFirstDatabaseName,
     onCreateFirstDatabase: createFirstDatabase,
@@ -2469,7 +2499,7 @@ function AuthenticatedWorkspace({
         mobileCreateAction={mobileCreateAction}
         desktopCreateAction={desktopCreateAction}
         contextualList={activeDomain === "databases" ? databaseContextualList : activeDomain === "notes" ? contextualList : undefined}
-        inspector={<div className="inspector-content"><small>页面信息</small><h3>{inspectorTitle}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
+        inspector={activeDomain === "notes" && noteInspector ? noteInspector : <div className="inspector-content"><small>页面信息</small><h3>{inspectorTitle}</h3><p>属性、版本与协作状态只在需要时显示。</p></div>}
         inspectorOpen={inspectorOpen}
         externalModalOpen={workspaceModal !== null || commandPaletteOpen}
         activePane={activePane}
