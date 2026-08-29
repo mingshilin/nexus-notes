@@ -42,16 +42,23 @@ export function reduceMobileChrome(
     };
   }
   if (event.type === "keyboard") {
+    const inset = Math.max(0, event.inset);
     return {
       ...state,
-      keyboardInset: Math.max(0, event.inset),
-      visible: event.inset > 0 ? false : !state.textFocused,
+      keyboardInset: inset,
+      // A reduced visual viewport can also come from browser chrome or split view.
+      // Only hide navigation automatically when a text control is focused.
+      visible: inset > 0 ? (state.textFocused ? false : state.visible) : !state.textFocused,
     };
   }
   if (event.type === "viewport-scale") {
     return event.scale > 1.01
       ? { ...state, visible: true, zoomed: true }
-      : { ...state, visible: state.keyboardInset === 0 && !state.textFocused, zoomed: false };
+      : {
+        ...state,
+        visible: state.keyboardInset > 0 ? (state.textFocused ? false : state.visible) : !state.textFocused,
+        zoomed: false,
+      };
   }
   const scrollTop = Math.max(0, event.scrollTop);
   const delta = scrollTop - state.lastScrollTop;
