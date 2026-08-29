@@ -50,12 +50,16 @@ export function KnowledgeDomain({ client, selectedEntity }: KnowledgeDomainProps
       <p className="eyebrow">KNOWLEDGE CENTER</p>
       <h1>知识恢复</h1>
       <p className="product-domain-lead">搜索、保存查询，并集中处理附件 OCR 状态与知识诊断。</p>
-      <Suspense fallback={<p className="knowledge-search-state" role="status">正在加载知识工具…</p>}>
+      <Suspense fallback={<p className="knowledge-search-state" role="status" aria-label="正在加载知识搜索">正在加载知识搜索…</p>}>
         <LazyKnowledgeSearchPanel client={knowledge} databasesClient={databases} collaborationClient={collaboration} />
-        <LazyKnowledgeGraphPanel client={knowledge} />
-        <LazyKnowledgeCalendarPanel client={knowledge} />
-        {externalCalendar ? <LazyExternalCalendarPanel client={knowledge} /> : null}
       </Suspense>
+      <Suspense fallback={<p className="knowledge-search-state" role="status" aria-label="正在加载知识图谱">正在加载知识图谱…</p>}>
+        <LazyKnowledgeGraphPanel client={knowledge} />
+      </Suspense>
+      <Suspense fallback={<p className="knowledge-search-state" role="status" aria-label="正在加载知识日历">正在加载知识日历…</p>}>
+        <LazyKnowledgeCalendarPanel client={knowledge} />
+      </Suspense>
+      {externalCalendar ? <Suspense fallback={<p className="knowledge-search-state" role="status" aria-label="正在加载外部日历">正在加载外部日历…</p>}><LazyExternalCalendarPanel client={knowledge} /></Suspense> : null}
       {selectedEntity.recoveryContent}
     </section>
   );
