@@ -4,6 +4,7 @@ import { normalizeDatabaseValues, type DatabaseValueProperty } from "@nexus/doma
 import { prepareActivityAndAuditStatements } from "../collaboration/d1-collaboration-repository";
 import type { PresenceNotifier } from "../presence/presence-dispatcher";
 import { D1DatabaseAccess } from "./d1-database-access";
+import { createTaskNotificationWriter, type TaskNotificationStatementInput, type TaskNotificationWriter } from "./task-notifications";
 import {
   RECORD_COLUMNS,
   DatabaseRepositoryError,
@@ -36,6 +37,7 @@ export interface D1DatabaseRepositoryOptions {
   createId(): string;
   clock(): Date;
   presence?: Pick<PresenceNotifier, "invalidate">;
+  taskNotifications?: TaskNotificationWriter;
 }
 
 const defaultOptions: D1DatabaseRepositoryOptions = {
@@ -80,7 +82,11 @@ export abstract class DatabaseRepositoryBase {
     protected readonly db: D1Database,
     options: Partial<D1DatabaseRepositoryOptions> = {},
   ) {
-    this.options = { ...defaultOptions, ...options };
+    const merged = { ...defaultOptions, ...options };
+    this.options = {
+      ...merged,
+      taskNotifications: merged.taskNotifications ?? createTaskNotificationWriter(db, merged.createId),
+    };
     this.access = new D1DatabaseAccess(db);
   }
 
@@ -394,6 +400,10 @@ export abstract class DatabaseRepositoryBase {
 
   protected now() {
     return this.options.clock().toISOString();
+  }
+
+  protected taskNotificationStatements(input: TaskNotificationStatementInput) {
+    return this.options.taskNotifications?.prepare(input) ?? [];
   }
 
   protected beginOperation(

@@ -35,6 +35,7 @@ import { OcrConsumer } from "./attachments/ocr-consumer";
 import { OcrExtractionError, OcrExtractor } from "./attachments/ocr-extractor";
 import { OcrOutboxDispatcher } from "./attachments/ocr-outbox-dispatcher";
 import { D1DatabaseRepository } from "./databases/d1-database-repository";
+import { createTaskNotificationWriter } from "./databases/task-notifications";
 import { registerDatabaseRoutes } from "./routes/databases";
 import { D1CollaborationRepository } from "./collaboration/d1-collaboration-repository";
 import { registerCollaborationRoutes } from "./routes/collaboration";
@@ -281,6 +282,7 @@ function createNoteService(env: BetaWorkerEnv) {
 function createDatabaseRepository(env: BetaWorkerEnv) {
   return new D1DatabaseRepository(env.DB, {
     presence: createPresenceNotifier(env),
+    taskNotifications: createTaskNotificationWriter(env.DB, () => crypto.randomUUID()),
   });
 }
 

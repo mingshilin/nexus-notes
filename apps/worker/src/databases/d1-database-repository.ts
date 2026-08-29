@@ -5,6 +5,7 @@ import { D1DatabaseCsvRepository } from "./d1-database-csv";
 import { D1DatabasePermissionRepository } from "./d1-database-permissions";
 import { D1DatabaseRecordRepository } from "./d1-database-records";
 import { D1DatabaseViewRepository } from "./d1-database-views";
+import { createTaskNotificationWriter } from "./task-notifications";
 
 export class D1DatabaseRepository {
   readonly listDatabases: D1DatabaseCoreRepository["listDatabases"];
@@ -48,12 +49,19 @@ export class D1DatabaseRepository {
   readonly exportCsv: D1DatabaseCsvRepository["exportCsv"];
 
   constructor(db: D1Database, options: Partial<D1DatabaseRepositoryOptions> = {}) {
-    const core = new D1DatabaseCoreRepository(db, options);
-    const records = new D1DatabaseRecordRepository(db, options);
-    const views = new D1DatabaseViewRepository(db, options, records);
-    const comments = new D1DatabaseCommentRepository(db, options);
-    const permissions = new D1DatabasePermissionRepository(db, options);
-    const csv = new D1DatabaseCsvRepository(db, options);
+    const repositoryOptions: Partial<D1DatabaseRepositoryOptions> = {
+      ...options,
+      taskNotifications: options.taskNotifications ?? createTaskNotificationWriter(
+        db,
+        options.createId ?? (() => crypto.randomUUID()),
+      ),
+    };
+    const core = new D1DatabaseCoreRepository(db, repositoryOptions);
+    const records = new D1DatabaseRecordRepository(db, repositoryOptions);
+    const views = new D1DatabaseViewRepository(db, repositoryOptions, records);
+    const comments = new D1DatabaseCommentRepository(db, repositoryOptions);
+    const permissions = new D1DatabasePermissionRepository(db, repositoryOptions);
+    const csv = new D1DatabaseCsvRepository(db, repositoryOptions);
 
     this.listDatabases = core.listDatabases.bind(core);
     this.listDatabasePage = core.listDatabasePage.bind(core);

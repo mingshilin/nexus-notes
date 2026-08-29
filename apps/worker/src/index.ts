@@ -30,6 +30,14 @@ export { TurnstileVerifier } from "./auth/turnstile";
 export { D1NoteRepository } from "./notes/d1-note-repository";
 export { D1DatabaseRepository } from "./databases/d1-database-repository";
 export {
+  TASK_NOTIFICATION_TYPES,
+  buildTaskNotificationIntents,
+  createTaskNotificationWriter,
+  detectTaskDatabase,
+  prepareTaskNotificationStatements,
+  taskNotificationDedupeKey,
+} from "./databases/task-notifications";
+export {
   D1CollaborationRepository,
   CollaborationRepositoryError,
 } from "./collaboration/d1-collaboration-repository";
