@@ -45,4 +45,17 @@ describe("KnowledgeDomain suspense boundaries", () => {
     expect(screen.getByRole("region", { name: "外部日历内容" })).toBeVisible();
     expect(screen.getByRole("status", { name: "正在加载知识搜索" })).toBeVisible();
   });
+
+  it("does not render the external calendar panel when its capability is absent", async () => {
+    render(<KnowledgeDomain
+      client={{} as never}
+      workspaceId="ws-1"
+      role="owner"
+      selectedEntity={{ recoveryContent: null }}
+      callbacks={{}}
+    />);
+
+    expect(await screen.findByRole("region", { name: "图谱内容" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "外部日历内容" })).not.toBeInTheDocument();
+  });
 });
