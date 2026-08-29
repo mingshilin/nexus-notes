@@ -36,11 +36,11 @@ import { routeCollaborationClientFor, useWorkspaceClients } from "./use-workspac
 import { useWorkspaceNavigation } from "./use-workspace-navigation";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { clearWorkspaceQueryCache } from "../data/workspace-query-cache";
-import { localDateKey, noteMatchesListView, useNotesListData, type NoteListView } from "./use-notes-list-data";
+import { localDateKey, noteMatchesListView, type NoteListView } from "./use-notes-list-data";
 import { useDatabaseWorkspaceData } from "./use-database-workspace-data";
 import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
-import { useNoteInspectorData } from "./use-note-inspector-data";
 import { useNoteMutations } from "./use-note-mutations";
+import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
 import { NotesDomain, type NotesDomainCallbacks, type NotesEditorState, type NotesOverviewState } from "./domains/NotesDomain";
 import { DatabaseDomain, type DatabaseDomainCallbacks, type DatabaseDomainSelection } from "./domains/DatabaseDomain";
 import { KnowledgeDomain } from "./domains/KnowledgeDomain";
@@ -79,13 +79,6 @@ type WorkspaceRouteAuthority = { userId: string; workspaceId: string };
 type WorkspaceModal = "create" | "quick-capture" | "web-clipper" | "import" | "permanent-delete";
 type UserScopedLocalStore = NoteDraftStore & { destroy(): Promise<void> };
 type LogoutPhase = "idle" | "quiescing" | "cleanup" | "cleanup-error";
-type NoteConflictState = {
-  workspaceId: string;
-  entityId: string;
-  local: { title: string; content: string };
-  server: Note;
-};
-
 function clearUserScopedBrowserState() {
   if (typeof window === "undefined") return;
   for (const storage of [window.localStorage, window.sessionStorage]) {
@@ -263,10 +256,6 @@ function AuthenticatedWorkspace({
   const [unreadCount, setUnreadCount] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [notesRefreshVersion, setNotesRefreshVersion] = useState(0);
-  const [noteFolderFilter, setNoteFolderFilter] = useState<string | null>(null);
-  const [noteSearchQuery, setNoteSearchQuery] = useState("");
-  const [debouncedNoteSearchQuery, setDebouncedNoteSearchQuery] = useState("");
-  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [workspaceModal, setWorkspaceModal] = useState<WorkspaceModal | null>(null);
   const createCenterOpen = workspaceModal === "create";
   const quickCaptureOpen = workspaceModal === "quick-capture";
@@ -297,22 +286,8 @@ function AuthenticatedWorkspace({
     setWorkspaceModal(modal);
   }, []);
   const [featureMapOpen, setFeatureMapOpen] = useState(false);
-  const [noteListView, setNoteListView] = useState<NoteListView>("all");
-  const [creatingNote, setCreatingNote] = useState(false);
-  const [dailyNoteOpening, setDailyNoteOpening] = useState(false);
-  const [draftTitle, setDraftTitle] = useState("");
-  const [draftContent, setDraftContent] = useState("");
-  const [editorMode, setEditorMode] = useState<"edit" | "preview">("edit");
-  const [draftFolderId, setDraftFolderId] = useState<string | null>(null);
-  const [draftDatabaseId, setDraftDatabaseId] = useState<string | null>(null);
-  const [restoringRevision, setRestoringRevision] = useState<number | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
-  const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
-  const [serverRetryVersion, setServerRetryVersion] = useState(0);
-  const [noteConflict, setNoteConflict] = useState<NoteConflictState | null>(null);
-  const [resolvingConflict, setResolvingConflict] = useState(false);
-  const [pendingReconcile, setPendingReconcile] = useState<{ workspaceId: string; entityId: string; result: DraftSyncResult } | null>(null);
   const [selectedDatabaseRecordId, setSelectedDatabaseRecordId] = useState<string | null>(null);
   const [selectedCommentId, setSelectedCommentId] = useState<string | null>(null);
   const [collaborationInitialSection, setCollaborationInitialSection] = useState<"people" | "comments" | "shares">("people");
@@ -327,17 +302,6 @@ function AuthenticatedWorkspace({
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
   const notificationOpenerRef = useRef<HTMLElement | null>(null);
   const notificationTargetController = useRef<AbortController | null>(null);
-  const noteListViewRef = useRef<NoteListView>(noteListView);
-  const [draftController] = useState(() => {
-    return new NoteDraftController(localStore);
-  });
-  const activeDraftIdRef = useRef<string | null>(null);
-  const activationInFlight = useRef(false);
-  const dailyNoteOpeningRef = useRef(false);
-  const userSelectedNote = useRef(false);
-  const draftTitleRef = useRef("");
-  const draftContentRef = useRef("");
-  const titleInputRef = useRef<HTMLInputElement | null>(null);
   const createCenterFocusTargetRef = useRef<HTMLButtonElement | null>(null);
   const openCreateCenter = useCallback((opener?: HTMLButtonElement | null) => {
     const active = typeof document !== "undefined" && document.activeElement instanceof HTMLButtonElement
@@ -357,10 +321,63 @@ function AuthenticatedWorkspace({
     permanentDeleteFocusTargetRef.current = focusTarget;
     setPermanentDeleteOpen(false);
   }, [setPermanentDeleteOpen]);
-  const focusInstalledNoteRef = useRef(false);
-  const installedNotesRef = useRef(new Map<string, Note>());
-  const mountedRef = useRef(true);
+  const notesController = useNotesWorkspaceController({
+    notesClient,
+    knowledgeClient,
+    databaseClient,
+    workspaceId,
+    refreshVersion: notesRefreshVersion,
+    localStore,
+    draftControllerRef,
+  });
   const {
+    noteFolderFilter,
+    setNoteFolderFilter,
+    noteSearchQuery,
+    setNoteSearchQuery,
+    debouncedNoteSearchQuery,
+    selectedNoteId,
+    setSelectedNoteId,
+    noteListView,
+    setNoteListView,
+    creatingNote,
+    setCreatingNote,
+    dailyNoteOpening,
+    setDailyNoteOpening,
+    draftTitle,
+    setDraftTitle,
+    draftContent,
+    setDraftContent,
+    editorMode,
+    setEditorMode,
+    draftFolderId,
+    setDraftFolderId,
+    draftDatabaseId,
+    setDraftDatabaseId,
+    restoringRevision,
+    setRestoringRevision,
+    activeDraftId,
+    setActiveDraftId,
+    serverRetryVersion,
+    setServerRetryVersion,
+    noteConflict,
+    setNoteConflict,
+    resolvingConflict,
+    setResolvingConflict,
+    pendingReconcile,
+    setPendingReconcile,
+    noteListViewRef,
+    draftController,
+    activeDraftIdRef,
+    activationInFlight,
+    dailyNoteOpeningRef,
+    userSelectedNote,
+    draftTitleRef,
+    draftContentRef,
+    titleInputRef,
+    focusInstalledNoteRef,
+    installedNotesRef,
+    mountedRef,
     notes,
     setNotes,
     notesLoading,
@@ -369,20 +386,37 @@ function AuthenticatedWorkspace({
     notesNextCursor,
     notesPageLoading,
     loadMoreNotes,
-  } = useNotesListData({
-    notesClient,
-    workspaceId,
-    noteListView,
-    noteFolderFilter,
-    debouncedNoteSearchQuery,
-    refreshVersion: notesRefreshVersion,
-    installedNotesRef,
-    activeDraftIdRef,
-    activationInFlight,
-    userSelectedNote,
-    setSelectedNoteId,
-    setCreatingNote,
-  });
+    folders,
+    setFolders,
+    folderLoading,
+    tags,
+    noteTagIds,
+    noteTagsLoading,
+    noteTagsSaving,
+    noteTagsError,
+    setNoteTagsError,
+    linkedNoteIds,
+    backlinks,
+    noteLinksLoading,
+    noteLinksSaving,
+    noteLinksError,
+    noteDatabases,
+    noteDatabasesLoading,
+    noteDatabasesError,
+    historyOpen,
+    setHistoryOpen,
+    noteRevisions,
+    historyLoading,
+    historyError,
+    setHistoryError,
+    resetHistory,
+    refreshHistory,
+    createTag: createInspectorTag,
+    saveTags: saveInspectorTags,
+    saveLinks: saveInspectorLinks,
+    abortRequests: abortInspectorRequests,
+    selectedNote,
+  } = notesController;
   const {
     databases,
     setDatabases,
@@ -434,45 +468,6 @@ function AuthenticatedWorkspace({
     workspaceId,
     initialFilters: { mimeType: "", ocrStatus: "" },
   });
-  const {
-    folders,
-    setFolders,
-    folderLoading,
-    tags,
-    noteTagIds,
-    noteTagsLoading,
-    noteTagsSaving,
-    noteTagsError,
-    setNoteTagsError,
-    linkedNoteIds,
-    backlinks,
-    noteLinksLoading,
-    noteLinksSaving,
-    noteLinksError,
-    noteDatabases,
-    noteDatabasesLoading,
-    noteDatabasesError,
-    historyOpen,
-    setHistoryOpen,
-    noteRevisions,
-    historyLoading,
-    historyError,
-    setHistoryError,
-    resetHistory,
-    refreshHistory,
-    createTag: createInspectorTag,
-    saveTags: saveInspectorTags,
-    saveLinks: saveInspectorLinks,
-    abortRequests: abortInspectorRequests,
-  } = useNoteInspectorData({
-    knowledgeClient,
-    databaseClient,
-    notesClient,
-    workspaceId,
-    selectedNoteId,
-    creatingNote,
-  });
-  const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? null;
   const installMutatedNote = useCallback((saved: Note) => {
     installedNotesRef.current.set(saved.id, saved);
     setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
@@ -597,26 +592,6 @@ function AuthenticatedWorkspace({
     applyChange: applyWorkspaceSyncChange,
     onConflict: handleWorkspaceSyncConflict,
   });
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setDebouncedNoteSearchQuery(noteSearchQuery.trim().slice(0, 500));
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, [noteSearchQuery]);
-
-  useEffect(() => {
-    // A query belongs to one workspace; never carry it into another tenant.
-    setNoteSearchQuery("");
-    setDebouncedNoteSearchQuery("");
-  }, [workspaceId]);
-
-  useEffect(() => {
-    draftControllerRef.current = draftController;
-    return () => {
-      if (draftControllerRef.current === draftController) draftControllerRef.current = null;
-    };
-  }, [draftController, draftControllerRef]);
 
   useLayoutEffect(() => {
     if (!inspectorOpen && inspectorOpenerRef.current) {
@@ -1017,17 +992,6 @@ function AuthenticatedWorkspace({
     }
   };
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    void draftController.flush().catch(() => undefined);
-  }, [draftController]);
-
-  useEffect(() => {
-    if (!creatingNote && !focusInstalledNoteRef.current) return;
-    titleInputRef.current?.focus();
-    focusInstalledNoteRef.current = false;
-  }, [activeDraftId, creatingNote, selectedNoteId]);
-
   useLayoutEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if ((!event.ctrlKey && !event.metaKey) || event.repeat || permanentDeleteOpen) return;
@@ -1133,25 +1097,6 @@ function AuthenticatedWorkspace({
     });
     return () => { cancelled = true; };
   }, [draftController, logoutPending, notesLoading, workspaceId]);
-
-  useEffect(() => {
-    if (creatingNote) return;
-    if (selectedNote) {
-      setDraftTitle(selectedNote.title);
-      setDraftContent(selectedNote.content);
-      setDraftFolderId(selectedNote.folder_id);
-      setDraftDatabaseId(selectedNote.database_id);
-      draftTitleRef.current = selectedNote.title;
-      draftContentRef.current = selectedNote.content;
-    } else {
-      setDraftTitle("");
-      setDraftContent("");
-      setDraftFolderId(null);
-      setDraftDatabaseId(null);
-      draftTitleRef.current = "";
-      draftContentRef.current = "";
-    }
-  }, [creatingNote, selectedNote]);
 
   useEffect(() => {
     if (!workspaceId || !collaborationEnabled) {
