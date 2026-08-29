@@ -274,13 +274,23 @@ export function KnowledgeSearchPanel({ client, databasesClient, collaborationCli
     filters.date_from ? `起始 ${filters.date_from}` : "",
     filters.date_to ? `截止 ${filters.date_to}` : "",
   ].filter(Boolean);
-  const unresolvedSavedFilterCount = (taxonomyLoading ? 0 : [
+  const unresolvedTaxonomyFilterCount = taxonomyLoading ? 0 : [
     ...filters.tag_ids.filter((id) => !tags.some((tag) => tag.id === id)),
     ...filters.folder_ids.filter((id) => !folders.some((folder) => folder.id === id)),
-  ].length) + (scopeLoading || (!databasesClient && !collaborationClient) ? 0 : [
-    ...filters.database_ids.filter((id) => !databases.some((database) => database.id === id)),
-    ...filters.member_ids.filter((id) => !members.some((member) => member.user_id === id)),
-  ].length);
+  ].length;
+  const unresolvedDatabaseFilterCount = scopeLoading
+    ? 0
+    : databasesClient
+      ? filters.database_ids.filter((id) => !databases.some((database) => database.id === id)).length
+      : filters.database_ids.length;
+  const unresolvedMemberFilterCount = scopeLoading
+    ? 0
+    : collaborationClient
+      ? filters.member_ids.filter((id) => !members.some((member) => member.user_id === id)).length
+      : filters.member_ids.length;
+  const unresolvedSavedFilterCount = unresolvedTaxonomyFilterCount
+    + unresolvedDatabaseFilterCount
+    + unresolvedMemberFilterCount;
 
   return (
     <section className="knowledge-search" aria-labelledby="knowledge-search-heading">

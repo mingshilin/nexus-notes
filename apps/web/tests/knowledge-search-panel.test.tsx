@@ -172,4 +172,31 @@ describe("KnowledgeSearchPanel", () => {
       }),
     })));
   });
+
+  it("explains unavailable saved scope IDs when optional scope clients are absent", async () => {
+    const staleScopeSearch: SavedSearch = {
+      ...savedSearch,
+      id: "saved-scope-stale",
+      name: "旧范围筛选",
+      filters: {
+        tag_ids: [],
+        folder_ids: [],
+        database_ids: ["db-missing"],
+        member_ids: ["member-missing"],
+        attachment_types: [],
+        ocr_statuses: [],
+        source_types: [],
+      },
+    };
+    const client = {
+      ...createClient(),
+      listSavedSearches: vi.fn(async () => [staleScopeSearch]),
+    };
+    render(<KnowledgeSearchPanel client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "应用旧范围筛选" }));
+
+    expect(await screen.findByText("部分已保存筛选条件暂时无法显示", { exact: false })).toBeInTheDocument();
+    expect(screen.getByText("2 项", { exact: false })).toBeInTheDocument();
+  });
 });
