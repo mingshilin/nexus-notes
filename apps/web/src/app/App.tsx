@@ -2007,6 +2007,7 @@ function AuthenticatedWorkspace({
           client={collaborationClient}
           open={notificationOpen}
           unreadCount={unreadCount}
+          cacheScope={`${userId}:${workspaceId ?? ""}`}
           opener={notificationOpenerRef.current}
           onClose={() => setNotificationOpen(false)}
           onNotificationRead={(count) => setUnreadCount((current) => Math.max(0, current - count))}

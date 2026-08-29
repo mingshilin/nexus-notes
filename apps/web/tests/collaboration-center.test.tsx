@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createElement } from "react";
+import { createElement, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ApiClientError } from "../src/data/api-client";
@@ -44,6 +44,12 @@ function collaboration(overrides: Record<string, unknown> = {}) {
     connectPresence: vi.fn(({ onStatus, onParticipants }) => { onStatus("unavailable"); onParticipants([]); return { sendPresence: vi.fn(), sendTyping: vi.fn(), disconnect: vi.fn() }; }),
     ...overrides,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => { resolve = nextResolve; });
+  return { promise, resolve };
 }
 
 describe("collaboration center", () => {
@@ -254,13 +260,59 @@ describe("collaboration center", () => {
 
     fireEvent.click(screen.getByLabelText("选择通知 notification-1"));
     fireEvent.click(screen.getByRole("button", { name: "将所选通知标为已读" }));
-    await waitFor(() => expect(client.readNotifications).toHaveBeenCalledWith({ notification_ids: ["notification-1"], base_revisions: { "notification-1": 1 } }));
+    await waitFor(() => expect(client.readNotifications).toHaveBeenCalledWith({ notification_ids: ["notification-1"], base_revisions: { "notification-1": 1 } }, expect.any(AbortSignal)));
     fireEvent.click(screen.getByRole("button", { name: "标记通知 notification-2 已读" }));
-    await waitFor(() => expect(client.readNotification).toHaveBeenCalledWith("notification-2", 1));
+    await waitFor(() => expect(client.readNotification).toHaveBeenCalledWith("notification-2", 1, expect.any(AbortSignal)));
     fireEvent.click(screen.getByRole("button", { name: "全部标为已读" }));
     await waitFor(() => expect(client.readAllNotifications).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getAllByRole("link", { name: "打开 mention" })[1]!);
     expect(onDeepLink).toHaveBeenCalledWith({ targetType: "database_record", targetId: "record-9", commentId: "comment-9" });
+  });
+
+  it("completes marking a notification read before a deep-link navigation closes the dialog", async () => {
+    const read = deferred<{ notification_ids: string[]; read_at: string }>();
+    const client = collaboration({ readNotification: vi.fn(() => read.promise) });
+    const onRead = vi.fn();
+    const onDeepLink = vi.fn();
+    const { NotificationCenter } = await import("../src/collaboration/NotificationCenter");
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return createElement(NotificationCenter, {
+        client: client as never,
+        open,
+        unreadCount: 1,
+        onClose: () => setOpen(false),
+        onNotificationRead: onRead,
+        onDeepLink: (target) => { onDeepLink(target); setOpen(false); },
+      });
+    }
+    render(createElement(Harness));
+    fireEvent.click(await screen.findByRole("link", { name: "打开 mention" }));
+    await waitFor(() => expect(client.readNotification).toHaveBeenCalledWith("notification-1", 1, expect.any(AbortSignal)));
+    expect(onDeepLink).not.toHaveBeenCalled();
+    read.resolve({ notification_ids: ["notification-1"], read_at: now });
+    await waitFor(() => expect(onRead).toHaveBeenCalledWith(1));
+    expect(onDeepLink).toHaveBeenCalledWith({ targetType: "note", targetId: "note-1", commentId: "comment-1" });
+  });
+
+  it("does not navigate when marking an unread deep link read fails", async () => {
+    const onDeepLink = vi.fn();
+    const client = collaboration({
+      readNotification: vi.fn(async () => { throw new Error("offline"); }),
+    });
+    const { NotificationCenter } = await import("../src/collaboration/NotificationCenter");
+    render(createElement(NotificationCenter, {
+      client: client as never,
+      open: true,
+      unreadCount: 1,
+      onClose: vi.fn(),
+      onDeepLink,
+    }));
+
+    fireEvent.click(await screen.findByRole("link", { name: "打开 mention" }));
+    await waitFor(() => expect(client.readNotification).toHaveBeenCalled());
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(onDeepLink).not.toHaveBeenCalled();
   });
 
   it("enforces the viewer request matrix while keeping readable comments and activity", async () => {

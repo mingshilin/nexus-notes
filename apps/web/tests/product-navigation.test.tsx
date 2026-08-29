@@ -1066,6 +1066,35 @@ describe("App product navigation", () => {
     expect(await screen.findByText("导出任务 job-ws-2：queued")).toBeInTheDocument();
   });
 
+  it("does not carry the previous workspace unread count across a switch", async () => {
+    const nextUnread = deferred<{ unread_count: number }>();
+    const apiClient = {
+      request: vi.fn(async (request: { path: string; headers?: Record<string, string> }) => {
+        const workspaceId = request.headers?.["x-workspace-id"];
+        if (request.path === "/api/v2/notifications/unread") {
+          return workspaceId === "ws-2" ? nextUnread.promise : { unread_count: 7 };
+        }
+        if (request.path === "/api/v2/profile") return { id: "u1", email: "u@example.test", display_name: "用户", biography: "", locale: "zh-CN", timezone: "Asia/Shanghai", avatar_url: null, updated_at: "2026-08-23T00:00:00.000Z" };
+        if (request.path === "/api/v2/profile/sessions") return { items: [] };
+        if (request.path === "/api/v2/members") return { items: [] };
+        return { items: [], next_cursor: null };
+      }),
+    };
+    const authClient = { session: vi.fn(async () => twoWorkspaceSession()) };
+    render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={draftStore() as any} turnstileSiteKey="test" />);
+
+    expect(await screen.findByRole("button", { name: "通知，7 条未读" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 Team" }));
+
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "账户中心" })).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "通知，7 条未读" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "通知，0 条未读" })).toBeInTheDocument();
+    nextUnread.resolve({ unread_count: 2 });
+    expect(await screen.findByRole("button", { name: "通知，2 条未读" })).toBeInTheDocument();
+  });
+
   it("continues to accept workspace prop initialization changes before an interactive route selection", async () => {
     const sessionWithoutActiveWorkspace = { ...twoWorkspaceSession(), active_workspace_id: null };
     const authClient = { session: vi.fn(async () => sessionWithoutActiveWorkspace) };
