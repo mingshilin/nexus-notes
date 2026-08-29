@@ -123,3 +123,41 @@ local: deploy readiness checks passed
 - Existing visual structure, API URLs, client method signatures, delete semantics, and `DatabaseWorkbench` behavior were preserved.
 - Command mutations do not expose an abort parameter in the existing client; their late UI callbacks are protected by the database/panel scope guard.
 - Full repository tests, build, audit, and authenticated browser E2E were not rerun in this finalization because the requested verification scope was limited to the focused tests, typecheck, and readiness command.
+
+## Final Review Follow-Up
+
+### TDD RED
+
+Added regression coverage for late database/field permission deletions and for a successful permission write whose follow-up list refresh fails. Before the final source change, the focused Task 18 file reported `12` tests with `3` failures: both late deletion cases removed the current database's shared permission ID, and the refresh failure was reported as `操作失败，未保存本地更改。`.
+
+### Final Fix
+
+- `deleteDatabasePermission` and `deleteFieldPermission` now capture database/panel generation and check `scopeIsCurrent` before mutating state after the awaited delete.
+- Permission save refresh failures are handled separately from the write itself. A committed write reports `权限已保存，但权限列表刷新失败，请稍后重试。` (or the field equivalent), returns a completion-with-warning result to the mutation runner, and still triggers the normal invalidation callback.
+- Abort errors are recognized for both DOMException and Error-shaped `AbortError` values.
+
+### Final GREEN Evidence
+
+Fresh focused run:
+
+```text
+npm run test --workspace @nexus/web -- tests/database-management-recovery.test.tsx
+```
+
+Result: `1` file passed, `12/12` tests passed.
+
+Fresh combined run:
+
+```text
+npm run test --workspace @nexus/web -- tests/database-management-recovery.test.tsx tests/database-management-center.test.tsx tests/database-workspace-live.test.tsx
+```
+
+Result: `3` files passed, `18/18` tests passed.
+
+Fresh `npm run typecheck --workspace @nexus/web`: exit code `0`.
+
+Fresh `npm run build`: exit code `0`; main entry `339.17 kB`, no Vite `>500 kB` warning.
+
+Fresh `npm run verify:deploy`: passed; initial `markdown-vendor`, `ocr-vendor`, and `ai-vendor` chunks absent.
+
+The source/test fixes were committed on the optimization branch as `8e2a78b` (CSV file-read recovery) and `7ba19fc` (permission refresh/deletion recovery); this report update is intentionally kept with the local verification ledger.
