@@ -61,7 +61,8 @@ const LazyCollaborationCenter = lazy(async () => {
   return { default: module.CollaborationCenter };
 });
 
-const defaultAuthClient = new AuthClient(new ApiClient());
+const defaultApiClient = new ApiClient();
+const defaultAuthClient = new AuthClient(defaultApiClient);
 type AppRoute =
   | { kind: "workspace"; workspaceId?: string }
   | { kind: "invite"; token: string }
@@ -2117,7 +2118,7 @@ function AuthenticatedWorkspace({
 
 export function App({
   authClient = defaultAuthClient,
-  apiClient = new ApiClient(),
+  apiClient = defaultApiClient,
   localStore,
   workspaceId,
   turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "",
