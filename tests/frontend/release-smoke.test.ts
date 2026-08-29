@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -14,6 +18,75 @@ import {
 } from "../../scripts/smoke-beta-browser.mjs";
 
 describe("release browser smoke modes", () => {
+  function runAuthenticatedGate(args: string[]) {
+    const env = { ...process.env };
+    delete env.NEXUS_NOTES_BETA_USER_DATA_DIR;
+    delete env.NEXUS_NOTES_BETA_AVATAR_FILE;
+    delete env.NEXUS_NOTES_BETA_SESSION_TOKEN;
+    return spawnSync(process.execPath, [resolve(process.cwd(), "scripts/smoke-beta-browser.mjs"), "--require-auth", ...args], {
+      cwd: process.cwd(),
+      env,
+      encoding: "utf8",
+    });
+  }
+
+  it("fails closed with machine-readable BLOCKED output when no external profile is configured", () => {
+    const result = runAuthenticatedGate([]);
+
+    expect(result.status).toBe(2);
+    expect(result.stdout).not.toContain('"status":"SKIP"');
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      status: "BLOCKED",
+      reason: "AUTHENTICATED_PROFILE_UNSET",
+      requiredEnv: ["NEXUS_NOTES_BETA_USER_DATA_DIR"],
+      profile: "external",
+    });
+  });
+
+  it("reports a separate blocked reason when the external profile exists but the avatar fixture is missing", () => {
+    const profile = mkdtempSync(`${tmpdir()}\\nexus-beta-release-profile-`);
+    try {
+      const result = runAuthenticatedGate([`--user-data-dir=${profile}`]);
+      expect(result.status).toBe(2);
+      expect(JSON.parse(result.stdout.trim())).toMatchObject({
+        status: "BLOCKED",
+        reason: "AVATAR_FIXTURE_UNSET",
+        requiredEnv: ["NEXUS_NOTES_BETA_AVATAR_FILE"],
+        profile: "external",
+      });
+    } finally {
+      rmSync(profile, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an invalid external profile without starting a browser", () => {
+    const profile = `${tmpdir()}\\nexus-beta-profile-does-not-exist-${Date.now()}`;
+    const result = runAuthenticatedGate([`--user-data-dir=${profile}`, `--avatar-file=${profile}.png`]);
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      status: "BLOCKED",
+      reason: "AUTHENTICATED_PROFILE_INVALID",
+      profile: "external",
+    });
+  });
+
+  it("reports an invalid avatar fixture separately from a valid external profile", () => {
+    const profile = mkdtempSync(`${tmpdir()}\\nexus-beta-release-profile-`);
+    const avatar = `${tmpdir()}\\nexus-beta-avatar-does-not-exist-${Date.now()}.png`;
+    try {
+      const result = runAuthenticatedGate([`--user-data-dir=${profile}`, `--avatar-file=${avatar}`]);
+      expect(result.status).toBe(2);
+      expect(JSON.parse(result.stdout.trim())).toMatchObject({
+        status: "BLOCKED",
+        reason: "AUTHENTICATED_FIXTURE_INVALID",
+        requiredEnv: ["NEXUS_NOTES_BETA_AVATAR_FILE"],
+        profile: "external",
+      });
+    } finally {
+      rmSync(profile, { recursive: true, force: true });
+    }
+  });
+
   it("rejects public shell combined with an explicit authenticated mode", () => {
     expect(() => parseArgs(["--public-shell", "--require-auth"])).toThrow(/conflicting/i);
     expect(() => parseArgs(["--public-shell", "--authenticated"])).toThrow(/conflicting/i);
