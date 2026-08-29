@@ -37,7 +37,7 @@ import { useWorkspaceNavigation } from "./use-workspace-navigation";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { clearWorkspaceQueryCache } from "../data/workspace-query-cache";
 import { localDateKey, noteMatchesListView, type NoteListView } from "./use-notes-list-data";
-import { useDatabaseWorkspaceData } from "./use-database-workspace-data";
+import { useDatabaseWorkspaceController } from "./use-database-workspace-controller";
 import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
 import { useNoteMutations } from "./use-note-mutations";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
@@ -293,9 +293,6 @@ function AuthenticatedWorkspace({
   const [collaborationInitialSection, setCollaborationInitialSection] = useState<"people" | "comments" | "shares">("people");
   const [resolvedNotificationRecord, setResolvedNotificationRecord] = useState<DatabaseRecord | null>(null);
   const [databaseRefreshVersion, setDatabaseRefreshVersion] = useState(0);
-  const [firstDatabaseName, setFirstDatabaseName] = useState("");
-  const [databaseCreateOpen, setDatabaseCreateOpen] = useState(false);
-  const [creatingFirstDatabase, setCreatingFirstDatabase] = useState(false);
   const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState<ServiceWorkerUpdate | null>(null);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -417,6 +414,14 @@ function AuthenticatedWorkspace({
     abortRequests: abortInspectorRequests,
     selectedNote,
   } = notesController;
+  const databaseController = useDatabaseWorkspaceController({
+    client: databaseClient,
+    workspaceId,
+    active: activeDomain === "databases",
+    webClipperOpen,
+    refreshVersion: databaseRefreshVersion,
+    resolvedNotificationRecord,
+  });
   const {
     databases,
     setDatabases,
@@ -433,14 +438,13 @@ function AuthenticatedWorkspace({
     setDatabaseError,
     requestDatabasePage,
     abortDatabaseRequests,
-  } = useDatabaseWorkspaceData({
-    client: databaseClient,
-    workspaceId,
-    active: activeDomain === "databases",
-    webClipperOpen,
-    refreshVersion: databaseRefreshVersion,
-    resolvedNotificationRecord,
-  });
+    firstDatabaseName,
+    setFirstDatabaseName,
+    databaseCreateOpen,
+    setDatabaseCreateOpen,
+    creatingFirstDatabase,
+    createDatabaseFromName,
+  } = databaseController;
   const {
     attachments,
     setAttachments,
@@ -1129,21 +1133,11 @@ function AuthenticatedWorkspace({
     abortInspectorRequests();
   }, [abortInspectorRequests]);
 
-  const createDatabaseFromName = (name: string) => {
-    if (!workspaceId || !name.trim() || creatingFirstDatabase) return;
-    setCreatingFirstDatabase(true);
-    setDatabaseError(null);
-    void databaseClient.createDatabase({ name: name.trim(), description: "" }).then((created) => {
-      setDatabases((current) => [...current, created]);
-      setSelectedDatabaseId(created.id);
-      setFirstDatabaseName("");
-      setDatabaseCreateOpen(false);
-      setActivePane("canvas");
-    }).catch(() => setDatabaseError("数据库暂时无法创建，请稍后重试。"))
-      .finally(() => setCreatingFirstDatabase(false));
+  const createFirstDatabase = () => {
+    void createDatabaseFromName(firstDatabaseName).then((created) => {
+      if (created) setActivePane("canvas");
+    });
   };
-
-  const createFirstDatabase = () => createDatabaseFromName(firstDatabaseName);
 
   const createTaskDatabaseFromCenter = async (): Promise<CreateActionResult> => {
     if (!workspaceId || role === "viewer") return { status: "rejected", message: "当前工作区没有创建任务数据库的权限。" };
