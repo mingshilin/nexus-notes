@@ -446,4 +446,20 @@ describe("database management recovery", () => {
     expect(screen.queryAllByText(/current-user/).length).toBeGreaterThan(0);
     expect(within(management).getByRole("button", { name: "保存权限" })).toBeEnabled();
   });
+
+  it("keeps existing CSV text and reports a recoverable file-read failure", async () => {
+    const client = statsClient({ previewCsv: vi.fn(async () => ({ headers: [], rows: [], errors: [], total_rows: 0 })) });
+    renderDrawer("db-a", client);
+    const management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "导入导出" }));
+    const csvText = "Name\nLaunch";
+    fireEvent.change(within(management).getByLabelText("CSV 内容"), { target: { value: csvText } });
+    const file = new File(["ignored"], "broken.csv", { type: "text/csv" });
+    Object.defineProperty(file, "text", { configurable: true, value: vi.fn().mockRejectedValue(new Error("read failed")) });
+
+    fireEvent.change(within(management).getByLabelText("选择 CSV 文件"), { target: { files: [file] } });
+
+    expect(await within(management).findByRole("alert")).toHaveTextContent("CSV 文件读取失败");
+    expect(within(management).getByLabelText("CSV 内容")).toHaveValue(csvText);
+  });
 });
