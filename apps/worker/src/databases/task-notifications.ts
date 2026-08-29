@@ -135,17 +135,30 @@ export function detectTaskDatabase(properties: readonly TaskProperty[], metadata
 }
 
 function hasTaskViews(views: TaskBlueprintMetadata["views"], descriptor: TaskDatabaseDescriptor) {
-  const coreFields = [descriptor.titlePropertyId, descriptor.statusPropertyId, descriptor.priorityPropertyId, descriptor.assigneePropertyId, descriptor.dueDatePropertyId, descriptor.descriptionPropertyId];
-  const containsCoreFields = (view: TaskBlueprintMetadata["views"][number]) => coreFields.every((propertyId) => view.config.visible_columns.includes(propertyId));
-  return views.some((view) => view.name === "任务列表" && view.type === "table" && containsCoreFields(view))
-    && views.some((view) => view.name === "按状态看板" && view.type === "board" && view.config.grouping?.property_id === descriptor.statusPropertyId && containsCoreFields(view))
-    && views.some((view) => view.name === "截止日期日历" && view.type === "calendar" && view.config.settings.date_property_id === descriptor.dueDatePropertyId && containsCoreFields(view));
+  const visibleColumns = [descriptor.titlePropertyId, descriptor.statusPropertyId, descriptor.priorityPropertyId, descriptor.assigneePropertyId, descriptor.dueDatePropertyId, descriptor.descriptionPropertyId];
+  const canonical = (type: DatabaseView["type"]): DatabaseView["config"] => ({
+    filters: [],
+    sorts: [{ property_id: descriptor.priorityPropertyId, direction: "desc" }, { property_id: descriptor.dueDatePropertyId, direction: "asc" }],
+    grouping: type === "board" ? { property_id: descriptor.statusPropertyId } : null,
+    visible_columns: visibleColumns,
+    page_size: 50,
+    settings: type === "calendar"
+      ? { date_property_id: descriptor.dueDatePropertyId, show_undated: true, week_start: "monday" }
+      : { row_height: "default", card_properties: [descriptor.priorityPropertyId, descriptor.assigneePropertyId, descriptor.dueDatePropertyId] },
+  });
+  return ([
+    ["任务列表", "table"],
+    ["按状态看板", "board"],
+    ["截止日期日历", "calendar"],
+  ] as const).every(([name, type]) => views.some((view) => view.name === name && view.type === type && stableJson(view.config) === stableJson(canonical(type))));
 }
 
 function hasTaskTemplate(templates: TaskBlueprintMetadata["templates"], descriptor: TaskDatabaseDescriptor) {
-  return templates.some((template) => template.name === "新任务"
-    && ["todo", "in-progress", "done", "cancelled"].includes(String(template.default_values[descriptor.statusPropertyId] ?? ""))
-    && ["low", "medium", "high"].includes(String(template.default_values[descriptor.priorityPropertyId] ?? "")));
+  const canonicalDefaults = {
+    [descriptor.statusPropertyId]: "todo",
+    [descriptor.priorityPropertyId]: "medium",
+  };
+  return templates.some((template) => template.name === "新任务" && stableJson(template.default_values) === stableJson(canonicalDefaults));
 }
 
 export function taskNotificationDedupeKey(

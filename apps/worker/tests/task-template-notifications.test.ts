@@ -282,16 +282,43 @@ describe("task template notifications", () => {
       const lookalikeAssignee = await state.repository.createProperty(state.owner, lookalike.id, {
         name: "负责人", type: "member", config: { allow_multiple: false }, position: 3,
       });
-      await state.repository.createProperty(state.owner, lookalike.id, {
+      const lookalikeDueDate = await state.repository.createProperty(state.owner, lookalike.id, {
         name: "截止日期", type: "date", config: {}, position: 4,
       });
-      await state.repository.createProperty(state.owner, lookalike.id, {
+      const lookalikeDescription = await state.repository.createProperty(state.owner, lookalike.id, {
         name: "描述", type: "text", config: { max_length: 20_000 }, position: 5,
+      });
+      const lookalikeVisibleColumns = [lookalikeTitle.id, lookalikeStatus.id, lookalikePriority.id, lookalikeAssignee.id, lookalikeDueDate.id, lookalikeDescription.id];
+      for (const [position, [name, type]] of ([
+        ["任务列表", "table"],
+        ["按状态看板", "board"],
+        ["截止日期日历", "calendar"],
+      ] as const).entries()) {
+        await state.repository.createView(state.owner, lookalike.id, {
+          name,
+          type,
+          position,
+          config: {
+            filters: [{ property_id: lookalikeStatus.id, operator: "not_equals", value: "cancelled" }],
+            sorts: [],
+            grouping: type === "board" ? { property_id: lookalikeStatus.id } : null,
+            visible_columns: lookalikeVisibleColumns,
+            page_size: 25,
+            settings: type === "calendar"
+              ? { date_property_id: lookalikeDueDate.id, show_undated: false, week_start: "sunday" }
+              : { row_height: "compact", card_properties: [lookalikeAssignee.id] },
+          },
+        });
+      }
+      await state.repository.createTemplate(state.owner, lookalike.id, {
+        name: "新任务",
+        default_values: { [lookalikeStatus.id]: "done", [lookalikePriority.id]: "high" },
       });
       const lookalikeRecord = await state.repository.createRecord(state.owner, lookalike.id, {
         note_id: null,
         values: { [lookalikeTitle.id]: "相似任务", [lookalikeStatus.id]: "todo", [lookalikePriority.id]: "medium", [lookalikeAssignee.id]: "user-2" },
       });
+      expect(await notifications(state.test.db)).toHaveLength(0);
       await state.test.db.prepare("DELETE FROM notifications").run();
       await state.repository.updateRecord(state.owner, lookalike.id, lookalikeRecord.id, {
         base_revision: lookalikeRecord.revision,
