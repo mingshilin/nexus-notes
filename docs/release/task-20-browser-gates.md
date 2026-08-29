@@ -47,9 +47,9 @@ The authenticated scenarios cover note draft recovery, profile and avatar flows,
 
 Recorded on 2026-08-29 from `codex/nexus-notes-optimization`:
 
-- `npx vitest run --config vite.config.ts tests/frontend/release-smoke.test.ts`: PASS, `16/16`.
+- `npx vitest run --config vite.config.ts tests/frontend/release-smoke.test.ts`: PASS, `17/17`.
 - `npm run lint`: PASS, legacy and all workspace typechecks completed successfully.
-- `npm run test:unit`: PASS, `35` files and `158` tests.
+- `npm run test:unit`: PASS, `35` files and `159` tests.
 - `npm run test:integration`: PASS, `11` files and `63` tests.
 - `npm run test:worker`: PASS, `97` files and `615` tests.
 - `npm run beta:test`: PASS, Web `80` files/`556` tests, Worker `97` files/`615` tests, Contracts `62` tests, Domain `31` tests, UI `2` tests; testkit has no test files.

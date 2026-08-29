@@ -79,7 +79,7 @@ export function parseArgs(argv) {
     publicShell: false,
     authenticated: false,
     cleanupRecovery: false,
-    authModeExplicit: process.env.NEXUS_NOTES_BETA_REQUIRE_AUTH === "1",
+    authModeExplicit: false,
     requireAuth: process.env.NEXUS_NOTES_BETA_REQUIRE_AUTH !== "0",
     userDataDir: process.env[PROFILE_ENV],
     avatarFile: process.env[AVATAR_ENV],

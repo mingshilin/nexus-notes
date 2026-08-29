@@ -120,6 +120,18 @@ describe("release browser smoke modes", () => {
     }
   });
 
+  it("lets explicit public-shell mode override the inherited auth requirement", () => {
+    vi.stubEnv("NEXUS_NOTES_BETA_REQUIRE_AUTH", "1");
+    try {
+      expect(parseArgs(["--public-shell"])).toMatchObject({
+        publicShell: true,
+        requireAuth: false,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("keeps cleanup recovery separate from standard authenticated smoke", () => {
     expect(parseArgs(["--require-auth", "--authenticated"]).cleanupRecovery).toBe(false);
     expect(parseArgs(["--require-auth", "--authenticated", "--cleanup-recovery"])).toMatchObject({
