@@ -10,7 +10,6 @@ import { MAX_UPLOAD_BYTES, NoteSchema, SUPPORTED_ATTACHMENT_MIME_TYPES } from "@
 import type { AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, NoteLink, NoteRevision, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient, ApiClientError } from "../data/api-client";
-import { CollaborationClient } from "../data/collaboration-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic } from "../knowledge/KnowledgeRecoveryPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { useWorkbenchMode } from "../layout/use-mobile-layout";
@@ -33,7 +32,7 @@ import { InviteRedemptionPage } from "../collaboration/InviteRedemptionPage";
 import { PublicSharePage } from "../collaboration/PublicSharePage";
 import { NotificationCenter } from "../collaboration/NotificationCenter";
 import type { CollaborationCommentTarget, CollaborationShareTarget, NotificationTarget } from "../collaboration/collaboration-types";
-import { useWorkspaceClients } from "./use-workspace-clients";
+import { routeCollaborationClientFor, useWorkspaceClients } from "./use-workspace-clients";
 import { useWorkspaceNavigation } from "./use-workspace-navigation";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { clearWorkspaceQueryCache } from "../data/workspace-query-cache";
@@ -2212,12 +2211,12 @@ export function App({
     requestCleanup();
   };
   if (route.kind === "share") {
-    return <PublicSharePage client={new CollaborationClient(apiClient, "public-share")} token={route.token} />;
+    return <PublicSharePage client={routeCollaborationClientFor(apiClient, "public-share")} token={route.token} />;
   }
   if (route.kind === "invite") {
     return <InviteRedemptionPage
       authClient={authClient}
-      client={new CollaborationClient(apiClient, "invite-redemption")}
+      client={routeCollaborationClientFor(apiClient, "invite-redemption")}
       token={route.token}
       turnstileSiteKey={turnstileSiteKey}
       onAccepted={(acceptedWorkspaceId, userId) => {

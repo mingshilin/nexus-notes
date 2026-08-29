@@ -25,6 +25,10 @@ interface WorkspaceClientScope {
   clients: WorkspaceClients;
 }
 
+export type RouteCollaborationScope = "public-share" | "invite-redemption";
+
+const routeClientRegistry = new WeakMap<object, Map<RouteCollaborationScope, CollaborationClient>>();
+
 function createWorkspaceClients(apiClient: ApiClient, workspaceId: string, userId: string): WorkspaceClients {
   const queryCache = workspaceQueryCacheFor(apiClient);
   return {
@@ -48,4 +52,17 @@ export function useWorkspaceClients(apiClient: ApiClient, workspaceId: string, u
     };
   }
   return scope.current.clients;
+}
+
+export function routeCollaborationClientFor(apiClient: ApiClient, scope: RouteCollaborationScope) {
+  let clients = routeClientRegistry.get(apiClient);
+  if (!clients) {
+    clients = new Map();
+    routeClientRegistry.set(apiClient, clients);
+  }
+  const existing = clients.get(scope);
+  if (existing) return existing;
+  const created = new CollaborationClient(apiClient, scope);
+  clients.set(scope, created);
+  return created;
 }
