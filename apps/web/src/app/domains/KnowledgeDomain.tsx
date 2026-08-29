@@ -37,17 +37,24 @@ export type KnowledgeDomainProps = WorkspaceDomainProps<KnowledgeDomainClient, K
 
 function KnowledgeToolDisclosure({ label, children }: { label: string; children: ReactNode }) {
   const [open, setOpen] = useState(false);
+  const [hasOpened, setHasOpened] = useState(false);
+  const toggle = () => {
+    setHasOpened(true);
+    setOpen((current) => !current);
+  };
   return (
     <section className="knowledge-tool-disclosure" aria-label={label}>
       <button
         type="button"
         className="knowledge-tool-disclosure-trigger"
         aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
+        onClick={toggle}
       >
         {open ? `收起${label}` : `展开${label}`}
       </button>
-      {open ? children : null}
+      <div hidden={!open} aria-hidden={!open || undefined}>
+        {hasOpened ? children : null}
+      </div>
     </section>
   );
 }

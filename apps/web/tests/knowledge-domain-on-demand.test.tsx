@@ -53,4 +53,24 @@ describe("KnowledgeDomain on-demand panels", () => {
     expect(await screen.findByRole("region", { name: "外部日历内容" })).toBeVisible();
     expect(loaders.external).toHaveBeenCalledOnce();
   });
+
+  it("preserves an expanded panel instance when it is collapsed and reopened", async () => {
+    render(<KnowledgeDomain
+      client={externalClient as never}
+      workspaceId="ws-1"
+      role="owner"
+      selectedEntity={{ recoveryContent: null }}
+      callbacks={{}}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "展开知识图谱" }));
+    const graph = await screen.findByRole("region", { name: "图谱内容" });
+    fireEvent.click(screen.getByRole("button", { name: "收起知识图谱" }));
+
+    expect(document.querySelector('[aria-label="图谱内容"]')).toBe(graph);
+    expect(graph.parentElement).toHaveAttribute("hidden");
+
+    fireEvent.click(screen.getByRole("button", { name: "展开知识图谱" }));
+    expect(document.querySelector('[aria-label="图谱内容"]')).toBe(graph);
+  });
 });
