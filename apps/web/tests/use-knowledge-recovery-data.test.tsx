@@ -97,7 +97,7 @@ describe("useKnowledgeRecoveryData", () => {
       expect.objectContaining({ mime_type: "application/pdf", ocr_status: "failed", limit: 50 }),
       expect.any(AbortSignal),
     ));
-    expect(result.current.attachments.map((item) => item.id)).toEqual(["page-1"]);
+    await waitFor(() => expect(result.current.attachments.map((item) => item.id)).toEqual(["page-1"]));
     expect(result.current.attachmentCursor).toBe("next");
     expect(client.listAttachments.mock.calls.at(-1)?.[0]).not.toHaveProperty("cursor");
   });

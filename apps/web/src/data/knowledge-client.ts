@@ -197,11 +197,12 @@ export class KnowledgeClient {
     ).then(({ items }) => items);
   }
 
-  retryReminderDelivery(reminderId: string, deliveryId: string) {
+  retryReminderDelivery(reminderId: string, deliveryId: string, signal?: AbortSignal) {
     return this.command<{ delivery: ReminderDelivery }>(
       `/api/v2/reminders/${encodeURIComponent(reminderId)}/deliveries/${encodeURIComponent(deliveryId)}/retry`,
       "POST",
       {},
+      signal,
     ).then(({ delivery }) => delivery);
   }
 

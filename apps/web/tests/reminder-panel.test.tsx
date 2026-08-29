@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { Reminder } from "@nexus/contracts";
 
@@ -57,6 +57,12 @@ function delivery(id: string, status: "failed" | "queued" | "sent") {
     created_at: base.created_at,
     updated_at: base.updated_at,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => { resolve = nextResolve; });
+  return { promise, resolve };
 }
 
 const notesClient = {
@@ -154,7 +160,28 @@ describe("ReminderPanel", () => {
     expect(client.listReminderDeliveries).toHaveBeenCalledWith("future", expect.any(AbortSignal));
 
     fireEvent.click(screen.getByRole("button", { name: "重试 Email 投递" }));
-    await waitFor(() => expect(client.retryReminderDelivery).toHaveBeenCalledWith("future", "delivery-1"));
+    await waitFor(() => expect(client.retryReminderDelivery).toHaveBeenCalledWith("future", "delivery-1", expect.any(AbortSignal)));
     expect(screen.getByRole("region", { name: "未来计划投递状态" })).toHaveTextContent("已排队");
+  });
+
+  it("does not let a previous workspace mutation reset the current form", async () => {
+    const oldCreate = deferred<Reminder>();
+    const oldClient = createClient();
+    oldClient.createReminder = vi.fn(() => oldCreate.promise);
+    const newClient = createClient();
+    const view = render(<ReminderPanel client={oldClient} cacheScope="user-1:workspace-old" defaultTimezone="Asia/Shanghai" now={() => new Date("2026-08-25T08:00:00.000Z")} />);
+    await screen.findByRole("listitem", { name: "未来计划" });
+    fireEvent.change(screen.getByLabelText("提醒标题"), { target: { value: "旧工作区提交" } });
+    fireEvent.change(screen.getByLabelText("提醒时间"), { target: { value: "2026-08-28T10:30" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建提醒" }));
+    await waitFor(() => expect(oldClient.createReminder).toHaveBeenCalledOnce());
+
+    view.rerender(<ReminderPanel client={newClient} cacheScope="user-1:workspace-new" defaultTimezone="Asia/Shanghai" now={() => new Date("2026-08-25T08:00:00.000Z")} />);
+    fireEvent.change(screen.getByLabelText("提醒标题"), { target: { value: "新工作区草稿" } });
+    act(() => oldCreate.resolve({ ...reminders[1]!, id: "old-created", title: "旧工作区提交" }));
+    await act(async () => { await oldCreate.promise; });
+
+    expect(screen.getByLabelText("提醒标题")).toHaveValue("新工作区草稿");
+    expect(screen.queryByText("提醒已创建。")).not.toBeInTheDocument();
   });
 });

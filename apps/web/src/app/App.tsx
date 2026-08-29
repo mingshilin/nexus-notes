@@ -1865,7 +1865,7 @@ function AuthenticatedWorkspace({
       callbacks={accountAndAIDomainCallbacks}
     />
   );
-  const remindersCanvas = <Suspense fallback={<p className="reminder-state" role="status">正在加载提醒中心…</p>}><LazyReminderPanel client={knowledgeClient} notesClient={notesClient} /></Suspense>;
+  const remindersCanvas = <Suspense fallback={<p className="reminder-state" role="status">正在加载提醒中心…</p>}><LazyReminderPanel client={knowledgeClient} notesClient={notesClient} cacheScope={`${userId}:${workspaceId ?? ""}`} /></Suspense>;
 
   const collaborationUnavailableCanvas = (
     <section className="product-domain-page product-status-page">
