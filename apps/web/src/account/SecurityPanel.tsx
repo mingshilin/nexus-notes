@@ -61,6 +61,9 @@ export function SecurityPanel({ active = true, client, profile, sessions, loadin
   const pendingFocusRef = useRef<HTMLElement | null>(null);
   const focusFrameRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
+  const profileIdRef = useRef<string | null>(profile?.id ?? null);
+  const clientRef = useRef(client);
+  const clientVersionRef = useRef(0);
   const revokePendingRef = useRef(false);
   const setWorkbenchModalOpen = useWorkbenchModalState();
   revokePendingRef.current = revokePending;
@@ -69,6 +72,42 @@ export function SecurityPanel({ active = true, client, profile, sessions, loadin
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
+
+  useLayoutEffect(() => {
+    if (clientRef.current === client) return;
+    clientRef.current = client;
+    clientVersionRef.current += 1;
+    setRevokeOthersPending(false);
+    setRevokeOthersStatus(null);
+    setRevokeError(null);
+  }, [client]);
+
+  useLayoutEffect(() => {
+    if (profile) {
+      profileIdRef.current = profile.id;
+      return;
+    }
+    if (profileIdRef.current === null) return;
+    profileIdRef.current = null;
+    setNewEmail("");
+    setRequestedEmail(null);
+    setEmailPassword("");
+    setEmailCode("");
+    setEmailStep("request");
+    setEmailError(null);
+    setEmailStatus(null);
+    setPasswordCurrent("");
+    setPasswordNew("");
+    setPasswordConfirm("");
+    setPasswordError(null);
+    setPasswordStatus(null);
+    setPendingAction(null);
+    setRevokeTarget(null);
+    setRevokePending(false);
+    setRevokeError(null);
+    setRevokeOthersPending(false);
+    setRevokeOthersStatus(null);
+  }, [profile]);
 
   useLayoutEffect(() => {
     if (!revokeTarget) return undefined;
@@ -245,14 +284,23 @@ export function SecurityPanel({ active = true, client, profile, sessions, loadin
 
   const revokeOtherSessions = () => {
     if (!client.revokeOtherSessions || revokeOthersPending) return;
+    const requestClient = client;
+    const requestVersion = clientVersionRef.current;
+    const isCurrent = () => mountedRef.current
+      && clientRef.current === requestClient
+      && clientVersionRef.current === requestVersion;
     setRevokeOthersPending(true);
     setRevokeOthersStatus(null);
     setRevokeError(null);
     void client.revokeOtherSessions().then(({ revoked }) => {
+      if (!isCurrent()) return;
       setRevokeOthersStatus(`已撤销 ${revoked} 个其他会话。`);
       onSessionsRefresh();
-    }).catch(() => setRevokeError("撤销其他会话失败，请重试。"))
-      .finally(() => setRevokeOthersPending(false));
+    }).catch(() => {
+      if (isCurrent()) setRevokeError("撤销其他会话失败，请重试。");
+    }).finally(() => {
+      if (isCurrent()) setRevokeOthersPending(false);
+    });
   };
 
   const revokeDialog = revokeTarget ? createPortal(

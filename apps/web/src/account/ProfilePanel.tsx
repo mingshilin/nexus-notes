@@ -1,5 +1,5 @@
 import { UpdateProfileInputSchema, type Profile, type UpdateProfileInput } from "@nexus/contracts";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ProfileClientLike } from "./index";
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
@@ -59,13 +59,24 @@ export function ProfilePanel({ client, profile, loading, error, onRetry, onProfi
   const dirty = !sameForm(form, baselineRef.current);
   dirtyRef.current = dirty;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
 
-  useEffect(() => {
-    if (!profile) return;
+  useLayoutEffect(() => {
+    if (!profile) {
+      if (profileIdRef.current !== null) {
+        profileIdRef.current = null;
+        baselineProfileIdRef.current = null;
+        baselineRef.current = emptyForm;
+        formRef.current = emptyForm;
+        dirtyRef.current = false;
+        setForm(emptyForm);
+        setFormError(null);
+      }
+      return;
+    }
     const next = formFromProfile(profile);
     const profileChanged = baselineProfileIdRef.current !== null && baselineProfileIdRef.current !== profile.id;
     profileIdRef.current = profile.id;
