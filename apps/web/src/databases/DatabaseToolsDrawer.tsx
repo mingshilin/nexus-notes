@@ -14,6 +14,7 @@ import { DatabaseTemplateForm, DatabaseViewForm } from "./DatabaseViewTemplateFo
 
 type Panel = "overview" | "database" | "record" | "property" | "view" | "template" | "comment" | "bulk" | "permission" | "csv";
 const panels: readonly [Panel, string][] = [["overview", "概览"], ["database", "设置"], ["record", "记录"], ["property", "属性"], ["view", "视图"], ["template", "模板"], ["comment", "评论"], ["bulk", "批量"], ["permission", "权限"], ["csv", "导入导出"]];
+const CANCELLED_OPERATION = Symbol("cancelled-operation");
 
 type ControllerRef = { current: AbortController | null };
 
@@ -25,6 +26,10 @@ function abortRequest(ref: ControllerRef) {
 function cancelRequest(ref: ControllerRef, controller: AbortController) {
   if (ref.current === controller) ref.current = null;
   controller.abort();
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 export function DatabaseToolsDrawer({ open, views, activeViewId, database, databases = [database], databaseId, properties, records, templates = [], client, collaborationClient, onOpenChange, onViewChange, onMutation, onBulkPreview }: {
@@ -88,6 +93,10 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
   const commentsControllerRef = useRef<AbortController | null>(null);
   const databasePermissionsControllerRef = useRef<AbortController | null>(null);
   const fieldPermissionsControllerRef = useRef<AbortController | null>(null);
+  const databasePermissionSaveControllerRef = useRef<AbortController | null>(null);
+  const fieldPermissionSaveControllerRef = useRef<AbortController | null>(null);
+  const databasePermissionsSequenceRef = useRef(0);
+  const fieldPermissionsSequenceRef = useRef(0);
   const membersControllerRef = useRef<AbortController | null>(null);
   const csvPreviewControllerRef = useRef<AbortController | null>(null);
 
@@ -142,6 +151,8 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
       abortRequest(commentsControllerRef);
       abortRequest(databasePermissionsControllerRef);
       abortRequest(fieldPermissionsControllerRef);
+      abortRequest(databasePermissionSaveControllerRef);
+      abortRequest(fieldPermissionSaveControllerRef);
       abortRequest(membersControllerRef);
       abortRequest(csvPreviewControllerRef);
     };
@@ -168,6 +179,10 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     abortRequest(commentsControllerRef);
     abortRequest(databasePermissionsControllerRef);
     abortRequest(fieldPermissionsControllerRef);
+    abortRequest(databasePermissionSaveControllerRef);
+    abortRequest(fieldPermissionSaveControllerRef);
+    databasePermissionsSequenceRef.current += 1;
+    fieldPermissionsSequenceRef.current += 1;
     abortRequest(membersControllerRef);
     abortRequest(csvPreviewControllerRef);
     setPanel("overview");
@@ -209,6 +224,10 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     abortRequest(commentsControllerRef);
     abortRequest(databasePermissionsControllerRef);
     abortRequest(fieldPermissionsControllerRef);
+    abortRequest(databasePermissionSaveControllerRef);
+    abortRequest(fieldPermissionSaveControllerRef);
+    databasePermissionsSequenceRef.current += 1;
+    fieldPermissionsSequenceRef.current += 1;
     abortRequest(membersControllerRef);
     abortRequest(csvPreviewControllerRef);
     setPending(false);
@@ -267,7 +286,9 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     const requestDatabaseId = databaseId;
     const requestDatabaseGeneration = databaseGenerationRef.current;
     const requestPanelGeneration = panelGenerationRef.current;
-    const isCurrent = () => requestIsCurrent(controller, requestDatabaseId, requestDatabaseGeneration, "permission", requestPanelGeneration, databasePermissionsControllerRef);
+    const requestSequence = ++databasePermissionsSequenceRef.current;
+    const isCurrent = () => requestIsCurrent(controller, requestDatabaseId, requestDatabaseGeneration, "permission", requestPanelGeneration, databasePermissionsControllerRef)
+      && databasePermissionsSequenceRef.current === requestSequence;
     setDatabasePermissions([]);
     void Promise.resolve().then(() => client.listDatabasePermissions(requestDatabaseId, controller.signal)).then((items) => {
       if (isCurrent()) setDatabasePermissions(items);
@@ -315,7 +336,9 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     const requestDatabaseId = databaseId;
     const requestDatabaseGeneration = databaseGenerationRef.current;
     const requestPanelGeneration = panelGenerationRef.current;
-    const isCurrent = () => requestIsCurrent(controller, requestDatabaseId, requestDatabaseGeneration, "permission", requestPanelGeneration, fieldPermissionsControllerRef);
+    const requestSequence = ++fieldPermissionsSequenceRef.current;
+    const isCurrent = () => requestIsCurrent(controller, requestDatabaseId, requestDatabaseGeneration, "permission", requestPanelGeneration, fieldPermissionsControllerRef)
+      && fieldPermissionsSequenceRef.current === requestSequence;
     setFieldPermissions([]);
     void Promise.all(properties.map((property) => client.listFieldPermissions(requestDatabaseId, property.id, controller.signal)))
       .then((items) => {
@@ -362,13 +385,14 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     const isCurrent = () => scopeIsCurrent(requestDatabaseId, requestDatabaseGeneration, requestPanel, requestPanelGeneration);
     setPending(true); setFeedback(null);
     try {
-      await command();
+      const result = await command();
+      if (result === CANCELLED_OPERATION) return;
       if (isCurrent()) {
         setFeedback(message);
         onMutation?.();
       }
-    } catch {
-      if (isCurrent()) setFeedback("操作失败，未保存本地更改。");
+    } catch (error) {
+      if (isCurrent() && !isAbortError(error)) setFeedback("操作失败，未保存本地更改。");
     } finally {
       if (isCurrent()) setPending(false);
     }
@@ -417,26 +441,33 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     const requestDatabaseGeneration = databaseGenerationRef.current;
     const requestPanel = panel;
     const requestPanelGeneration = panelGenerationRef.current;
+    const requestSubjectType = subjectType;
     const requestSubjectId = subjectId.trim();
     const requestRole = role;
-    const current = visibleDatabasePermissions.find((permission) => permission.subject_type === subjectType && permission.subject_id === requestSubjectId);
+    const current = visibleDatabasePermissions.find((permission) => permission.subject_type === requestSubjectType && permission.subject_id === requestSubjectId);
     void run(async () => {
-      abortRequest(databasePermissionsControllerRef);
+      abortRequest(databasePermissionSaveControllerRef);
       const controller = new AbortController();
-      databasePermissionsControllerRef.current = controller;
-      const isCurrent = () => requestIsCurrent(controller, requestDatabaseId, requestDatabaseGeneration, requestPanel, requestPanelGeneration, databasePermissionsControllerRef);
+      databasePermissionSaveControllerRef.current = controller;
+      const requestSequence = ++databasePermissionsSequenceRef.current;
+      const isCurrent = () => requestIsCurrent(controller, requestDatabaseId, requestDatabaseGeneration, requestPanel, requestPanelGeneration, databasePermissionSaveControllerRef)
+        && databasePermissionsSequenceRef.current === requestSequence;
       try {
         await client!.setDatabasePermission(requestDatabaseId, {
-          subject_type: subjectType,
+          subject_type: requestSubjectType,
           subject_id: requestSubjectId,
           role: requestRole,
           base_revision: current?.revision ?? 1,
         });
-        if (!isCurrent()) return;
+        if (!isCurrent()) return CANCELLED_OPERATION;
         const items = await client!.listDatabasePermissions(requestDatabaseId, controller.signal);
-        if (isCurrent()) setDatabasePermissions(items);
+        if (!isCurrent()) return CANCELLED_OPERATION;
+        setDatabasePermissions(items);
+      } catch (error) {
+        if (!isCurrent() || isAbortError(error)) return CANCELLED_OPERATION;
+        throw error;
       } finally {
-        if (databasePermissionsControllerRef.current === controller) databasePermissionsControllerRef.current = null;
+        if (databasePermissionSaveControllerRef.current === controller) databasePermissionSaveControllerRef.current = null;
       }
     });
   };
@@ -446,29 +477,36 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     const requestDatabaseGeneration = databaseGenerationRef.current;
     const requestPanel = panel;
     const requestPanelGeneration = panelGenerationRef.current;
+    const requestSubjectType = subjectType;
     const requestPropertyId = visiblePermissionPropertyId;
     const requestSubjectId = subjectId.trim();
     const requestCanRead = fieldCanRead;
     const requestCanWrite = fieldCanWrite;
-    const current = visibleFieldPermissions.find((permission) => permission.property_id === requestPropertyId && permission.subject_type === subjectType && permission.subject_id === requestSubjectId);
+    const current = visibleFieldPermissions.find((permission) => permission.property_id === requestPropertyId && permission.subject_type === requestSubjectType && permission.subject_id === requestSubjectId);
     void run(async () => {
-      abortRequest(fieldPermissionsControllerRef);
+      abortRequest(fieldPermissionSaveControllerRef);
       const controller = new AbortController();
-      fieldPermissionsControllerRef.current = controller;
-      const isCurrent = () => requestIsCurrent(controller, requestDatabaseId, requestDatabaseGeneration, requestPanel, requestPanelGeneration, fieldPermissionsControllerRef);
+      fieldPermissionSaveControllerRef.current = controller;
+      const requestSequence = ++fieldPermissionsSequenceRef.current;
+      const isCurrent = () => requestIsCurrent(controller, requestDatabaseId, requestDatabaseGeneration, requestPanel, requestPanelGeneration, fieldPermissionSaveControllerRef)
+        && fieldPermissionsSequenceRef.current === requestSequence;
       try {
         await client!.setFieldPermission(requestDatabaseId, requestPropertyId, {
-          subject_type: subjectType,
+          subject_type: requestSubjectType,
           subject_id: requestSubjectId,
           can_read: requestCanRead,
           can_write: requestCanWrite,
           base_revision: current?.revision ?? 1,
         });
-        if (!isCurrent()) return;
+        if (!isCurrent()) return CANCELLED_OPERATION;
         const updated = await client!.listFieldPermissions(requestDatabaseId, requestPropertyId, controller.signal);
-        if (isCurrent()) setFieldPermissions((items) => [...items.filter((item) => item.property_id !== requestPropertyId), ...updated]);
+        if (!isCurrent()) return CANCELLED_OPERATION;
+        setFieldPermissions((items) => [...items.filter((item) => item.property_id !== requestPropertyId), ...updated]);
+      } catch (error) {
+        if (!isCurrent() || isAbortError(error)) return CANCELLED_OPERATION;
+        throw error;
       } finally {
-        if (fieldPermissionsControllerRef.current === controller) fieldPermissionsControllerRef.current = null;
+        if (fieldPermissionSaveControllerRef.current === controller) fieldPermissionSaveControllerRef.current = null;
       }
     });
   };

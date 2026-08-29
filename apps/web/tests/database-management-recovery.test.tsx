@@ -372,4 +372,78 @@ describe("database management recovery", () => {
     expect(screen.queryAllByText(/user-a/)).toHaveLength(0);
     expect(screen.queryAllByText(/user-b/).length).toBeGreaterThan(0);
   });
+
+  it("keeps panel permission loading ownership separate from a post-save refresh", async () => {
+    const initialLoad = deferred<Array<Record<string, unknown>>>();
+    const saveRefresh = deferred<Array<Record<string, unknown>>>();
+    let listCalls = 0;
+    const client = statsClient({
+      setDatabasePermission: vi.fn(async () => ({})),
+      listDatabasePermissions: vi.fn((_databaseId: string, _signal?: AbortSignal) => {
+        listCalls += 1;
+        return listCalls === 1 ? initialLoad.promise : saveRefresh.promise;
+      }),
+      listFieldPermissions: vi.fn(async () => []),
+    });
+    renderDrawer("db-a", client);
+    const management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    await waitFor(() => expect(client.listDatabasePermissions).toHaveBeenCalledTimes(1));
+    const initialSignal = client.listDatabasePermissions.mock.calls[0]?.[1] as AbortSignal;
+
+    fireEvent.change(within(management).getByLabelText("成员 ID"), { target: { value: "user-a" } });
+    fireEvent.click(within(management).getByRole("button", { name: "保存权限" }));
+    await waitFor(() => expect(client.listDatabasePermissions).toHaveBeenCalledTimes(2));
+
+    expect(initialSignal.aborted).toBe(false);
+    await act(async () => {
+      initialLoad.resolve([{ id: "stale-load", subject_id: "stale-user", subject_type: "user", role: "viewer", revision: 1 }]);
+      await Promise.resolve();
+    });
+    expect(screen.queryByText(/stale-user/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      saveRefresh.resolve([{ id: "saved", subject_id: "user-a", subject_type: "user", role: "viewer", revision: 2 }]);
+      await Promise.resolve();
+    });
+    expect(await screen.findByText(/user-a/)).toBeInTheDocument();
+  });
+
+  it("silently discards a superseded post-save refresh in the same database panel", async () => {
+    const saveRefresh = deferred<Array<Record<string, unknown>>>();
+    let listCalls = 0;
+    const originalClient = statsClient({
+      setDatabasePermission: vi.fn(async () => ({})),
+      listDatabasePermissions: vi.fn(() => {
+        listCalls += 1;
+        return listCalls === 1 ? Promise.resolve([]) : saveRefresh.promise;
+      }),
+      listFieldPermissions: vi.fn(async () => []),
+    });
+    const replacementClient = statsClient({
+      setDatabasePermission: vi.fn(async () => ({})),
+      listDatabasePermissions: vi.fn(async () => [{ id: "current", subject_id: "current-user", subject_type: "user", role: "editor", revision: 1 }]),
+      listFieldPermissions: vi.fn(async () => []),
+    });
+    const rendered = renderDrawer("db-a", originalClient);
+    let management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    await waitFor(() => expect(originalClient.listDatabasePermissions).toHaveBeenCalledTimes(1));
+    fireEvent.change(within(management).getByLabelText("成员 ID"), { target: { value: "user-a" } });
+    fireEvent.click(within(management).getByRole("button", { name: "保存权限" }));
+    await waitFor(() => expect(originalClient.listDatabasePermissions).toHaveBeenCalledTimes(2));
+
+    rendered.rerender(rendered.element({ client: replacementClient }));
+    management = screen.getByRole("dialog", { name: "数据库工具" });
+    await waitFor(() => expect(replacementClient.listDatabasePermissions).toHaveBeenCalledWith("db-a", expect.any(AbortSignal)));
+    await waitFor(() => expect(screen.queryAllByText(/current-user/).length).toBeGreaterThan(0));
+
+    await act(async () => {
+      saveRefresh.reject(new DOMException("Superseded", "AbortError"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("操作失败，未保存本地更改。")).not.toBeInTheDocument();
+    expect(screen.queryAllByText(/current-user/).length).toBeGreaterThan(0);
+    expect(within(management).getByRole("button", { name: "保存权限" })).toBeEnabled();
+  });
 });
