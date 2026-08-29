@@ -41,15 +41,8 @@ const hitSourceLabels: Record<SearchHit["hit_sources"][number], string> = {
   ocr: "OCR",
 };
 
-const listFilterKeys = ["tag_ids", "folder_ids", "database_ids", "member_ids", "attachment_types"] as const;
-type ListFilterKey = typeof listFilterKeys[number];
-
 function parseList(value: string) {
   return [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))];
-}
-
-function formatList(value: readonly string[]) {
-  return value.join(", ");
 }
 
 function filtersForRequest(filters: SavedSearchFilters): SavedSearchFilters {
@@ -135,7 +128,7 @@ export function KnowledgeSearchPanel({ client, databasesClient, collaborationCli
         taxonomyFailuresRef.current.add("tags");
       }
       const failures = [folderResult.status === "rejected" ? "文件夹" : "", tagResult.status === "rejected" ? "标签" : ""].filter(Boolean);
-      if (failures.length) setTaxonomyError(`${failures.join("和")}暂时无法加载，已保留其他可用分类，仍可使用 ID 过滤。`);
+      if (failures.length) setTaxonomyError(`${failures.join("和")}暂时无法加载，已保留其他可用分类，请重试选项加载。`);
     }).finally(() => {
       if (!controller.signal.aborted) setTaxonomyLoading(false);
     });
@@ -164,7 +157,7 @@ export function KnowledgeSearchPanel({ client, databasesClient, collaborationCli
         databaseResult.status === "rejected" ? "数据库" : "",
         memberResult.status === "rejected" ? "成员" : "",
       ].filter(Boolean);
-      if (failures.length) setScopeError(`${failures.join("和")}选项暂时无法加载，仍可使用 ID 过滤。`);
+      if (failures.length) setScopeError(`${failures.join("和")}选项暂时无法加载，请重试选项加载。`);
     }).finally(() => {
       if (!controller.signal.aborted) setScopeLoading(false);
     });
@@ -199,8 +192,8 @@ export function KnowledgeSearchPanel({ client, databasesClient, collaborationCli
     });
   };
 
-  const updateListFilter = (key: ListFilterKey, value: string) => {
-    setFilters((current) => ({ ...current, [key]: parseList(value) }));
+  const updateAttachmentTypes = (value: string) => {
+    setFilters((current) => ({ ...current, attachment_types: parseList(value) }));
   };
 
   const toggleListValue = (key: "tag_ids" | "folder_ids" | "database_ids" | "member_ids", value: string) => {
@@ -281,6 +274,13 @@ export function KnowledgeSearchPanel({ client, databasesClient, collaborationCli
     filters.date_from ? `起始 ${filters.date_from}` : "",
     filters.date_to ? `截止 ${filters.date_to}` : "",
   ].filter(Boolean);
+  const unresolvedSavedFilterCount = (taxonomyLoading ? 0 : [
+    ...filters.tag_ids.filter((id) => !tags.some((tag) => tag.id === id)),
+    ...filters.folder_ids.filter((id) => !folders.some((folder) => folder.id === id)),
+  ].length) + (scopeLoading || (!databasesClient && !collaborationClient) ? 0 : [
+    ...filters.database_ids.filter((id) => !databases.some((database) => database.id === id)),
+    ...filters.member_ids.filter((id) => !members.some((member) => member.user_id === id)),
+  ].length);
 
   return (
     <section className="knowledge-search" aria-labelledby="knowledge-search-heading">
@@ -294,16 +294,7 @@ export function KnowledgeSearchPanel({ client, databasesClient, collaborationCli
       </form>
       <fieldset className="knowledge-search-filters">
         <legend>完整过滤</legend>
-        {listFilterKeys.map((key) => {
-          const labels: Record<ListFilterKey, string> = {
-            tag_ids: "标签过滤",
-            folder_ids: "文件夹过滤",
-            database_ids: "数据库过滤",
-            member_ids: "成员过滤",
-            attachment_types: "附件类型过滤",
-          };
-          return <label className="knowledge-search-filter" key={key}>{labels[key]}<input aria-label={labels[key]} value={formatList(filters[key])} onChange={(event) => updateListFilter(key, event.target.value)} placeholder="多个值用逗号分隔" /></label>;
-        })}
+        <label className="knowledge-search-filter">附件类型过滤<input aria-label="附件类型过滤" value={filters.attachment_types.join(", ")} onChange={(event) => updateAttachmentTypes(event.target.value)} placeholder="多个 MIME 类型用逗号分隔" /></label>
         <label className="knowledge-search-filter">开始日期<input aria-label="搜索开始日期" type="date" value={filters.date_from ?? ""} onChange={(event) => setFilters((current) => ({ ...current, date_from: event.target.value || undefined }))} /></label>
         <label className="knowledge-search-filter">结束日期<input aria-label="搜索结束日期" type="date" value={filters.date_to ?? ""} onChange={(event) => setFilters((current) => ({ ...current, date_to: event.target.value || undefined }))} /></label>
         <label className="knowledge-search-filter">收藏<select aria-label="收藏过滤" value={filters.favorite === undefined ? "" : String(filters.favorite)} onChange={(event) => setFilters((current) => ({ ...current, favorite: event.target.value === "" ? undefined : event.target.value === "true" }))}><option value="">全部</option><option value="true">仅收藏</option><option value="false">未收藏</option></select></label>
@@ -312,10 +303,10 @@ export function KnowledgeSearchPanel({ client, databasesClient, collaborationCli
         <div className="knowledge-search-checks"><span>OCR 状态</span>{ocrOptions.map((status) => <label key={status}><input type="checkbox" checked={filters.ocr_statuses.includes(status)} onChange={() => toggleOcrStatus(status)} />{status}</label>)}</div>
         {taxonomyLoading ? <p className="knowledge-search-state" role="status">正在加载文件夹和标签…</p> : null}
         {taxonomyError ? <div className="knowledge-search-error-row"><p className="knowledge-search-error" role="alert">{taxonomyError}</p><button type="button" onClick={() => setTaxonomyRetry((value) => value + 1)}>重试分类加载</button></div> : null}
-        {!taxonomyLoading && (folders.length > 0 || tags.length > 0) ? <div className="knowledge-search-taxonomy"><span>可读分类</span>{tags.map((tag) => <label key={tag.id}><input type="checkbox" aria-label={`标签：${tag.name}`} checked={filters.tag_ids.includes(tag.id)} onChange={() => toggleListValue("tag_ids", tag.id)} />标签：{tag.name}</label>)}{folders.map((folder) => <label key={folder.id}><input type="checkbox" aria-label={`文件夹：${folder.name}`} checked={filters.folder_ids.includes(folder.id)} onChange={() => toggleListValue("folder_ids", folder.id)} />文件夹：{folder.name}</label>)}</div> : null}
+        {!taxonomyLoading ? <div className="knowledge-search-taxonomy"><span>可读分类</span>{tags.length > 0 ? tags.map((tag) => <label key={tag.id}><input type="checkbox" aria-label={`标签：${tag.name}`} checked={filters.tag_ids.includes(tag.id)} onChange={() => toggleListValue("tag_ids", tag.id)} />标签：{tag.name}</label>) : <small>暂无可用标签</small>}{folders.length > 0 ? folders.map((folder) => <label key={folder.id}><input type="checkbox" aria-label={`文件夹：${folder.name}`} checked={filters.folder_ids.includes(folder.id)} onChange={() => toggleListValue("folder_ids", folder.id)} />文件夹：{folder.name}</label>) : <small>暂无可用文件夹</small>}</div> : null}
         {scopeLoading ? <p className="knowledge-search-state" role="status">正在加载数据库和成员…</p> : null}
         {scopeError ? <div className="knowledge-search-error-row"><p className="knowledge-search-error" role="alert">{scopeError}</p><button type="button" onClick={() => setScopeRetry((value) => value + 1)}>重试选项加载</button></div> : null}
-        {!scopeLoading && (databases.length > 0 || members.length > 0) ? <div className="knowledge-search-taxonomy knowledge-search-scope-options"><span>可读范围</span>{databases.map((database) => <label key={database.id}><input type="checkbox" aria-label={`数据库：${database.name}`} checked={filters.database_ids.includes(database.id)} onChange={() => toggleListValue("database_ids", database.id)} />数据库：{database.name}</label>)}{members.map((member) => <label key={member.user_id}><input type="checkbox" aria-label={`成员：${member.display_name}`} checked={filters.member_ids.includes(member.user_id)} onChange={() => toggleListValue("member_ids", member.user_id)} />成员：{member.display_name}</label>)}</div> : null}
+        {!scopeLoading ? <div className="knowledge-search-taxonomy knowledge-search-scope-options"><span>可读范围</span>{databases.length > 0 ? databases.map((database) => <label key={database.id}><input type="checkbox" aria-label={`数据库：${database.name}`} checked={filters.database_ids.includes(database.id)} onChange={() => toggleListValue("database_ids", database.id)} />数据库：{database.name}</label>) : <small>暂无可用数据库</small>}{members.length > 0 ? members.map((member) => <label key={member.user_id}><input type="checkbox" aria-label={`成员：${member.display_name}`} checked={filters.member_ids.includes(member.user_id)} onChange={() => toggleListValue("member_ids", member.user_id)} />成员：{member.display_name}</label>) : <small>暂无可用成员</small>}</div> : null}
         <button type="button" className="knowledge-search-reset" onClick={resetFilters}>清除过滤</button>
       </fieldset>
       <form className="knowledge-search-save" onSubmit={saveCurrentSearch}>
@@ -327,6 +318,7 @@ export function KnowledgeSearchPanel({ client, databasesClient, collaborationCli
       {savedSearches.length > 0 ? <ul className="knowledge-search-saved" aria-label="已保存搜索">{savedSearches.map((saved) => <li key={saved.id} aria-label={saved.name}><strong>{saved.name}</strong><button type="button" aria-label={`应用${saved.name}`} onClick={() => applySavedSearch(saved)}>应用</button><button type="button" aria-label={`删除${saved.name}`} onClick={() => deleteSavedSearch(saved)}>删除</button></li>)}</ul> : null}
       {error ? <div className="knowledge-search-error-row"><p className="knowledge-search-error" role="alert">{error}</p>{searchRetryAvailable ? <button type="button" onClick={() => runSearch(query, filters)}>重试搜索</button> : null}</div> : null}
       {feedback ? <p className="knowledge-search-feedback" aria-live="polite">{feedback}</p> : null}
+      {unresolvedSavedFilterCount > 0 ? <p className="knowledge-search-filter-warning" role="status">部分已保存筛选条件暂时无法显示（{unresolvedSavedFilterCount} 项），仍会按原条件搜索；可重试选项加载。</p> : null}
       {activeFilterLabels.length > 0 ? <p className="knowledge-search-filter-summary" aria-label="当前生效过滤">当前过滤：{activeFilterLabels.join(" · ")}</p> : null}
       {!loading && results.length === 0 ? <p className="knowledge-search-state">输入关键词或筛选条件后开始搜索。</p> : null}
       <div className="knowledge-search-results" aria-live="polite">

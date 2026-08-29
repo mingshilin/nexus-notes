@@ -573,10 +573,11 @@ button { color: inherit; }
 .knowledge-search-saved li { display: flex; align-items: center; gap: 8px; min-width: 0; border-top: 1px solid var(--border-subtle); padding-top: 8px; }
 .knowledge-search-saved strong { overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .knowledge-search-saved button { min-height: 30px; padding: 6px 9px; }
-.knowledge-search-state, .knowledge-search-error, .knowledge-search-feedback { margin: 0; font-size: 12px; line-height: 1.5; }
+.knowledge-search-state, .knowledge-search-error, .knowledge-search-feedback, .knowledge-search-filter-warning { margin: 0; font-size: 12px; line-height: 1.5; }
 .knowledge-search-state { color: hsl(var(--muted-foreground)); }
 .knowledge-search-error { color: hsl(var(--destructive)); }
 .knowledge-search-feedback { color: #18864b; }
+.knowledge-search-filter-warning { color: #9a6700; }
 .knowledge-search-results { display: grid; gap: 8px; }
 .knowledge-search-result { display: grid; gap: 6px; border-top: 1px solid var(--border-subtle); padding-top: 10px; }
 .knowledge-search-result > div { display: grid; gap: 3px; min-width: 0; }
