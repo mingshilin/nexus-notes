@@ -101,7 +101,13 @@ export function parseArgs(argv) {
   if (options.cleanupRecovery && options.publicShell) {
     throw new Error("Conflicting browser smoke modes: --cleanup-recovery requires authenticated mode");
   }
-  if (options.publicShell) options.requireAuth = false;
+  if (options.publicShell) {
+    options.requireAuth = false;
+    // Public-shell checks must never inherit authenticated browser state.
+    options.userDataDir = undefined;
+    options.avatarFile = undefined;
+    options.sessionToken = undefined;
+  }
   return options;
 }
 
@@ -1023,15 +1029,15 @@ async function run() {
     process.exitCode = 2;
     return;
   }
-  if (!options.publicShell && !options.avatarFile) {
-    printBlocked("AVATAR_FIXTURE_UNSET", [AVATAR_ENV]);
-    process.exitCode = 2;
-    return;
-  }
   try {
     if (options.userDataDir) options.userDataDir = externalPath(options.userDataDir, PROFILE_ENV, "directory");
   } catch {
     printBlocked("AUTHENTICATED_PROFILE_INVALID", [PROFILE_ENV]);
+    process.exitCode = 2;
+    return;
+  }
+  if (!options.publicShell && !options.avatarFile) {
+    printBlocked("AVATAR_FIXTURE_UNSET", [AVATAR_ENV]);
     process.exitCode = 2;
     return;
   }

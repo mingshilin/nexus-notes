@@ -70,6 +70,18 @@ describe("release browser smoke modes", () => {
     });
   });
 
+  it("validates the external profile before checking the avatar fixture", () => {
+    const profile = `${tmpdir()}\\nexus-beta-profile-does-not-exist-${Date.now()}`;
+    const result = runAuthenticatedGate([`--user-data-dir=${profile}`]);
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      status: "BLOCKED",
+      reason: "AUTHENTICATED_PROFILE_INVALID",
+      requiredEnv: ["NEXUS_NOTES_BETA_USER_DATA_DIR"],
+      profile: "external",
+    });
+  });
+
   it("reports an invalid avatar fixture separately from a valid external profile", () => {
     const profile = mkdtempSync(`${tmpdir()}\\nexus-beta-release-profile-`);
     const avatar = `${tmpdir()}\\nexus-beta-avatar-does-not-exist-${Date.now()}.png`;
@@ -90,6 +102,22 @@ describe("release browser smoke modes", () => {
   it("rejects public shell combined with an explicit authenticated mode", () => {
     expect(() => parseArgs(["--public-shell", "--require-auth"])).toThrow(/conflicting/i);
     expect(() => parseArgs(["--public-shell", "--authenticated"])).toThrow(/conflicting/i);
+  });
+
+  it("keeps public shell isolated from an inherited authenticated profile", () => {
+    vi.stubEnv("NEXUS_NOTES_BETA_USER_DATA_DIR", "C:\\external\\nexus-beta-auth-profile");
+    vi.stubEnv("NEXUS_NOTES_BETA_AVATAR_FILE", "C:\\external\\fixtures\\avatar.png");
+    try {
+      expect(parseArgs(["--public-shell"])).toMatchObject({
+        publicShell: true,
+        userDataDir: undefined,
+        avatarFile: undefined,
+        sessionToken: undefined,
+        requireAuth: false,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("keeps cleanup recovery separate from standard authenticated smoke", () => {
