@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import type {
   CreateReminderInput,
   Note,
@@ -13,14 +13,9 @@ import type {
 
 import type { KnowledgeClient } from "../data/knowledge-client";
 import type { NotesClient } from "../data/notes-client";
+import { useReminderWorkspaceData, type ReminderWorkspaceClient } from "./use-reminder-workspace-data";
 
-type ReminderPage = { items: Reminder[]; next_cursor: string | null };
-type ReminderClient = Pick<KnowledgeClient, "createReminder" | "updateReminder" | "snoozeReminder" | "deleteReminder"> & {
-  listReminderPage?(input: ReminderListQuery, signal?: AbortSignal): Promise<ReminderPage>;
-  listReminders?(includeCompleted?: boolean, signal?: AbortSignal): Promise<Reminder[]>;
-  listReminderDeliveries?(reminderId: string, signal?: AbortSignal): Promise<ReminderDelivery[]>;
-  retryReminderDelivery?(reminderId: string, deliveryId: string): Promise<ReminderDelivery>;
-};
+type ReminderClient = Pick<KnowledgeClient, "createReminder" | "updateReminder" | "snoozeReminder" | "deleteReminder"> & ReminderWorkspaceClient;
 type NoteLookupClient = Pick<NotesClient, "list">;
 type RepeatMode = "none" | ReminderRecurrence["frequency"];
 type EndMode = RecurrenceEnd["type"];
@@ -88,25 +83,37 @@ export function ReminderPanel({
   now?: () => Date;
   defaultTimezone?: string;
 }) {
-  const [reminders, setReminders] = useState<Reminder[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<ReminderListQuery["status"]>("all");
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const {
+    reminders,
+    setReminders,
+    nextCursor,
+    search,
+    setSearch,
+    debouncedSearch,
+    statusFilter,
+    setStatusFilter,
+    selectedIds,
+    setSelectedIds,
+    loading,
+    refreshing,
+    error,
+    setError,
+    feedback,
+    setFeedback,
+    failedBulkIds,
+    setFailedBulkIds,
+    retryRequest,
+    setRetryRequest,
+    loadMore,
+    deliveryOpenId,
+    deliveryItems,
+    deliveryLoadingId,
+    deliveryErrors,
+    deliveryRetryId,
+    toggleDeliveryStatus,
+    retryDelivery,
+  } = useReminderWorkspaceData({ client });
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<string | null>(null);
-  const [failedBulkIds, setFailedBulkIds] = useState<string[]>([]);
-  const [retryRequest, setRetryRequest] = useState<{ reminder: Reminder; input: UpdateReminderInput; success: string } | null>(null);
-  const [deliveryOpenId, setDeliveryOpenId] = useState<string | null>(null);
-  const [deliveryItems, setDeliveryItems] = useState<Record<string, ReminderDelivery[]>>({});
-  const [deliveryLoadingId, setDeliveryLoadingId] = useState<string | null>(null);
-  const [deliveryErrors, setDeliveryErrors] = useState<Record<string, string>>({});
-  const [deliveryRetryId, setDeliveryRetryId] = useState<string | null>(null);
-  const deliveryControllerRef = useRef<AbortController | null>(null);
 
   const [editing, setEditing] = useState<Reminder | null>(null);
   const [title, setTitle] = useState("");
@@ -125,38 +132,6 @@ export function ReminderPanel({
   const [noteOptions, setNoteOptions] = useState<Note[]>([]);
   const [noteId, setNoteId] = useState("");
   const [notesLoading, setNotesLoading] = useState(false);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedSearch(search.trim().slice(0, 160)), 250);
-    return () => window.clearTimeout(timer);
-  }, [search]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(reminders.length === 0);
-    setRefreshing(reminders.length > 0);
-    setError(null);
-    const load = client.listReminderPage
-      ? client.listReminderPage({ status: statusFilter, query: debouncedSearch || undefined, limit: 50 }, controller.signal)
-      : client.listReminders
-        ? client.listReminders(true, controller.signal).then((items) => ({ items, next_cursor: null }))
-        : Promise.reject(new Error("Reminder list API is unavailable"));
-    void load.then((page) => {
-      if (controller.signal.aborted) return;
-      setReminders(page.items);
-      setNextCursor(page.next_cursor);
-      setSelectedIds(new Set());
-      setFailedBulkIds([]);
-    }).catch(() => {
-      if (!controller.signal.aborted) setError("提醒暂时无法加载，保留最近可用数据。请稍后重试。");
-    }).finally(() => {
-      if (!controller.signal.aborted) {
-        setLoading(false);
-        setRefreshing(false);
-      }
-    });
-    return () => controller.abort();
-  }, [client, debouncedSearch, statusFilter]);
 
   useEffect(() => {
     if (!notesClient) return undefined;
@@ -341,60 +316,6 @@ export function ReminderPanel({
     }).catch(() => setError("提醒删除失败，当前提醒仍保留。"))
       .finally(() => setPending(false));
   };
-
-  const loadMore = () => {
-    if (!client.listReminderPage || !nextCursor || refreshing) return;
-    setRefreshing(true);
-    void client.listReminderPage({ status: statusFilter, query: debouncedSearch || undefined, cursor: nextCursor, limit: 50 }).then((page) => {
-      setReminders((current) => [...current, ...page.items.filter((item) => !current.some((existing) => existing.id === item.id))]);
-      setNextCursor(page.next_cursor);
-    }).catch(() => setError("更多提醒暂时无法加载。"))
-      .finally(() => setRefreshing(false));
-  };
-
-  const toggleDeliveryStatus = (reminderId: string) => {
-    if (!client.listReminderDeliveries) return;
-    if (deliveryOpenId === reminderId) {
-      deliveryControllerRef.current?.abort();
-      deliveryControllerRef.current = null;
-      setDeliveryOpenId(null);
-      return;
-    }
-    setDeliveryOpenId(reminderId);
-    if (deliveryItems[reminderId]) return;
-    const controller = new AbortController();
-    deliveryControllerRef.current?.abort();
-    deliveryControllerRef.current = controller;
-    setDeliveryLoadingId(reminderId);
-    setDeliveryErrors((current) => {
-      const next = { ...current };
-      delete next[reminderId];
-      return next;
-    });
-    void client.listReminderDeliveries(reminderId, controller.signal).then((items) => {
-      if (!controller.signal.aborted) setDeliveryItems((current) => ({ ...current, [reminderId]: items }));
-    }).catch(() => {
-      if (!controller.signal.aborted) setDeliveryErrors((current) => ({ ...current, [reminderId]: "投递状态暂时无法加载，请重试。" }));
-    }).finally(() => {
-      if (!controller.signal.aborted) setDeliveryLoadingId((current) => current === reminderId ? null : current);
-    });
-  };
-
-  const retryDelivery = (reminderId: string, deliveryId: string) => {
-    if (!client.retryReminderDelivery || deliveryRetryId !== null) return;
-    setDeliveryRetryId(`${reminderId}:${deliveryId}`);
-    void client.retryReminderDelivery(reminderId, deliveryId).then((updated) => {
-      setDeliveryItems((current) => ({
-        ...current,
-        [reminderId]: (current[reminderId] ?? []).map((item) => item.id === updated.id ? updated : item),
-      }));
-      setFeedback("投递已重新排队。请稍后查看发送结果。");
-    }).catch(() => {
-      setDeliveryErrors((current) => ({ ...current, [reminderId]: "投递重试失败，请稍后重试。" }));
-    }).finally(() => setDeliveryRetryId(null));
-  };
-
-  useEffect(() => () => deliveryControllerRef.current?.abort(), []);
 
   const grouped = reminders.reduce<Record<ReminderGroup, Reminder[]>>((result, reminder) => {
     result[reminderGroup(reminder, now())].push(reminder);
