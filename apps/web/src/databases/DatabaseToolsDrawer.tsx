@@ -15,6 +15,8 @@ import { DatabaseTemplateForm, DatabaseViewForm } from "./DatabaseViewTemplateFo
 type Panel = "overview" | "database" | "record" | "property" | "view" | "template" | "comment" | "bulk" | "permission" | "csv";
 const panels: readonly [Panel, string][] = [["overview", "概览"], ["database", "设置"], ["record", "记录"], ["property", "属性"], ["view", "视图"], ["template", "模板"], ["comment", "评论"], ["bulk", "批量"], ["permission", "权限"], ["csv", "导入导出"]];
 const CANCELLED_OPERATION = Symbol("cancelled-operation");
+const COMMITTED_STALE_OPERATION = Symbol("committed-stale-operation");
+const COMPLETED_WITH_WARNING = Symbol("completed-with-warning");
 
 type ControllerRef = { current: AbortController | null };
 
@@ -29,7 +31,8 @@ function cancelRequest(ref: ControllerRef, controller: AbortController) {
 }
 
 function isAbortError(error: unknown) {
-  return error instanceof DOMException && error.name === "AbortError";
+  return error instanceof DOMException && error.name === "AbortError"
+    || error instanceof Error && error.name === "AbortError";
 }
 
 export function DatabaseToolsDrawer({ open, views, activeViewId, database, databases = [database], databaseId, properties, records, templates = [], client, collaborationClient, onOpenChange, onViewChange, onMutation, onBulkPreview }: {
@@ -384,17 +387,35 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     const requestPanelGeneration = panelGenerationRef.current;
     const isCurrent = () => scopeIsCurrent(requestDatabaseId, requestDatabaseGeneration, requestPanel, requestPanelGeneration);
     setPending(true); setFeedback(null);
+    let result: unknown;
     try {
-      const result = await command();
-      if (result === CANCELLED_OPERATION) return;
-      if (isCurrent()) {
-        setFeedback(message);
-        onMutation?.();
-      }
+      result = await command();
     } catch (error) {
       if (isCurrent() && !isAbortError(error)) setFeedback("操作失败，未保存本地更改。");
-    } finally {
       if (isCurrent()) setPending(false);
+      return;
+    }
+
+    if (result === CANCELLED_OPERATION) {
+      if (isCurrent()) setPending(false);
+      return;
+    }
+
+    // Cache invalidation is best effort and must not turn a committed write into a failed one.
+    try {
+      onMutation?.();
+    } catch {
+      // The command already committed; a parent refresh can be retried independently.
+    }
+
+    if (result === COMMITTED_STALE_OPERATION || result === COMPLETED_WITH_WARNING) {
+      if (isCurrent()) setPending(false);
+      return;
+    }
+
+    if (isCurrent()) {
+      setFeedback(message);
+      setPending(false);
     }
   };
   const validate = (condition: unknown, message: string) => condition ? true : (setFeedback(message), false);
@@ -446,6 +467,7 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     const requestRole = role;
     const current = visibleDatabasePermissions.find((permission) => permission.subject_type === requestSubjectType && permission.subject_id === requestSubjectId);
     void run(async () => {
+      let committed = false;
       abortRequest(databasePermissionSaveControllerRef);
       const controller = new AbortController();
       databasePermissionSaveControllerRef.current = controller;
@@ -459,12 +481,19 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
           role: requestRole,
           base_revision: current?.revision ?? 1,
         });
-        if (!isCurrent()) return CANCELLED_OPERATION;
-        const items = await client!.listDatabasePermissions(requestDatabaseId, controller.signal);
-        if (!isCurrent()) return CANCELLED_OPERATION;
-        setDatabasePermissions(items);
+        committed = true;
+        if (!isCurrent()) return COMMITTED_STALE_OPERATION;
+        try {
+          const items = await client!.listDatabasePermissions(requestDatabaseId, controller.signal);
+          if (!isCurrent()) return COMMITTED_STALE_OPERATION;
+          setDatabasePermissions(items);
+        } catch (error) {
+          if (!isCurrent() || isAbortError(error)) return committed ? COMMITTED_STALE_OPERATION : CANCELLED_OPERATION;
+          setFeedback("权限已保存，但权限列表刷新失败，请稍后重试。");
+          return COMPLETED_WITH_WARNING;
+        }
       } catch (error) {
-        if (!isCurrent() || isAbortError(error)) return CANCELLED_OPERATION;
+        if (!isCurrent() || isAbortError(error)) return committed ? COMMITTED_STALE_OPERATION : CANCELLED_OPERATION;
         throw error;
       } finally {
         if (databasePermissionSaveControllerRef.current === controller) databasePermissionSaveControllerRef.current = null;
@@ -484,6 +513,7 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
     const requestCanWrite = fieldCanWrite;
     const current = visibleFieldPermissions.find((permission) => permission.property_id === requestPropertyId && permission.subject_type === requestSubjectType && permission.subject_id === requestSubjectId);
     void run(async () => {
+      let committed = false;
       abortRequest(fieldPermissionSaveControllerRef);
       const controller = new AbortController();
       fieldPermissionSaveControllerRef.current = controller;
@@ -498,16 +528,45 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
           can_write: requestCanWrite,
           base_revision: current?.revision ?? 1,
         });
-        if (!isCurrent()) return CANCELLED_OPERATION;
-        const updated = await client!.listFieldPermissions(requestDatabaseId, requestPropertyId, controller.signal);
-        if (!isCurrent()) return CANCELLED_OPERATION;
-        setFieldPermissions((items) => [...items.filter((item) => item.property_id !== requestPropertyId), ...updated]);
+        committed = true;
+        if (!isCurrent()) return COMMITTED_STALE_OPERATION;
+        try {
+          const updated = await client!.listFieldPermissions(requestDatabaseId, requestPropertyId, controller.signal);
+          if (!isCurrent()) return COMMITTED_STALE_OPERATION;
+          setFieldPermissions((items) => [...items.filter((item) => item.property_id !== requestPropertyId), ...updated]);
+        } catch (error) {
+          if (!isCurrent() || isAbortError(error)) return committed ? COMMITTED_STALE_OPERATION : CANCELLED_OPERATION;
+          setFeedback("字段权限已保存，但列表刷新失败，请稍后重试。");
+          return COMPLETED_WITH_WARNING;
+        }
       } catch (error) {
-        if (!isCurrent() || isAbortError(error)) return CANCELLED_OPERATION;
+        if (!isCurrent() || isAbortError(error)) return committed ? COMMITTED_STALE_OPERATION : CANCELLED_OPERATION;
         throw error;
       } finally {
         if (fieldPermissionSaveControllerRef.current === controller) fieldPermissionSaveControllerRef.current = null;
       }
+    });
+  };
+  const deleteDatabasePermission = (permission: DatabasePermission) => {
+    const requestDatabaseId = databaseId;
+    const requestDatabaseGeneration = databaseGenerationRef.current;
+    const requestPanel = panel;
+    const requestPanelGeneration = panelGenerationRef.current;
+    void run(async () => {
+      await client!.deleteDatabasePermission(requestDatabaseId, permission.id, { base_revision: permission.revision });
+      if (!scopeIsCurrent(requestDatabaseId, requestDatabaseGeneration, requestPanel, requestPanelGeneration)) return COMMITTED_STALE_OPERATION;
+      setDatabasePermissions((current) => current.filter((item) => item.id !== permission.id));
+    });
+  };
+  const deleteFieldPermission = (permission: FieldPermission) => {
+    const requestDatabaseId = databaseId;
+    const requestDatabaseGeneration = databaseGenerationRef.current;
+    const requestPanel = panel;
+    const requestPanelGeneration = panelGenerationRef.current;
+    void run(async () => {
+      await client!.deleteFieldPermission(requestDatabaseId, permission.property_id, permission.id, { base_revision: permission.revision });
+      if (!scopeIsCurrent(requestDatabaseId, requestDatabaseGeneration, requestPanel, requestPanelGeneration)) return COMMITTED_STALE_OPERATION;
+      setFieldPermissions((current) => current.filter((item) => item.id !== permission.id));
     });
   };
   const previewCsv = async () => {
@@ -644,12 +703,12 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
         {renderedPanel === "bulk" ? <DatabaseBulkForm records={records} properties={properties} selectedIds={selectedRecordIds} propertyId={bulkPropertyId} value={bulkValue} disabled={disabled} onSelectionChange={(id, selected) => setSelectedRecordIds((current) => selected ? [...current, id] : current.filter((currentId) => currentId !== id))} onPropertyChange={setBulkPropertyId} onValueChange={setBulkValue} onSubmit={submitBulk} /> : null}
         {renderedPanel === "permission" ? <>
           <DatabasePermissionForm subjectType={subjectType} subjectId={visibleSubjectId} role={role} members={collaborationClient ? visibleMembers : undefined} disabled={disabled} onSubjectTypeChange={changeSubjectType} onSubjectChange={setSubjectId} onRoleChange={setRole} onSubmit={saveDatabasePermission} />
-          <ul className="database-entity-list" aria-label="数据库权限列表">{visibleDatabasePermissions.map((permission) => <li key={permission.id}><span>{permission.subject_id} · {permission.role} · r{permission.revision}</span><button type="button" aria-label={`删除数据库权限 ${permission.subject_id}`} disabled={disabled} onClick={() => void run(async () => { await client!.deleteDatabasePermission(databaseId, permission.id, { base_revision: permission.revision }); setDatabasePermissions((current) => current.filter((item) => item.id !== permission.id)); })}>删除</button></li>)}</ul>
+          <ul className="database-entity-list" aria-label="数据库权限列表">{visibleDatabasePermissions.map((permission) => <li key={permission.id}><span>{permission.subject_id} · {permission.role} · r{permission.revision}</span><button type="button" aria-label={`删除数据库权限 ${permission.subject_id}`} disabled={disabled} onClick={() => deleteDatabasePermission(permission)}>删除</button></li>)}</ul>
           <label>权限字段<select aria-label="权限字段" value={visiblePermissionPropertyId} onChange={(event) => setPermissionPropertyId(event.target.value)}>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label>
           <label>字段可读<input type="checkbox" checked={fieldCanRead} onChange={(event) => { setFieldCanRead(event.target.checked); if (!event.target.checked) setFieldCanWrite(false); }} /></label>
           <label>字段可写<input type="checkbox" checked={fieldCanWrite} disabled={!fieldCanRead} onChange={(event) => setFieldCanWrite(event.target.checked)} /></label>
           <button type="button" disabled={disabled || !visiblePermissionPropertyId} onClick={saveFieldPermission}>保存字段权限</button>
-          <ul className="database-entity-list" aria-label="字段权限列表">{visibleFieldPermissions.filter((permission) => permission.property_id === visiblePermissionPropertyId).map((permission) => <li key={permission.id}><span>{permission.subject_id} · r{permission.revision}</span><button type="button" aria-label={`删除字段权限 ${permission.subject_id}`} disabled={disabled} onClick={() => void run(async () => { await client!.deleteFieldPermission(databaseId, permission.property_id, permission.id, { base_revision: permission.revision }); setFieldPermissions((current) => current.filter((item) => item.id !== permission.id)); })}>删除</button></li>)}</ul>
+          <ul className="database-entity-list" aria-label="字段权限列表">{visibleFieldPermissions.filter((permission) => permission.property_id === visiblePermissionPropertyId).map((permission) => <li key={permission.id}><span>{permission.subject_id} · r{permission.revision}</span><button type="button" aria-label={`删除字段权限 ${permission.subject_id}`} disabled={disabled} onClick={() => deleteFieldPermission(permission)}>删除</button></li>)}</ul>
           <DatabasePermissionMatrix members={visibleMembers} properties={properties} databasePermissions={visibleDatabasePermissions} fieldPermissions={visibleFieldPermissions} />
         </> : null}
         {renderedPanel === "csv" ? <DatabaseCsvManager csv={csv} properties={properties} mappings={csvMappings} preview={visibleCsvPreview} previewError={visibleCsvPreviewError} disabled={disabled} onCsvChange={setCsv} onMappingChange={(header, propertyId) => { setCsvMappings((current) => ({ ...current, [header]: propertyId })); setCsvPreviewError(null); }} onPreview={() => void previewCsv()} onRetry={() => void previewCsv()} onImport={() => { if (validate(csv.trim(), "请输入 CSV 内容。")) void run(() => client!.importCsv(databaseId, { csv, header_property_ids: csvMappings }), "CSV 已导入。"); }} onExport={() => void run(async () => downloadCsvBlob(await client!.exportCsvBlob(databaseId, { property_ids: properties.map((property) => property.id), page_size: 100 })), "CSV 已导出。")} /> : null}

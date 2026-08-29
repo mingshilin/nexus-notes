@@ -425,7 +425,9 @@ describe("database management recovery", () => {
       listDatabasePermissions: vi.fn(async () => [{ id: "current", subject_id: "current-user", subject_type: "user", role: "editor", revision: 1 }]),
       listFieldPermissions: vi.fn(async () => []),
     });
+    const onMutation = vi.fn();
     const rendered = renderDrawer("db-a", originalClient);
+    rendered.rerender(rendered.element({ onMutation }));
     let management = screen.getByRole("dialog", { name: "数据库工具" });
     fireEvent.click(within(management).getByRole("button", { name: "权限" }));
     await waitFor(() => expect(originalClient.listDatabasePermissions).toHaveBeenCalledTimes(1));
@@ -445,6 +447,7 @@ describe("database management recovery", () => {
     expect(screen.queryByText("操作失败，未保存本地更改。")).not.toBeInTheDocument();
     expect(screen.queryAllByText(/current-user/).length).toBeGreaterThan(0);
     expect(within(management).getByRole("button", { name: "保存权限" })).toBeEnabled();
+    expect(onMutation).toHaveBeenCalledOnce();
   });
 
   it("keeps existing CSV text and reports a recoverable file-read failure", async () => {
@@ -461,5 +464,129 @@ describe("database management recovery", () => {
 
     expect(await within(management).findByRole("alert")).toHaveTextContent("CSV 文件读取失败");
     expect(within(management).getByLabelText("CSV 内容")).toHaveValue(csvText);
+  });
+
+  it("does not let a late database-permission deletion remove the current database permission", async () => {
+    const deleteA = deferred<{ id: string }>();
+    const sharedId = "permission-shared";
+    const permissionA = { id: sharedId, subject_id: "user-a", subject_type: "user", role: "viewer", revision: 1 };
+    const permissionB = { id: sharedId, subject_id: "user-b", subject_type: "user", role: "editor", revision: 1 };
+    const client = statsClient({
+      listDatabasePermissions: vi.fn(async (databaseId: string) => databaseId === "db-a" ? [permissionA] : [permissionB]),
+      listFieldPermissions: vi.fn(async () => []),
+      deleteDatabasePermission: vi.fn(() => deleteA.promise),
+    });
+    const rendered = renderDrawer("db-a", client);
+    let management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    expect(await within(management).findByText(/user-a/)).toBeInTheDocument();
+    fireEvent.click(within(management).getByRole("button", { name: "删除数据库权限 user-a" }));
+    await waitFor(() => expect(client.deleteDatabasePermission).toHaveBeenCalledWith("db-a", sharedId, { base_revision: 1 }));
+
+    rendered.rerender(rendered.element({
+      database: makeDatabase("db-b"),
+      databaseId: "db-b",
+      properties: [makeProperty("db-b")],
+      records: [makeRecord("db-b")],
+      views: [makeView("db-b")],
+    }));
+    await waitFor(() => expect(within(screen.getByRole("dialog", { name: "数据库工具" })).getByRole("button", { name: "概览" })).toBeInTheDocument());
+    management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    expect(await within(management).findByText(/user-b/)).toBeInTheDocument();
+
+    await act(async () => {
+      deleteA.resolve({ id: sharedId });
+      await Promise.resolve();
+    });
+    expect(await within(management).findByText(/user-b/)).toBeInTheDocument();
+  });
+
+  it("does not let a late field-permission deletion remove the current database field permission", async () => {
+    const deleteA = deferred<{ id: string }>();
+    const sharedId = "field-permission-shared";
+    const fieldA = { id: sharedId, property_id: "name", subject_id: "user-a", subject_type: "user", can_read: true, can_write: false, revision: 1 };
+    const fieldB = { id: sharedId, property_id: "name", subject_id: "user-b", subject_type: "user", can_read: true, can_write: true, revision: 1 };
+    const client = statsClient({
+      listDatabasePermissions: vi.fn(async () => []),
+      listFieldPermissions: vi.fn(async (databaseId: string) => databaseId === "db-a" ? [fieldA] : [fieldB]),
+      deleteFieldPermission: vi.fn(() => deleteA.promise),
+    });
+    const rendered = renderDrawer("db-a", client);
+    let management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    expect(await within(management).findByText(/user-a/)).toBeInTheDocument();
+    fireEvent.click(within(management).getByRole("button", { name: "删除字段权限 user-a" }));
+    await waitFor(() => expect(client.deleteFieldPermission).toHaveBeenCalledWith("db-a", "name", sharedId, { base_revision: 1 }));
+
+    rendered.rerender(rendered.element({
+      database: makeDatabase("db-b"),
+      databaseId: "db-b",
+      properties: [makeProperty("db-b")],
+      records: [makeRecord("db-b")],
+      views: [makeView("db-b")],
+    }));
+    await waitFor(() => expect(within(screen.getByRole("dialog", { name: "数据库工具" })).getByRole("button", { name: "概览" })).toBeInTheDocument());
+    management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    expect(await within(management).findByText(/user-b/)).toBeInTheDocument();
+
+    await act(async () => {
+      deleteA.resolve({ id: sharedId });
+      await Promise.resolve();
+    });
+    expect(await within(management).findByText(/user-b/)).toBeInTheDocument();
+  });
+
+  it("reports a saved permission separately when its follow-up list refresh fails", async () => {
+    let listCalls = 0;
+    const client = statsClient({
+      listDatabasePermissions: vi.fn(async () => {
+        listCalls += 1;
+        if (listCalls === 1) return [];
+        throw new Error("permission list refresh failed");
+      }),
+      listFieldPermissions: vi.fn(async () => []),
+      setDatabasePermission: vi.fn(async () => ({})),
+    });
+    const onMutation = vi.fn();
+    const rendered = renderDrawer("db-a", client);
+    rendered.rerender(rendered.element({ onMutation }));
+    const management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    await waitFor(() => expect(client.listDatabasePermissions).toHaveBeenCalledTimes(1));
+    fireEvent.change(within(management).getByLabelText("成员 ID"), { target: { value: "user-a" } });
+    fireEvent.click(within(management).getByRole("button", { name: "保存权限" }));
+
+    await waitFor(() => expect(client.setDatabasePermission).toHaveBeenCalledWith("db-a", expect.objectContaining({ subject_id: "user-a" })));
+    expect(await within(management).findByRole("status")).toHaveTextContent("权限已保存");
+    expect(within(management).queryByText("操作失败，未保存本地更改。")).not.toBeInTheDocument();
+    expect(within(management).getByRole("button", { name: "保存权限" })).toBeEnabled();
+    expect(client.setDatabasePermission).toHaveBeenCalledOnce();
+    expect(onMutation).toHaveBeenCalledOnce();
+  });
+
+  it("does not convert an invalidation callback error into a failed write", async () => {
+    const client = statsClient({
+      listDatabasePermissions: vi.fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: "saved", subject_id: "user-a", subject_type: "user", role: "viewer", revision: 2 }]),
+      listFieldPermissions: vi.fn(async () => []),
+      setDatabasePermission: vi.fn(async () => ({})),
+    });
+    const onMutation = vi.fn(() => { throw new Error("parent refresh failed"); });
+    const rendered = renderDrawer("db-a", client);
+    rendered.rerender(rendered.element({ onMutation }));
+    const management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "权限" }));
+    await waitFor(() => expect(client.listDatabasePermissions).toHaveBeenCalledTimes(1));
+    fireEvent.change(within(management).getByLabelText("成员 ID"), { target: { value: "user-a" } });
+    fireEvent.click(within(management).getByRole("button", { name: "保存权限" }));
+
+    expect(await within(management).findByText(/user-a/)).toBeInTheDocument();
+    expect(within(management).queryByText("操作失败，未保存本地更改。")).not.toBeInTheDocument();
+    expect(within(management).getByRole("button", { name: "保存权限" })).toBeEnabled();
+    expect(client.setDatabasePermission).toHaveBeenCalledOnce();
+    expect(onMutation).toHaveBeenCalledOnce();
   });
 });
