@@ -12,7 +12,6 @@ import type {
 
 import { assertRevision, DatabaseRepositoryBase } from "./database-repository-base";
 import { RECORD_COLUMNS, VIEW_COLUMNS, DatabaseRepositoryError, cursorFingerprint, decodeRecordCursor, encodeRecordCursor, isUniqueGuardError, placeholders, toView, type RecordRow, type ViewRow } from "./database-model";
-import { detectTaskDatabase } from "./task-notifications";
 
 const JSON_BATCH_BYTES = 700_000;
 
@@ -83,6 +82,7 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     referenceCollector.add(values);
     const references = referenceCollector.items();
     await this.validateReferenceItems(context, references);
+    const taskDatabase = await this.taskDatabaseDescriptor(context.workspaceId, databaseId, fields.properties);
     const now = this.now();
     const targetId = (context as WorkspaceContext & { targetId?: string }).targetId;
     if (targetId) {
@@ -130,6 +130,7 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
         isCreate: true,
       }],
       now,
+      taskDatabase,
       condition: this.operationCondition(operation.operationId),
     }));
     statements.push(
@@ -319,7 +320,7 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     }
     const references = referenceCollector.items();
     await this.validateReferenceItems(context, references);
-    const taskDatabase = detectTaskDatabase(fields.properties);
+    const taskDatabase = await this.taskDatabaseDescriptor(context.workspaceId, databaseId, fields.properties);
     const previousTaskRecords = taskDatabase
       ? await this.materialize(rows, new Set(fields.properties.map((property) => property.id)))
       : [];
@@ -368,7 +369,7 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
          json_extract(value, '$.value_json'), 1, ? FROM json_each(?) WHERE 1
        ON CONFLICT(record_id, property_id) DO UPDATE SET
          value_json = excluded.value_json, revision = record_values.revision + 1, updated_at = excluded.updated_at`,
-     ).bind(context.workspaceId, databaseId, now, JSON.stringify(rows))));
+    ).bind(context.workspaceId, databaseId, now, JSON.stringify(rows))));
     statements.push(...this.taskNotificationStatements({
       context,
       databaseId,
@@ -385,6 +386,7 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
         })
         : [],
       now,
+      taskDatabase,
       condition: operation ? this.operationCondition(operation.operationId) : undefined,
     }));
     for (const { mutation } of prepared) {

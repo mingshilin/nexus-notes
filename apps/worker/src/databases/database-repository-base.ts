@@ -4,9 +4,11 @@ import { normalizeDatabaseValues, type DatabaseValueProperty } from "@nexus/doma
 import { prepareActivityAndAuditStatements } from "../collaboration/d1-collaboration-repository";
 import type { PresenceNotifier } from "../presence/presence-dispatcher";
 import { D1DatabaseAccess } from "./d1-database-access";
-import { createTaskNotificationWriter, type TaskNotificationStatementInput, type TaskNotificationWriter } from "./task-notifications";
+import { createTaskNotificationWriter, detectTaskDatabase, hasTaskPropertyBlueprint, type TaskBlueprintMetadata, type TaskNotificationStatementInput, type TaskNotificationWriter } from "./task-notifications";
 import {
   RECORD_COLUMNS,
+  TEMPLATE_COLUMNS,
+  VIEW_COLUMNS,
   DatabaseRepositoryError,
   cursorFingerprint,
   decodeRecordCursor,
@@ -16,7 +18,11 @@ import {
   placeholders,
   type RecordRow,
   type RecordValueRow,
+  type TemplateRow,
+  type ViewRow,
   toRecord,
+  toTemplate,
+  toView,
 } from "./database-model";
 
 interface ReferenceItem {
@@ -404,6 +410,28 @@ export abstract class DatabaseRepositoryBase {
 
   protected taskNotificationStatements(input: TaskNotificationStatementInput) {
     return this.options.taskNotifications?.prepare(input) ?? [];
+  }
+
+  protected async taskDatabaseDescriptor(workspaceId: string, databaseId: string, properties: readonly DatabaseProperty[]) {
+    if (!hasTaskPropertyBlueprint(properties)) return null;
+    try {
+      const [views, templates] = await Promise.all([
+        this.db.prepare(
+          `SELECT ${VIEW_COLUMNS} FROM database_views WHERE workspace_id = ? AND database_id = ?`,
+        ).bind(workspaceId, databaseId).all<ViewRow>(),
+        this.db.prepare(
+          `SELECT ${TEMPLATE_COLUMNS} FROM database_templates WHERE workspace_id = ? AND database_id = ?`,
+        ).bind(workspaceId, databaseId).all<TemplateRow>(),
+      ]);
+      const metadata: TaskBlueprintMetadata = {
+        views: (views.results ?? []).map(toView),
+        templates: (templates.results ?? []).map(toTemplate),
+      };
+      return detectTaskDatabase(properties, metadata);
+    } catch {
+      // Notification derivation must never make a legacy database write fail.
+      return null;
+    }
   }
 
   protected beginOperation(

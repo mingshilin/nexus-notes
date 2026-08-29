@@ -34,6 +34,7 @@ export {
   buildTaskNotificationIntents,
   createTaskNotificationWriter,
   detectTaskDatabase,
+  hasTaskPropertyBlueprint,
   prepareTaskNotificationStatements,
   taskNotificationDedupeKey,
 } from "./databases/task-notifications";

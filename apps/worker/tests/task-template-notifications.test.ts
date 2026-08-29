@@ -67,7 +67,41 @@ async function setup() {
   const description = await repository.createProperty(owner, database.id, {
     name: "描述", type: "text", config: { max_length: 20_000 }, position: 5,
   });
-  return { test, repository, owner, database, title, status, priority, assignee, dueDate, description };
+  const propertyIds = {
+    title: title.id,
+    status: status.id,
+    priority: priority.id,
+    assignee: assignee.id,
+    dueDate: dueDate.id,
+    description: description.id,
+  };
+  const visibleColumns = Object.values(propertyIds);
+  for (const [position, [name, type]] of ([
+    ["任务列表", "table"],
+    ["按状态看板", "board"],
+    ["截止日期日历", "calendar"],
+  ] as const).entries()) {
+    await repository.createView(owner, database.id, {
+      name,
+      type,
+      position,
+      config: {
+        filters: [],
+        sorts: [{ property_id: priority.id, direction: "desc" }, { property_id: dueDate.id, direction: "asc" }],
+        grouping: type === "board" ? { property_id: status.id } : null,
+        visible_columns: visibleColumns,
+        page_size: 50,
+        settings: type === "calendar"
+          ? { date_property_id: dueDate.id, show_undated: true, week_start: "monday" }
+          : { row_height: "default", card_properties: [priority.id, assignee.id, dueDate.id] },
+      },
+    });
+  }
+  const template = await repository.createTemplate(owner, database.id, {
+    name: "新任务",
+    default_values: { [status.id]: "todo", [priority.id]: "medium" },
+  });
+  return { test, repository, owner, database, title, status, priority, assignee, dueDate, description, template };
 }
 
 async function notifications(db: D1Database) {
@@ -136,6 +170,64 @@ describe("task template notifications", () => {
     }
   });
 
+  it("creates an assignment notification when CSV creates a task record", async () => {
+    const state = await setup();
+    try {
+      await state.test.db.prepare("DELETE FROM notifications").run();
+      const imported = await state.repository.importCsv(state.owner, state.database.id, {
+        csv: "任务名称,状态,负责人\n导入任务,todo,user-2",
+        header_property_ids: {
+          任务名称: state.title.id,
+          状态: state.status.id,
+          负责人: state.assignee.id,
+        },
+      });
+
+      expect(imported.items).toHaveLength(1);
+      const rows = await notifications(state.test.db);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ user_id: "user-2", type: "task_assigned" });
+      expect(JSON.parse(rows[0]!.payload_json)).toMatchObject({
+        event: "assignment",
+        database_id: state.database.id,
+        record_id: imported.items[0]!.id,
+      });
+    } finally {
+      await state.test.dispose();
+    }
+  });
+
+  it("notifies the assignee for template-driven status changes and ignores stale replays", async () => {
+    const state = await setup();
+    try {
+      const record = await state.repository.createRecord(state.owner, state.database.id, {
+        note_id: null,
+        values: {
+          [state.status.id]: "done",
+          [state.priority.id]: "high",
+          [state.assignee.id]: "user-2",
+        },
+      });
+      await state.test.db.prepare("DELETE FROM notifications").run();
+      const result = await state.repository.applyTemplate(state.owner, state.database.id, {
+        template_id: state.template.id,
+        records: [{ record_id: record.id, base_revision: record.revision }],
+      });
+
+      expect(result.items[0]?.values[state.status.id]).toBe("todo");
+      expect(await notifications(state.test.db)).toEqual([
+        expect.objectContaining({ user_id: "user-2", type: "task_status_changed" }),
+      ]);
+      await expect(state.repository.applyTemplate(state.owner, state.database.id, {
+        template_id: state.template.id,
+        records: [{ record_id: record.id, base_revision: record.revision }],
+      })).rejects.toMatchObject({ code: "REVISION_CONFLICT", status: 409 });
+      expect(await notifications(state.test.db)).toHaveLength(1);
+    } finally {
+      await state.test.dispose();
+    }
+  });
+
   it("does not notify when tracked values are unchanged or when an ordinary database is edited", async () => {
     const state = await setup();
     try {
@@ -164,6 +256,48 @@ describe("task template notifications", () => {
         base_revision: ordinaryRecord.revision, values: { [ordinaryStatus.id]: "done" },
       });
 
+      const lookalike = await state.repository.createDatabase(state.owner, { name: "相似结构", description: "" });
+      const lookalikeTitle = await state.repository.createProperty(state.owner, lookalike.id, {
+        name: "任务名称", type: "text", config: { max_length: 500 }, position: 0,
+      });
+      const lookalikeStatus = await state.repository.createProperty(state.owner, lookalike.id, {
+        name: "状态", type: "select", config: {
+          options: [
+            { id: "todo", name: "待处理", color: "" },
+            { id: "in-progress", name: "进行中", color: "" },
+            { id: "done", name: "已完成", color: "" },
+            { id: "cancelled", name: "已取消", color: "" },
+          ],
+        }, position: 1,
+      });
+      const lookalikePriority = await state.repository.createProperty(state.owner, lookalike.id, {
+        name: "优先级", type: "select", config: {
+          options: [
+            { id: "low", name: "低", color: "" },
+            { id: "medium", name: "中", color: "" },
+            { id: "high", name: "高", color: "" },
+          ],
+        }, position: 2,
+      });
+      const lookalikeAssignee = await state.repository.createProperty(state.owner, lookalike.id, {
+        name: "负责人", type: "member", config: { allow_multiple: false }, position: 3,
+      });
+      await state.repository.createProperty(state.owner, lookalike.id, {
+        name: "截止日期", type: "date", config: {}, position: 4,
+      });
+      await state.repository.createProperty(state.owner, lookalike.id, {
+        name: "描述", type: "text", config: { max_length: 20_000 }, position: 5,
+      });
+      const lookalikeRecord = await state.repository.createRecord(state.owner, lookalike.id, {
+        note_id: null,
+        values: { [lookalikeTitle.id]: "相似任务", [lookalikeStatus.id]: "todo", [lookalikePriority.id]: "medium", [lookalikeAssignee.id]: "user-2" },
+      });
+      await state.test.db.prepare("DELETE FROM notifications").run();
+      await state.repository.updateRecord(state.owner, lookalike.id, lookalikeRecord.id, {
+        base_revision: lookalikeRecord.revision,
+        values: { [lookalikeStatus.id]: "done" },
+      });
+
       expect(unchanged.revision).toBe(record.revision + 1);
       expect(await notifications(state.test.db)).toHaveLength(0);
     } finally {
@@ -190,6 +324,13 @@ describe("task template notifications", () => {
       })).rejects.toMatchObject({ code: "INVALID_MEMBER_REFERENCE", status: 400 });
       expect(await notifications(state.test.db)).toHaveLength(0);
       expect((await state.repository.getRecord(state.owner, state.database.id, record.id)).values[state.assignee.id]).toBe("user-2");
+
+      await state.test.db.prepare("UPDATE users SET status = 'suspended' WHERE id = 'user-3'").run();
+      await state.repository.updateRecord(state.owner, state.database.id, record.id, {
+        base_revision: record.revision,
+        values: { [state.assignee.id]: "user-3" },
+      });
+      expect(await notifications(state.test.db)).toHaveLength(0);
     } finally {
       await state.test.dispose();
     }
@@ -240,6 +381,14 @@ describe("task template notifications", () => {
           nextValues: { [state.assignee.id]: "user-3" },
         }],
         now,
+        taskDatabase: {
+          titlePropertyId: state.title.id,
+          statusPropertyId: state.status.id,
+          priorityPropertyId: state.priority.id,
+          assigneePropertyId: state.assignee.id,
+          dueDatePropertyId: state.dueDate.id,
+          descriptionPropertyId: state.description.id,
+        },
       };
       await state.test.db.batch(writer.prepare(input));
       await state.test.db.batch(writer.prepare(input));

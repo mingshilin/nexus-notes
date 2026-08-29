@@ -1,12 +1,12 @@
-import type { DatabaseProperty, WorkspaceContext } from "@nexus/contracts";
+import type { DatabaseProperty, DatabaseView, WorkspaceContext } from "@nexus/contracts";
 
 export const TASK_NOTIFICATION_TYPES = {
   assigned: "task_assigned",
   statusChanged: "task_status_changed",
 } as const;
 
-type TaskNotificationEvent = "assignment" | "status_change";
-type TaskProperty = Pick<DatabaseProperty, "id" | "name" | "type" | "config">;
+export type TaskNotificationEvent = "assignment" | "status_change";
+export type TaskProperty = Pick<DatabaseProperty, "id" | "name" | "type" | "config" | "position" | "hidden" | "read_only">;
 
 export interface TaskDatabaseDescriptor {
   titlePropertyId: string;
@@ -15,6 +15,11 @@ export interface TaskDatabaseDescriptor {
   assigneePropertyId: string;
   dueDatePropertyId: string;
   descriptionPropertyId: string;
+}
+
+export interface TaskBlueprintMetadata {
+  views: readonly Pick<DatabaseView, "name" | "type" | "config">[];
+  templates: readonly { name: string; default_values: Readonly<Record<string, unknown>> }[];
 }
 
 export interface TaskRecordChange {
@@ -40,6 +45,7 @@ export interface TaskNotificationStatementInput {
   properties: readonly TaskProperty[];
   records: readonly TaskRecordChange[];
   now: string;
+  taskDatabase: TaskDatabaseDescriptor | null;
   condition?: string;
   conditionBindings?: readonly unknown[];
 }
@@ -80,38 +86,66 @@ function configOf(property: TaskProperty) {
     : {};
 }
 
-function selectOptionIds(property: TaskProperty) {
-  const options = configOf(property).options;
-  if (!Array.isArray(options)) return [];
-  return options
-    .map((option) => option && typeof option === "object" && typeof (option as { id?: unknown }).id === "string"
-      ? (option as { id: string }).id
-      : "")
-    .filter(Boolean)
-    .sort();
-}
-
-function hasExactOptions(property: TaskProperty, expected: readonly string[]) {
-  return stableJson(selectOptionIds(property)) === stableJson([...expected].sort());
-}
-
 /** Identify the shipped task blueprint without treating arbitrary databases as task boards. */
-export function detectTaskDatabase(properties: readonly TaskProperty[]): TaskDatabaseDescriptor | null {
-  const title = properties.find((property) => property.name === "任务名称" && property.type === "text" && configOf(property).max_length === 500);
-  const status = properties.find((property) => property.name === "状态" && property.type === "select" && hasExactOptions(property, ["todo", "in-progress", "done", "cancelled"]));
-  const priority = properties.find((property) => property.name === "优先级" && property.type === "select" && hasExactOptions(property, ["low", "medium", "high"]));
-  const assignee = properties.find((property) => property.name === "负责人" && property.type === "member" && configOf(property).allow_multiple === false);
-  const dueDate = properties.find((property) => property.name === "截止日期" && property.type === "date");
-  const description = properties.find((property) => property.name === "描述" && property.type === "text" && configOf(property).max_length === 20_000);
-  if (!title || !status || !priority || !assignee || !dueDate || !description) return null;
-  return {
+function matchTaskProperties(properties: readonly TaskProperty[]): TaskDatabaseDescriptor | null {
+  const expected = [
+    { name: "任务名称", type: "text", config: { max_length: 500 }, position: 0 },
+    { name: "状态", type: "select", config: { options: [
+      { id: "todo", name: "待处理", color: "" },
+      { id: "in-progress", name: "进行中", color: "" },
+      { id: "done", name: "已完成", color: "" },
+      { id: "cancelled", name: "已取消", color: "" },
+    ] }, position: 1 },
+    { name: "优先级", type: "select", config: { options: [
+      { id: "low", name: "低", color: "" },
+      { id: "medium", name: "中", color: "" },
+      { id: "high", name: "高", color: "" },
+    ] }, position: 2 },
+    { name: "负责人", type: "member", config: { allow_multiple: false }, position: 3 },
+    { name: "截止日期", type: "date", config: {}, position: 4 },
+    { name: "描述", type: "text", config: { max_length: 20_000 }, position: 5 },
+  ] as const;
+  const matched = expected.map((definition) => properties.find((property) => property.name === definition.name));
+  if (matched.some((property, index) => !property
+    || property.type !== expected[index]!.type
+    || property.position !== expected[index]!.position
+    || property.hidden
+    || property.read_only
+    || stableJson(configOf(property)) !== stableJson(expected[index]!.config))) return null;
+  const [title, status, priority, assignee, dueDate, description] = matched as [TaskProperty, TaskProperty, TaskProperty, TaskProperty, TaskProperty, TaskProperty];
+  const descriptor = {
     titlePropertyId: title.id,
     statusPropertyId: status.id,
     priorityPropertyId: priority.id,
     assigneePropertyId: assignee.id,
     dueDatePropertyId: dueDate.id,
     descriptionPropertyId: description.id,
-  };
+  } satisfies TaskDatabaseDescriptor;
+  return descriptor;
+}
+
+export function hasTaskPropertyBlueprint(properties: readonly TaskProperty[]) {
+  return matchTaskProperties(properties) !== null;
+}
+
+export function detectTaskDatabase(properties: readonly TaskProperty[], metadata: TaskBlueprintMetadata): TaskDatabaseDescriptor | null {
+  const descriptor = matchTaskProperties(properties);
+  if (!descriptor || !hasTaskViews(metadata.views, descriptor) || !hasTaskTemplate(metadata.templates, descriptor)) return null;
+  return descriptor;
+}
+
+function hasTaskViews(views: TaskBlueprintMetadata["views"], descriptor: TaskDatabaseDescriptor) {
+  const coreFields = [descriptor.titlePropertyId, descriptor.statusPropertyId, descriptor.priorityPropertyId, descriptor.assigneePropertyId, descriptor.dueDatePropertyId, descriptor.descriptionPropertyId];
+  const containsCoreFields = (view: TaskBlueprintMetadata["views"][number]) => coreFields.every((propertyId) => view.config.visible_columns.includes(propertyId));
+  return views.some((view) => view.name === "任务列表" && view.type === "table" && containsCoreFields(view))
+    && views.some((view) => view.name === "按状态看板" && view.type === "board" && view.config.grouping?.property_id === descriptor.statusPropertyId && containsCoreFields(view))
+    && views.some((view) => view.name === "截止日期日历" && view.type === "calendar" && view.config.settings.date_property_id === descriptor.dueDatePropertyId && containsCoreFields(view));
+}
+
+function hasTaskTemplate(templates: TaskBlueprintMetadata["templates"], descriptor: TaskDatabaseDescriptor) {
+  return templates.some((template) => template.name === "新任务"
+    && ["todo", "in-progress", "done", "cancelled"].includes(String(template.default_values[descriptor.statusPropertyId] ?? ""))
+    && ["low", "medium", "high"].includes(String(template.default_values[descriptor.priorityPropertyId] ?? "")));
 }
 
 export function taskNotificationDedupeKey(
@@ -130,9 +164,10 @@ export function buildTaskNotificationIntents(
     properties: readonly TaskProperty[];
     records: readonly TaskRecordChange[];
     createId(): string;
+    taskDatabase: TaskDatabaseDescriptor | null;
   },
 ) {
-  const task = detectTaskDatabase(input.properties);
+  const task = input.taskDatabase;
   if (!task) return [];
 
   const intents: TaskNotificationIntent[] = [];
@@ -184,6 +219,7 @@ export function prepareTaskNotificationStatements(
     properties: input.properties,
     records: input.records,
     createId,
+    taskDatabase: input.taskDatabase,
   });
   if (intents.length === 0) return [];
   const condition = input.condition ?? "1 = 1";
