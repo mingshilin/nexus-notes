@@ -38,4 +38,15 @@ describe("App client lifecycle", () => {
     view.rerender(<App authClient={authClient as never} turnstileSiteKey="test" />);
     expect(apiLifecycle.instances).toBe(baseline);
   });
+
+  it("uses an injected API client for default authentication when no auth client is supplied", () => {
+    const pendingSession = new Promise<never>(() => undefined);
+    const apiClient = { request: vi.fn(() => pendingSession) };
+
+    render(<App apiClient={apiClient as never} turnstileSiteKey="test" />);
+
+    expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/auth/session",
+    }));
+  });
 });

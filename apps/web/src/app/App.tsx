@@ -63,6 +63,15 @@ const LazyCollaborationCenter = lazy(async () => {
 
 const defaultApiClient = new ApiClient();
 const defaultAuthClient = new AuthClient(defaultApiClient);
+const authClientRegistry = new WeakMap<object, AuthClient>([[defaultApiClient, defaultAuthClient]]);
+
+function authClientFor(apiClient: ApiClient) {
+  const existing = authClientRegistry.get(apiClient);
+  if (existing) return existing;
+  const created = new AuthClient(apiClient);
+  authClientRegistry.set(apiClient, created);
+  return created;
+}
 type AppRoute =
   | { kind: "workspace"; workspaceId?: string }
   | { kind: "invite"; token: string }
@@ -2117,7 +2126,7 @@ function AuthenticatedWorkspace({
 }
 
 export function App({
-  authClient = defaultAuthClient,
+  authClient: providedAuthClient,
   apiClient = defaultApiClient,
   localStore,
   workspaceId,
@@ -2133,6 +2142,7 @@ export function App({
   resetToken?: string;
   onDiagnosticNavigate?: (diagnostic: KnowledgeDiagnostic) => void;
 } = {}) {
+  const authClient = providedAuthClient ?? authClientFor(apiClient);
   const [route, setRoute] = useState<AppRoute>(() => routeFromLocation());
   const workspaceRouteSelectedRef = useRef<WorkspaceRouteAuthority | null>(null);
   const [authGateVersion, setAuthGateVersion] = useState(0);
