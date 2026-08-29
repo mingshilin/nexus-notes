@@ -30,6 +30,19 @@ describe("release browser smoke modes", () => {
     });
   }
 
+  function runIndependentAuthenticatedGate(script: string, profile: string) {
+    const env = { ...process.env };
+    env.NEXUS_NOTES_BETA_USER_DATA_DIR = profile;
+    delete env.NEXUS_NOTES_BETA_AVATAR_FILE;
+    delete env.NEXUS_NOTES_BETA_SESSION_TOKEN;
+    env.CHROME_PATH = "C:\\does-not-exist\\nexus-beta-chrome.exe";
+    return spawnSync(process.execPath, [resolve(process.cwd(), script)], {
+      cwd: process.cwd(),
+      env,
+      encoding: "utf8",
+    });
+  }
+
   it("fails closed with machine-readable BLOCKED output when no external profile is configured", () => {
     const result = runAuthenticatedGate([]);
 
@@ -130,6 +143,19 @@ describe("release browser smoke modes", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it.each([
+    "tests/e2e/ai-assistant-flow.mjs",
+    "tests/e2e/navigation-performance.mjs",
+  ])("fails closed for a repository-local profile in %s", (script) => {
+    const result = runIndependentAuthenticatedGate(script, process.cwd());
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      status: "BLOCKED",
+      reason: "AUTHENTICATED_PROFILE_INVALID",
+      profile: "external",
+    });
   });
 
   it("keeps cleanup recovery separate from standard authenticated smoke", () => {
