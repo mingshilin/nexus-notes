@@ -401,11 +401,14 @@ export function DatabaseToolsDrawer({ open, views, activeViewId, database, datab
       return;
     }
 
-    // Cache invalidation is best effort and must not turn a committed write into a failed one.
-    try {
-      onMutation?.();
-    } catch {
-      // The command already committed; a parent refresh can be retried independently.
+    const committedWhileStale = result === COMMITTED_STALE_OPERATION;
+    if (committedWhileStale || isCurrent()) {
+      // Cache invalidation is best effort and must not turn a committed write into a failed one.
+      try {
+        onMutation?.();
+      } catch {
+        // The command already committed; a parent refresh can be retried independently.
+      }
     }
 
     if (result === COMMITTED_STALE_OPERATION || result === COMPLETED_WITH_WARNING) {

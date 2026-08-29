@@ -589,4 +589,35 @@ describe("database management recovery", () => {
     expect(client.setDatabasePermission).toHaveBeenCalledOnce();
     expect(onMutation).toHaveBeenCalledOnce();
   });
+
+  it("does not invalidate a stale ordinary command", async () => {
+    const update = deferred<unknown>();
+    const client = statsClient({
+      updateDatabase: vi.fn(() => update.promise),
+    });
+    const onMutation = vi.fn();
+    const rendered = renderDrawer("db-a", client);
+    rendered.rerender(rendered.element({ onMutation }));
+    let management = screen.getByRole("dialog", { name: "数据库工具" });
+    fireEvent.click(within(management).getByRole("button", { name: "设置" }));
+    fireEvent.change(within(management).getByLabelText("数据库名称"), { target: { value: "新的名称" } });
+    fireEvent.click(within(management).getByRole("button", { name: "保存数据库" }));
+    await waitFor(() => expect(client.updateDatabase).toHaveBeenCalledWith("db-a", expect.objectContaining({ name: "新的名称" })));
+
+    rendered.rerender(rendered.element({
+      database: makeDatabase("db-b"),
+      databaseId: "db-b",
+      properties: [makeProperty("db-b")],
+      records: [makeRecord("db-b")],
+      views: [makeView("db-b")],
+    }));
+    management = screen.getByRole("dialog", { name: "数据库工具" });
+    await act(async () => {
+      update.resolve({});
+      await Promise.resolve();
+    });
+
+    expect(onMutation).not.toHaveBeenCalled();
+    expect(within(management).getByRole("button", { name: "概览" })).toBeInTheDocument();
+  });
 });
