@@ -14,12 +14,8 @@ export const loadCollaborationCenter = () => import("../collaboration/Collaborat
 
 const defaultLoaders: Partial<Record<ProductDomain, DomainModuleLoader>> = {
   databases: loadDatabaseWorkbench,
-  knowledge: () => Promise.all([
-    loadKnowledgeSearchPanel(),
-    loadKnowledgeGraphPanel(),
-    loadKnowledgeCalendarPanel(),
-    loadExternalCalendarPanel(),
-  ]),
+  // Search is the primary knowledge entry; secondary tools load on demand.
+  knowledge: loadKnowledgeSearchPanel,
   reminders: loadReminderPanel,
   collaboration: loadCollaborationCenter,
   ai: loadAIChatPanel,

@@ -1,5 +1,4 @@
-import type { ReactNode } from "react";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState, type ReactNode } from "react";
 import type { WorkspaceRoleContract } from "@nexus/contracts";
 
 import type { KnowledgeClient } from "../../data/knowledge-client";
@@ -36,6 +35,27 @@ export type KnowledgeDomainClient = KnowledgeClient | {
 };
 export type KnowledgeDomainProps = WorkspaceDomainProps<KnowledgeDomainClient, KnowledgeDomainSelection, Record<string, never>>;
 
+function KnowledgeToolDisclosure({ label, children }: { label: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="knowledge-tool-disclosure" aria-label={label}>
+      <button
+        type="button"
+        className="knowledge-tool-disclosure-trigger"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {open ? `收起${label}` : `展开${label}`}
+      </button>
+      {open ? children : null}
+    </section>
+  );
+}
+
+function KnowledgeToolFallback({ label }: { label: string }) {
+  return <p className="knowledge-search-state" role="status" aria-label={`正在加载${label}`}>正在加载{label}…</p>;
+}
+
 export function KnowledgeDomain({ client, selectedEntity }: KnowledgeDomainProps) {
   const knowledge = "knowledge" in client ? client.knowledge : client;
   const databases = "knowledge" in client ? client.databases : undefined;
@@ -50,16 +70,20 @@ export function KnowledgeDomain({ client, selectedEntity }: KnowledgeDomainProps
       <p className="eyebrow">KNOWLEDGE CENTER</p>
       <h1>知识恢复</h1>
       <p className="product-domain-lead">搜索、保存查询，并集中处理附件 OCR 状态与知识诊断。</p>
-      <Suspense fallback={<p className="knowledge-search-state" role="status" aria-label="正在加载知识搜索">正在加载知识搜索…</p>}>
+      <Suspense fallback={<KnowledgeToolFallback label="知识搜索" />}>
         <LazyKnowledgeSearchPanel client={knowledge} databasesClient={databases} collaborationClient={collaboration} />
       </Suspense>
-      <Suspense fallback={<p className="knowledge-search-state" role="status" aria-label="正在加载知识图谱">正在加载知识图谱…</p>}>
-        <LazyKnowledgeGraphPanel client={knowledge} />
-      </Suspense>
-      <Suspense fallback={<p className="knowledge-search-state" role="status" aria-label="正在加载知识日历">正在加载知识日历…</p>}>
-        <LazyKnowledgeCalendarPanel client={knowledge} />
-      </Suspense>
-      {externalCalendar ? <Suspense fallback={<p className="knowledge-search-state" role="status" aria-label="正在加载外部日历">正在加载外部日历…</p>}><LazyExternalCalendarPanel client={knowledge} /></Suspense> : null}
+      <KnowledgeToolDisclosure label="知识图谱">
+        <Suspense fallback={<KnowledgeToolFallback label="知识图谱" />}>
+          <LazyKnowledgeGraphPanel client={knowledge} />
+        </Suspense>
+      </KnowledgeToolDisclosure>
+      <KnowledgeToolDisclosure label="知识日历">
+        <Suspense fallback={<KnowledgeToolFallback label="知识日历" />}>
+          <LazyKnowledgeCalendarPanel client={knowledge} />
+        </Suspense>
+      </KnowledgeToolDisclosure>
+      {externalCalendar ? <KnowledgeToolDisclosure label="外部日历"><Suspense fallback={<KnowledgeToolFallback label="外部日历" />}><LazyExternalCalendarPanel client={knowledge} /></Suspense></KnowledgeToolDisclosure> : null}
       {selectedEntity.recoveryContent}
     </section>
   );

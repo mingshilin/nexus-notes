@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 function deferred<T>() {
@@ -40,10 +40,13 @@ describe("KnowledgeDomain suspense boundaries", () => {
       callbacks={{}}
     />);
 
-    expect(await screen.findByRole("region", { name: "图谱内容" })).toBeVisible();
-    expect(screen.getByRole("region", { name: "日历内容" })).toBeVisible();
-    expect(screen.getByRole("region", { name: "外部日历内容" })).toBeVisible();
     expect(screen.getByRole("status", { name: "正在加载知识搜索" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "展开知识图谱" }));
+    expect(await screen.findByRole("region", { name: "图谱内容" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "展开知识日历" }));
+    expect(await screen.findByRole("region", { name: "日历内容" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "展开外部日历" }));
+    expect(await screen.findByRole("region", { name: "外部日历内容" })).toBeVisible();
   });
 
   it("does not render the external calendar panel when its capability is absent", async () => {
@@ -55,7 +58,9 @@ describe("KnowledgeDomain suspense boundaries", () => {
       callbacks={{}}
     />);
 
+    fireEvent.click(screen.getByRole("button", { name: "展开知识图谱" }));
     expect(await screen.findByRole("region", { name: "图谱内容" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "展开外部日历" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "外部日历内容" })).not.toBeInTheDocument();
   });
 });
