@@ -732,6 +732,8 @@ button { color: inherit; }
 .collaboration-loading, .collaboration-empty, .collaboration-permission { color: hsl(var(--muted-foreground)); font-size: 13px; line-height: 1.6; }
 .collaboration-error, .collaboration-feedback { margin: 10px 0; border-radius: 12px; padding: 10px 12px; font-size: 12px; }
 .collaboration-error { color: hsl(var(--destructive)); background: color-mix(in srgb, hsl(var(--destructive)) 8%, transparent); }
+.collaboration-error-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.collaboration-error-row .collaboration-error { flex: 1; }
 .collaboration-feedback { color: #147b45; background: rgba(52,199,89,.09); }
 .collaboration-list, .comment-list, .share-list, .audit-list { display: grid; gap: 8px; }
 .collaboration-list article, .share-list article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 11px 0; border-top: 1px solid var(--border-subtle); }
