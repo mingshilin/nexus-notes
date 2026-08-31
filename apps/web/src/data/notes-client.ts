@@ -107,8 +107,8 @@ export class NotesClient {
     return this.noteCommand<Note>("/api/v2/notes", "POST", input, options.idempotencyKey);
   }
 
-  openOrCreateDaily(dailyDate: DailyNoteInput["daily_date"]) {
-    return this.noteCommand<Note>("/api/v2/notes/daily", "POST", { daily_date: dailyDate });
+  openOrCreateDaily(dailyDate: DailyNoteInput["daily_date"], signal?: AbortSignal) {
+    return this.noteCommand<Note>("/api/v2/notes/daily", "POST", { daily_date: dailyDate }, undefined, signal);
   }
 
   update(noteId: string, input: UpdateNoteInput, options: NoteCommandOptions = {}) {

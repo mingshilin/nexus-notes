@@ -468,6 +468,36 @@ describe("live note workspace flow", () => {
     await waitFor(() => expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveFocus());
   });
 
+  it("does not let a late Daily response replace a note selected while opening", async () => {
+    const current = { ...serverNoteForFlow(), id: "selected-while-daily-opens", title: "继续阅读", content: "当前阅读内容" };
+    let resolveDaily!: (value: unknown) => void;
+    const dailyBlocked = new Promise<unknown>((resolve) => { resolveDaily = resolve; });
+    const apiClient = createApiClient({
+      listNotes: async () => ({ items: [current], next_cursor: null }),
+      listToday: async () => ({ items: [], next_cursor: null }),
+      openOrCreateDaily: async () => dailyBlocked,
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "今日" }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开今日笔记" }));
+    await waitFor(() => expect(apiClient.request.mock.calls.filter(([request]) => request.path === "/api/v2/notes/daily" && request.method === "POST")).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "全部" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^继续阅读/ }));
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("继续阅读");
+
+    const request = apiClient.request.mock.calls.find(([input]) => input.path === "/api/v2/notes/daily")![0];
+    await act(async () => {
+      resolveDaily({ note: { ...serverNoteForFlow(), id: "late-daily", title: "迟到的今日笔记", daily_date: request.body!.daily_date } });
+      await dailyBlocked;
+    });
+
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("继续阅读");
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("当前阅读内容");
+  });
+
   it("keeps the current draft and Today view when opening today's note fails", async () => {
     let resolveCreate!: (value: unknown) => void;
     const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });

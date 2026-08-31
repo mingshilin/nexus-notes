@@ -31,13 +31,14 @@ import { routeCollaborationClientFor, useWorkspaceClients } from "./use-workspac
 import { useWorkspaceNavigation } from "./use-workspace-navigation";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { clearWorkspaceQueryCache } from "../data/workspace-query-cache";
-import { localDateKey, noteMatchesListView, type NoteListView } from "./use-notes-list-data";
+import { noteMatchesListView, type NoteListView } from "./use-notes-list-data";
 import { useDatabaseWorkspaceController } from "./use-database-workspace-controller";
 import { runVerifiedDatabaseMutation } from "./use-database-workspace-data";
 import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
 import { useKnowledgeRecoveryActions } from "./use-knowledge-recovery-actions";
 import { useAttachmentUpload } from "./use-attachment-upload";
 import { useNoteRevisionRestore } from "./use-note-revision-restore";
+import { useDailyNoteOpen } from "./use-daily-note-open";
 import { useNoteMutations } from "./use-note-mutations";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
 import { NotesContextPanel } from "./NotesContextPanel";
@@ -296,8 +297,6 @@ function AuthenticatedWorkspace({
     setNoteListView,
     creatingNote,
     setCreatingNote,
-    dailyNoteOpening,
-    setDailyNoteOpening,
     draftTitle,
     setDraftTitle,
     draftContent,
@@ -322,7 +321,6 @@ function AuthenticatedWorkspace({
     draftController,
     activeDraftIdRef,
     activationInFlight,
-    dailyNoteOpeningRef,
     userSelectedNote,
     draftTitleRef,
     draftContentRef,
@@ -748,6 +746,33 @@ function AuthenticatedWorkspace({
     setActivePane("canvas");
   };
 
+  const openDailyNote = (note: Note, installed: boolean) => {
+    if (installed) {
+      installedNotesRef.current.set(note.id, note);
+      setNotes((current) => [note, ...current.filter((item) => item.id !== note.id)]);
+    }
+    focusInstalledNoteRef.current = true;
+    selectNote(note);
+    if (!installed) queueMicrotask(() => titleInputRef.current?.focus());
+  };
+
+  const {
+    dailyNoteOpening,
+    openTodayNote,
+    abortTodayNoteOpen,
+  } = useDailyNoteOpen({
+    notesClient,
+    workspaceId,
+    logoutPending,
+    selectedNoteId,
+    noteListView,
+    activeDraftId,
+    creatingNote,
+    notes,
+    openNote: openDailyNote,
+    setNoteError,
+  });
+
   const selectFolderFilter = (folderId: string | null) => {
     setFeatureMapOpen(false);
     noteListViewRef.current = "all";
@@ -770,39 +795,6 @@ function AuthenticatedWorkspace({
     const folder = await knowledgeClient.createFolder({ name });
     setFolders((current) => [...current, folder].sort((left, right) => left.position - right.position || left.name.localeCompare(right.name)));
     selectFolderFilter(folder.id);
-  };
-
-  const openTodayNote = async (): Promise<CreateActionResult> => {
-    if (logoutPending) return { status: "rejected", message: "正在退出登录，请稍候。" };
-    if (!workspaceId) return { status: "rejected", message: "当前没有可用工作区，暂时无法打开今日笔记。" };
-    if (dailyNoteOpeningRef.current) return { status: "rejected", message: "今日笔记正在打开，请稍候。" };
-    const dailyDate = localDateKey();
-    const existing = notes.find((note) => note.status === "active" && note.daily_date === dailyDate);
-    if (existing) {
-      focusInstalledNoteRef.current = true;
-      selectNote(existing);
-      queueMicrotask(() => titleInputRef.current?.focus());
-      return { status: "completed" };
-    }
-
-    dailyNoteOpeningRef.current = true;
-    setDailyNoteOpening(true);
-    setNoteError(null);
-    try {
-      const note = await notesClient.openOrCreateDaily(dailyDate);
-      installedNotesRef.current.set(note.id, note);
-      focusInstalledNoteRef.current = true;
-      setNotes((current) => [note, ...current.filter((item) => item.id !== note.id)]);
-      selectNote(note);
-      return { status: "completed" };
-    } catch {
-      const message = "今日笔记暂时无法打开，可重试。当前选择和草稿内容已保留。";
-      setNoteError(message);
-      return { status: "rejected", message };
-    } finally {
-      dailyNoteOpeningRef.current = false;
-      setDailyNoteOpening(false);
-    }
   };
 
   const handleQuickCapture = (note: Note) => {
@@ -1123,7 +1115,8 @@ function AuthenticatedWorkspace({
     abortInspectorRequests();
     abortKnowledgeRecoveryActions();
     abortUpload();
-  }, [abortInspectorRequests, abortKnowledgeRecoveryActions, abortUpload]);
+    abortTodayNoteOpen();
+  }, [abortInspectorRequests, abortKnowledgeRecoveryActions, abortTodayNoteOpen, abortUpload]);
 
   const createFirstDatabase = () => {
     void createDatabaseFromName(firstDatabaseName).then((created) => {
@@ -1243,6 +1236,7 @@ function AuthenticatedWorkspace({
       abortRecoveryRequests();
       abortKnowledgeRecoveryActions();
       abortUpload();
+      abortTodayNoteOpen();
       abortDatabaseRequests();
       abortInspectorRequests();
     } catch (error) {

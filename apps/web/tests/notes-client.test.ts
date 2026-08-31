@@ -54,7 +54,8 @@ describe("NotesClient", () => {
     const api = { request: vi.fn(async () => ({ note: { ...note, daily_date: "2026-08-23" } })) };
     const client = new data.NotesClient(api, "ws-1", { createId: () => "daily-operation-1" });
 
-    await expect(client.openOrCreateDaily("2026-08-23")).resolves.toMatchObject({ daily_date: "2026-08-23" });
+    const controller = new AbortController();
+    await expect(client.openOrCreateDaily("2026-08-23", controller.signal)).resolves.toMatchObject({ daily_date: "2026-08-23" });
 
     expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
       path: "/api/v2/notes/daily",
@@ -62,7 +63,7 @@ describe("NotesClient", () => {
       body: { daily_date: "2026-08-23" },
       headers: { "x-workspace-id": "ws-1" },
       requestClass: "command",
-      policy: expect.objectContaining({ retry: 0, idempotencyKey: "daily-operation-1" }),
+      policy: expect.objectContaining({ retry: 0, idempotencyKey: "daily-operation-1", signal: controller.signal }),
     }));
   });
 
