@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { NoteSchema } from "@nexus/contracts";
-import type { AuthSession, AuthUserSummary, DatabaseRecord, KnowledgeDiagnostic, Note, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
+import type { AuthSession, AuthUserSummary, DatabaseRecord, KnowledgeDiagnostic, Note, Profile, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient, ApiClientError } from "../data/api-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic } from "../knowledge/KnowledgeRecoveryPanel";
@@ -43,6 +43,7 @@ import { useNoteConflictResolution } from "./use-note-conflict-resolution";
 import { useNoteFolderCreation } from "./use-note-folder-creation";
 import { useTaskDatabaseCreation } from "./use-task-database-creation";
 import { useNoteDraftInput } from "./use-note-draft-input";
+import { useOfflineConflictRead } from "./use-offline-conflict-read";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
 import { NotesContextPanel } from "./NotesContextPanel";
 import { DatabaseContextPanel } from "./DatabaseContextPanel";
@@ -662,22 +663,21 @@ function AuthenticatedWorkspace({
       : [note, ...current]);
   }, []);
 
-  const handleWorkspaceSyncConflict = useCallback((operation: SyncOperation, result: SyncOperationResult) => {
-    if (operation.entity_type !== "note" || !workspaceId || result.status !== "conflict") return;
-    const localTitle = typeof operation.patch.title === "string" ? operation.patch.title : draftTitleRef.current;
-    const localContent = typeof operation.patch.content === "string" ? operation.patch.content : draftContentRef.current;
-    void notesClient.get(operation.entity_id).then((server) => {
-      if (activeDraftIdRef.current !== operation.entity_id) return;
-      setNoteConflict({
-        workspaceId,
-        entityId: operation.entity_id,
-        local: { title: localTitle, content: localContent },
-        server,
-      });
-    }).catch(() => {
-      setNoteError("离线同步发生冲突，服务器版本暂时无法加载。本地草稿仍保留，可稍后重试。");
-    });
-  }, [notesClient, workspaceId]);
+  const {
+    onConflict: handleWorkspaceSyncConflict,
+    abort: abortOfflineConflictRead,
+  } = useOfflineConflictRead({
+    notesClient,
+    workspaceId,
+    activeDraftId,
+    logoutPending,
+    activeDraftIdRef,
+    draftTitleRef,
+    draftContentRef,
+    mountedRef,
+    setConflict: setNoteConflict,
+    setNoteError,
+  });
 
   const workspaceSync = useWorkspaceSync({
     apiClient,
@@ -1130,7 +1130,8 @@ function AuthenticatedWorkspace({
     abortKnowledgeRecoveryActions();
     abortUpload();
     abortTodayNoteOpen();
-  }, [abortInspectorRequests, abortKnowledgeRecoveryActions, abortTodayNoteOpen, abortUpload]);
+    abortOfflineConflictRead();
+  }, [abortInspectorRequests, abortKnowledgeRecoveryActions, abortOfflineConflictRead, abortTodayNoteOpen, abortUpload]);
 
   const createFirstDatabase = () => {
     void createDatabaseFromName(firstDatabaseName).then((created) => {
