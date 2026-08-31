@@ -21,6 +21,7 @@ export interface NotesClientOptions {
 
 export interface NoteCommandOptions {
   idempotencyKey?: string;
+  signal?: AbortSignal;
 }
 
 export interface NoteListOptions {
@@ -104,7 +105,7 @@ export class NotesClient {
   }
 
   create(input: CreateNoteInput, options: NoteCommandOptions = {}) {
-    return this.noteCommand<Note>("/api/v2/notes", "POST", input, options.idempotencyKey);
+    return this.noteCommand<Note>("/api/v2/notes", "POST", input, options.idempotencyKey, options.signal);
   }
 
   openOrCreateDaily(dailyDate: DailyNoteInput["daily_date"], signal?: AbortSignal) {
@@ -112,11 +113,11 @@ export class NotesClient {
   }
 
   update(noteId: string, input: UpdateNoteInput, options: NoteCommandOptions = {}) {
-    return this.noteCommand<Note>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "PATCH", input, options.idempotencyKey);
+    return this.noteCommand<Note>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "PATCH", input, options.idempotencyKey, options.signal);
   }
 
-  deletePermanently(noteId: string, input: DeleteNoteInput) {
-    return this.noteCommand<{ deleted: true }>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "DELETE", input);
+  deletePermanently(noteId: string, input: DeleteNoteInput, signal?: AbortSignal) {
+    return this.noteCommand<{ deleted: true }>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "DELETE", input, undefined, signal);
   }
 
   quickCapture(input: QuickCaptureInput) {
@@ -124,7 +125,7 @@ export class NotesClient {
   }
 
   clipperCapture(input: ClipperInput, options: NoteCommandOptions = {}) {
-    return this.noteCommand<Note>("/api/v2/clipper/capture", "POST", input, options.idempotencyKey);
+    return this.noteCommand<Note>("/api/v2/clipper/capture", "POST", input, options.idempotencyKey, options.signal);
   }
 
   listRevisions(noteId: string, signal?: AbortSignal) {

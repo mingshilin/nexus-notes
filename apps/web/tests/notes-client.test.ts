@@ -144,6 +144,19 @@ describe("NotesClient", () => {
     }));
   });
 
+  it("forwards optional abort signals for note updates and permanent deletion", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async (options: { method?: string }) => options.method === "DELETE" ? { deleted: true } : { note }) };
+    const client = new data.NotesClient(api, "ws-1", { createId: () => "operation-1" });
+    const controller = new AbortController();
+
+    await client.update("note-1", { base_revision: 1, title: "Updated", source: "manual" }, { signal: controller.signal });
+    await client.deletePermanently("note-1", { base_revision: 1 }, controller.signal);
+
+    expect(api.request.mock.calls[0]?.[0].policy.signal).toBe(controller.signal);
+    expect(api.request.mock.calls[1]?.[0].policy.signal).toBe(controller.signal);
+  });
+
   it("sends permanent deletion as a non-retryable DELETE command", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async () => ({ deleted: true })) };
