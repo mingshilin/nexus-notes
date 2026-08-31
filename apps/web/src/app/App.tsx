@@ -35,6 +35,7 @@ import { localDateKey, noteMatchesListView, type NoteListView } from "./use-note
 import { useDatabaseWorkspaceController } from "./use-database-workspace-controller";
 import { runVerifiedDatabaseMutation } from "./use-database-workspace-data";
 import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
+import { useKnowledgeRecoveryActions } from "./use-knowledge-recovery-actions";
 import { useNoteMutations } from "./use-note-mutations";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
 import { NotesContextPanel } from "./NotesContextPanel";
@@ -501,6 +502,25 @@ function AuthenticatedWorkspace({
     selectListView: selectMutationListView,
     completeStatusChange,
     completePermanentDelete,
+  });
+  const {
+    classifyUnfiledNotes,
+    moveOrphansToInbox,
+    ignoreOrphans,
+    mergeDuplicateNotes,
+    abortActions: abortKnowledgeRecoveryActions,
+    pending: knowledgeRecoveryActionPending,
+  } = useKnowledgeRecoveryActions({
+    notesClient,
+    workspaceId,
+    role,
+    diagnostics,
+    installedNotesRef,
+    setNotes,
+    setDiagnostics,
+    setRetryFeedback,
+    setDiagnosticError,
+    refreshRecovery,
   });
   const workbenchMode = useWorkbenchMode();
   permanentDeletePendingRef.current = permanentDeletePending;
@@ -1096,7 +1116,10 @@ function AuthenticatedWorkspace({
     return () => { cancelled = true; };
   }, [draftController, logoutPending, notesLoading, workspaceId]);
 
-  useEffect(() => () => abortInspectorRequests(), [abortInspectorRequests]);
+  useEffect(() => () => {
+    abortInspectorRequests();
+    abortKnowledgeRecoveryActions();
+  }, [abortInspectorRequests, abortKnowledgeRecoveryActions]);
 
   const createFirstDatabase = () => {
     void createDatabaseFromName(firstDatabaseName).then((created) => {
@@ -1129,99 +1152,6 @@ function AuthenticatedWorkspace({
     transitionToDomain("databases");
     setActivePane(scopedDatabases.length > 0 ? "context" : "canvas");
     setDatabaseCreateOpen(scopedDatabases.length > 0);
-  };
-
-  const updateDiagnosticNotes = async (
-    items: KnowledgeDiagnostic[],
-    patchFor: (note: Note) => { folder_id?: string | null; database_id?: string | null },
-  ) => {
-    if (!workspaceId || role === "viewer" || items.length === 0) return;
-    const updated: Note[] = [];
-    let failed = 0;
-    for (const item of items) {
-      try {
-        const current = await notesClient.get(item.entity_id);
-        updated.push(await notesClient.update(current.id, {
-          base_revision: current.revision,
-          ...patchFor(current),
-          source: "manual",
-        }));
-      } catch {
-        failed += 1;
-      }
-    }
-    if (updated.length > 0) {
-      updated.forEach((note) => installedNotesRef.current.set(note.id, note));
-      setNotes((current) => {
-        const byId = new Map(current.map((note) => [note.id, note]));
-        updated.forEach((note) => byId.set(note.id, note));
-        return [...byId.values()];
-      });
-    }
-    setRetryFeedback(failed > 0
-      ? `已处理 ${updated.length} 篇，${failed} 篇失败；失败项仍保留，可重试。`
-      : `已处理 ${updated.length} 篇笔记。`);
-    refreshRecovery();
-  };
-
-  const classifyUnfiledNotes = (folderId: string) => {
-    if (!folderId) return;
-    void updateDiagnosticNotes(
-      diagnostics.filter((item) => item.kind === "unfiled_note"),
-      () => ({ folder_id: folderId, database_id: null }),
-    );
-  };
-
-  const moveOrphansToInbox = () => {
-    void updateDiagnosticNotes(
-      diagnostics.filter((item) => item.kind === "orphan_note"),
-      () => ({ folder_id: null }),
-    );
-  };
-
-  const ignoreOrphans = () => {
-    setDiagnostics((current) => current.filter((item) => item.kind !== "orphan_note"));
-    setRetryFeedback("已暂时隐藏当前页面的孤立笔记诊断；刷新后仍可恢复查看。");
-  };
-
-  const mergeDuplicateNotes = async (diagnostic: KnowledgeDiagnostic) => {
-    if (!workspaceId || role === "viewer" || diagnostic.kind !== "duplicate_title") return;
-    try {
-      const page = await notesClient.list({ query: diagnostic.title, limit: 100 });
-      const title = diagnostic.title.trim().toLocaleLowerCase();
-      const matches = page.items
-        .filter((note) => note.status === "active" && note.title.trim().toLocaleLowerCase() === title)
-        .sort((left, right) => right.updated_at.localeCompare(left.updated_at) || right.id.localeCompare(left.id));
-      if (matches.length < 2) throw new Error("当前没有足够的同名笔记可合并。");
-      const [primary, ...duplicates] = matches;
-      const mergedContent = [
-        primary.content,
-        ...duplicates.map((note) => `\n\n---\n\n# ${note.title || "未命名笔记"}\n\n${note.content}`),
-      ].join("").trim();
-      const saved = await notesClient.update(primary.id, {
-        base_revision: primary.revision,
-        content: mergedContent,
-        source: "manual",
-      });
-      installedNotesRef.current.set(saved.id, saved);
-      for (const duplicate of duplicates) {
-        const archived = await notesClient.update(duplicate.id, {
-          base_revision: duplicate.revision,
-          status: "archived",
-          source: "manual",
-        });
-        installedNotesRef.current.set(archived.id, archived);
-      }
-      setNotes((current) => current.map((note) => {
-        if (note.id === saved.id) return saved;
-        const archived = duplicates.find((item) => item.id === note.id);
-        return archived ? { ...archived, status: "archived" as const } : note;
-      }));
-      setRetryFeedback(`已合并 ${matches.length} 篇同名笔记，重复副本已归档，可在归档列表恢复。`);
-       refreshRecovery();
-    } catch (error) {
-      setDiagnosticError(error instanceof Error ? error.message : "同名笔记合并失败，内容未删除。请重试。");
-    }
   };
 
   const uploadAttachment = (file: File, insertIntoEditor = false) => {
@@ -1357,6 +1287,7 @@ function AuthenticatedWorkspace({
       clearWorkspaceQueryCache(apiClient, { userId, workspaceId });
       await onWorkspaceChange(nextWorkspaceId);
       abortRecoveryRequests();
+      abortKnowledgeRecoveryActions();
       abortDatabaseRequests();
       abortInspectorRequests();
     } catch (error) {
@@ -1541,7 +1472,7 @@ function AuthenticatedWorkspace({
       attachmentError={attachmentError}
       diagnosticError={diagnosticError}
       retryFeedback={retryFeedback}
-      isRetryPending={retryingIds.size > 0}
+      isRetryPending={retryingIds.size > 0 || knowledgeRecoveryActionPending}
       onUpload={role === "viewer" ? undefined : uploadAttachment}
       uploading={uploadingAttachment}
       uploadError={uploadError}
