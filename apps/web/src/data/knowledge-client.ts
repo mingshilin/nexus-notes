@@ -8,12 +8,17 @@ import type {
   AttachmentListRequest,
   CalendarFeed,
   CalendarFeedQuery,
+  CalendarConnectionSummary,
+  CalendarConnectResponse,
+  CalendarEvent,
+  CalendarEventsQuery,
   KnowledgeDiagnostic,
   KnowledgeDiagnosticsRequest,
   DeleteReminderInput,
   GraphResponse,
   NoteLink,
   Reminder,
+  ReminderDelivery,
   ReminderListQuery,
   SavedSearch,
   SavedSearchInput,
@@ -27,19 +32,24 @@ import type {
 } from "@nexus/contracts";
 
 import type { ApiClient } from "./api-client";
+import type { WorkspaceQueryCache } from "./workspace-query-cache";
 
 export class KnowledgeClient {
   private readonly createId: () => string;
   private readonly now: () => number;
+  private readonly userId?: string;
+  private readonly queryCache?: WorkspaceQueryCache;
   private readonly reminderCache = new Map<string, { value: unknown; expiresAt: number }>();
 
   constructor(
     private readonly client: Pick<ApiClient, "request">,
     private readonly workspaceId: string,
-    options: { createId?: () => string; now?: () => number } = {},
+    options: { createId?: () => string; now?: () => number; userId?: string; queryCache?: WorkspaceQueryCache } = {},
   ) {
     this.createId = options.createId ?? (() => crypto.randomUUID());
     this.now = options.now ?? (() => Date.now());
+    this.userId = options.userId;
+    this.queryCache = options.queryCache;
   }
 
   search(input: SearchRequest & { signal?: AbortSignal }) {
@@ -98,23 +108,24 @@ export class KnowledgeClient {
     return this.listQuery<Folder>("/api/v2/folders", "folders", signal);
   }
 
-  createFolder(input: CreateFolderInput) {
-    return this.command<{ folder: Folder }>("/api/v2/folders", "POST", input).then(({ folder }) => folder);
+  createFolder(input: CreateFolderInput, signal?: AbortSignal) {
+    return this.command<{ folder: Folder }>("/api/v2/folders", "POST", input, signal).then(({ folder }) => folder);
   }
 
   listTags(signal?: AbortSignal) {
     return this.listQuery<Tag>("/api/v2/tags", "tags", signal);
   }
 
-  createTag(input: CreateTagInput) {
-    return this.command<{ tag: Tag }>("/api/v2/tags", "POST", input).then(({ tag }) => tag);
+  createTag(input: CreateTagInput, signal?: AbortSignal) {
+    return this.command<{ tag: Tag }>("/api/v2/tags", "POST", input, signal).then(({ tag }) => tag);
   }
 
-  setNoteTags(noteId: string, input: SetNoteTagsInput) {
+  setNoteTags(noteId: string, input: SetNoteTagsInput, signal?: AbortSignal) {
     return this.command<{ updated: true }>(
       `/api/v2/notes/${encodeURIComponent(noteId)}/tags`,
       "PUT",
       input,
+      signal,
     );
   }
 
@@ -126,11 +137,12 @@ export class KnowledgeClient {
     );
   }
 
-  setNoteLinks(noteId: string, input: SetNoteLinksInput) {
+  setNoteLinks(noteId: string, input: SetNoteLinksInput, signal?: AbortSignal) {
     return this.command<{ updated: true }>(
       `/api/v2/notes/${encodeURIComponent(noteId)}/links`,
       "PUT",
       input,
+      signal,
     );
   }
 
@@ -159,7 +171,9 @@ export class KnowledgeClient {
 
   listReminders(includeCompleted = false, signal?: AbortSignal) {
     const path = `/api/v2/reminders?include_completed=${includeCompleted}`;
-    return this.cachedReminder(`legacy:${includeCompleted}`, () => this.listQuery<Reminder>(path, `reminders:${includeCompleted}`, signal));
+    const load = (requestSignal?: AbortSignal) => this.listQuery<Reminder>(path, `reminders:${includeCompleted}`, requestSignal);
+    return this.sharedReminder(`legacy:${includeCompleted}`, load, signal)
+      ?? this.cachedReminder(`legacy:${includeCompleted}`, () => load(signal));
   }
 
   listReminderPage(input: ReminderListQuery, signal?: AbortSignal) {
@@ -168,11 +182,30 @@ export class KnowledgeClient {
     if (input.cursor) params.set("cursor", input.cursor);
     params.set("limit", String(input.limit));
     const key = params.toString();
-    return this.cachedReminder(key, () => this.query<{ items: Reminder[]; next_cursor: string | null }>(
-      `/api/v2/reminders?${key}`,
-      `reminder-page:${key}`,
+    const load = (requestSignal?: AbortSignal) => this.query<{ items: Reminder[]; next_cursor: string | null }>(
+        `/api/v2/reminders?${key}`,
+        `reminder-page:${key}`,
+        requestSignal,
+      );
+    return this.sharedReminder(`page:${key}`, load, signal)
+      ?? this.cachedReminder(key, () => load(signal));
+  }
+
+  listReminderDeliveries(reminderId: string, signal?: AbortSignal) {
+    return this.query<{ items: ReminderDelivery[] }>(
+      `/api/v2/reminders/${encodeURIComponent(reminderId)}/deliveries`,
+      `reminder-deliveries:${reminderId}`,
       signal,
-    ));
+    ).then(({ items }) => items);
+  }
+
+  retryReminderDelivery(reminderId: string, deliveryId: string, signal?: AbortSignal) {
+    return this.command<{ delivery: ReminderDelivery }>(
+      `/api/v2/reminders/${encodeURIComponent(reminderId)}/deliveries/${encodeURIComponent(deliveryId)}/retry`,
+      "POST",
+      {},
+      signal,
+    ).then(({ delivery }) => delivery);
   }
 
   getCalendarFeed(input: CalendarFeedQuery, signal?: AbortSignal) {
@@ -180,6 +213,51 @@ export class KnowledgeClient {
     return this.query<CalendarFeed>(
       `/api/v2/calendar/feed?${params.toString()}`,
       `calendar-feed:${params.toString()}`,
+      signal,
+    );
+  }
+
+  listCalendarConnections(signal?: AbortSignal) {
+    return this.query<{ items: CalendarConnectionSummary[] }>(
+      "/api/v2/calendar/connections",
+      "calendar:connections",
+      signal,
+    ).then(({ items }) => items);
+  }
+
+  startCalendarConnection(provider: "google" | "outlook", signal?: AbortSignal) {
+    return this.command<CalendarConnectResponse>(
+      `/api/v2/calendar/connections/${provider}/start`,
+      "POST",
+      undefined,
+      signal,
+    );
+  }
+
+  listCalendarEvents(input: CalendarEventsQuery, signal?: AbortSignal) {
+    const params = new URLSearchParams({ from: input.from, to: input.to });
+    if (input.connection_id) params.set("connection_id", input.connection_id);
+    return this.query<{ items: CalendarEvent[] }>(
+      `/api/v2/calendar/events?${params.toString()}`,
+      `calendar:events:${params.toString()}`,
+      signal,
+    ).then(({ items }) => items);
+  }
+
+  syncCalendarConnection(connectionId: string, input: CalendarEventsQuery, signal?: AbortSignal) {
+    return this.command<{ connection: CalendarConnectionSummary; imported_count: number }>(
+      `/api/v2/calendar/connections/${encodeURIComponent(connectionId)}/sync`,
+      "POST",
+      input,
+      signal,
+    );
+  }
+
+  disconnectCalendarConnection(connectionId: string, signal?: AbortSignal) {
+    return this.command<{ deleted: true }>(
+      `/api/v2/calendar/connections/${encodeURIComponent(connectionId)}`,
+      "DELETE",
+      undefined,
       signal,
     );
   }
@@ -247,11 +325,12 @@ export class KnowledgeClient {
     }).then(({ attachment }) => attachment);
   }
 
-  completeAttachmentUpload(attachmentId: string) {
+  completeAttachmentUpload(attachmentId: string, signal?: AbortSignal) {
     return this.command<{ attachment: Attachment }>(
       `/api/v2/attachments/${encodeURIComponent(attachmentId)}/complete`,
       "POST",
       { upload_id: attachmentId },
+      signal,
     ).then(({ attachment }) => attachment);
   }
 
@@ -283,13 +362,13 @@ export class KnowledgeClient {
     );
   }
 
-  deleteAttachment(attachmentId: string) {
+  deleteAttachment(attachmentId: string, signal?: AbortSignal) {
     return this.client.request<{ deleted: true }>({
       path: `/api/v2/attachments/${encodeURIComponent(attachmentId)}`,
       method: "DELETE",
       headers: this.headers(),
       requestClass: "command",
-      policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId() },
+      policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId(), signal },
     });
   }
 
@@ -321,8 +400,18 @@ export class KnowledgeClient {
       policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId(), signal },
     }).then((value) => {
       this.reminderCache.clear();
+      this.queryCache?.invalidate({ userId: this.userId, workspaceId: this.workspaceId, domain: "reminders" });
       return value;
     });
+  }
+
+  private sharedReminder<T>(key: string, load: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal) {
+    if (!this.queryCache || !this.userId) return null;
+    return this.queryCache.get(
+      { userId: this.userId, workspaceId: this.workspaceId, domain: "reminders", query: key },
+      (requestSignal) => load(requestSignal),
+      { ttlMs: 60_000, signal },
+    );
   }
 
   private cachedReminder<T>(key: string, load: () => Promise<T>): Promise<T> {

@@ -51,20 +51,22 @@ function createClient() {
 describe("KnowledgeSearchPanel", () => {
   it("loads saved searches, submits complete filters, and shows hit sources", async () => {
     const client = createClient();
-    render(<KnowledgeSearchPanel client={client} />);
+    const databasesClient = { listDatabases: vi.fn(async () => [{ id: "db-1", name: "项目库" }]) };
+    const collaborationClient = { listMembers: vi.fn(async () => [{ user_id: "user-1", display_name: "小明" }]) };
+    render(<KnowledgeSearchPanel client={client} databasesClient={databasesClient} collaborationClient={collaborationClient} />);
 
     expect(await screen.findByRole("button", { name: "应用研究资料" })).toBeInTheDocument();
     fireEvent.change(screen.getByRole("textbox", { name: "知识搜索" }), { target: { value: "Alpha" } });
-    fireEvent.change(screen.getByRole("textbox", { name: "标签过滤" }), { target: { value: "tag-1, tag-2" } });
-    fireEvent.change(screen.getByRole("textbox", { name: "文件夹过滤" }), { target: { value: "folder-1" } });
-    fireEvent.change(screen.getByRole("textbox", { name: "数据库过滤" }), { target: { value: "db-1" } });
+    fireEvent.click(await screen.findByRole("checkbox", { name: "标签：研究" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "文件夹：项目" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "数据库：项目库" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "搜索笔记" }));
     fireEvent.click(screen.getByRole("button", { name: "搜索" }));
 
     await waitFor(() => expect(client.search).toHaveBeenCalledWith(expect.objectContaining({
       query: "Alpha",
       filters: expect.objectContaining({
-        tag_ids: ["tag-1", "tag-2"],
+        tag_ids: ["tag-1"],
         folder_ids: ["folder-1"],
         database_ids: ["db-1"],
         source_types: ["note"],
@@ -106,5 +108,95 @@ describe("KnowledgeSearchPanel", () => {
     await waitFor(() => expect(client.search).toHaveBeenCalledWith(expect.objectContaining({
       filters: expect.objectContaining({ tag_ids: ["tag-1"], folder_ids: ["folder-1"] }),
     })));
+  });
+
+  it("offers readable database and member filters while preserving tenant IDs", async () => {
+    const client = createClient();
+    const databasesClient = { listDatabases: vi.fn(async () => [{ id: "db-1", name: "项目库" }]) };
+    const collaborationClient = { listMembers: vi.fn(async () => [{ user_id: "user-1", display_name: "小明", email: "ming@example.test" }]) };
+    render(<KnowledgeSearchPanel client={client} databasesClient={databasesClient} collaborationClient={collaborationClient} />);
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: "数据库：项目库" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "成员：小明" }));
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+
+    await waitFor(() => expect(client.search).toHaveBeenCalledWith(expect.objectContaining({
+      filters: expect.objectContaining({ database_ids: ["db-1"], member_ids: ["user-1"] }),
+    })));
+  });
+
+  it("does not expose manual ID inputs for readable entity filters", async () => {
+    const client = createClient();
+    const databasesClient = { listDatabases: vi.fn(async () => [{ id: "db-1", name: "项目库" }]) };
+    const collaborationClient = { listMembers: vi.fn(async () => [{ user_id: "user-1", display_name: "小明" }]) };
+    render(<KnowledgeSearchPanel client={client} databasesClient={databasesClient} collaborationClient={collaborationClient} />);
+
+    expect(screen.queryByRole("textbox", { name: "标签过滤" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "文件夹过滤" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "数据库过滤" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "成员过滤" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("checkbox", { name: "标签：研究" })).toBeInTheDocument();
+    expect(await screen.findByRole("checkbox", { name: "数据库：项目库" })).toBeInTheDocument();
+  });
+
+  it("keeps stale saved IDs for the request and explains when they are not currently readable", async () => {
+    const staleSavedSearch: SavedSearch = {
+      ...savedSearch,
+      id: "saved-stale",
+      name: "旧筛选",
+      filters: {
+        ...savedSearch.filters,
+        tag_ids: ["tag-missing"],
+        folder_ids: ["folder-missing"],
+        database_ids: ["db-missing"],
+        member_ids: ["member-missing"],
+      },
+    };
+    const client = {
+      ...createClient(),
+      listSavedSearches: vi.fn(async () => [staleSavedSearch]),
+    };
+    const databasesClient = { listDatabases: vi.fn(async () => [{ id: "db-1", name: "项目库" }]) };
+    const collaborationClient = { listMembers: vi.fn(async () => [{ user_id: "user-1", display_name: "小明" }]) };
+    render(<KnowledgeSearchPanel client={client} databasesClient={databasesClient} collaborationClient={collaborationClient} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "应用旧筛选" }));
+
+    expect(await screen.findByText("部分已保存筛选条件暂时无法显示", { exact: false })).toBeInTheDocument();
+    await waitFor(() => expect(client.search).toHaveBeenCalledWith(expect.objectContaining({
+      filters: expect.objectContaining({
+        tag_ids: ["tag-missing"],
+        folder_ids: ["folder-missing"],
+        database_ids: ["db-missing"],
+        member_ids: ["member-missing"],
+      }),
+    })));
+  });
+
+  it("explains unavailable saved scope IDs when optional scope clients are absent", async () => {
+    const staleScopeSearch: SavedSearch = {
+      ...savedSearch,
+      id: "saved-scope-stale",
+      name: "旧范围筛选",
+      filters: {
+        tag_ids: [],
+        folder_ids: [],
+        database_ids: ["db-missing"],
+        member_ids: ["member-missing"],
+        attachment_types: [],
+        ocr_statuses: [],
+        source_types: [],
+      },
+    };
+    const client = {
+      ...createClient(),
+      listSavedSearches: vi.fn(async () => [staleScopeSearch]),
+    };
+    render(<KnowledgeSearchPanel client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "应用旧范围筛选" }));
+
+    expect(await screen.findByText("部分已保存筛选条件暂时无法显示", { exact: false })).toBeInTheDocument();
+    expect(screen.getByText("2 项", { exact: false })).toBeInTheDocument();
   });
 });

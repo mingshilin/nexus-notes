@@ -873,8 +873,8 @@ export class D1CollaborationRepository {
 
   async listNotifications(context: WorkspaceContext, options: { cursor?: string; limit: number }) {
     const limit = Math.max(1, Math.min(options.limit, 100));
-    const conditions = ["user_id = ?"];
-    const bindings: unknown[] = [context.userId];
+    const conditions = ["workspace_id = ?", "user_id = ?"];
+    const bindings: unknown[] = [context.workspaceId, context.userId];
     if (options.cursor) {
       const cursor = decodeCursor(options.cursor);
       conditions.push("(created_at < ? OR (created_at = ? AND id < ?))");
@@ -894,16 +894,16 @@ export class D1CollaborationRepository {
 
   async unreadCount(context: WorkspaceContext) {
     const row = await this.db.prepare(
-      "SELECT COUNT(*) AS count FROM notifications WHERE user_id = ? AND read_at IS NULL",
-    ).bind(context.userId).first<{ count: number }>();
+      "SELECT COUNT(*) AS count FROM notifications WHERE workspace_id = ? AND user_id = ? AND read_at IS NULL",
+    ).bind(context.workspaceId, context.userId).first<{ count: number }>();
     return { unread_count: Number(row?.count ?? 0) };
   }
 
   async readNotifications(context: WorkspaceContext, input: NotificationReadInput) {
     const rows = await this.db.prepare(
       `SELECT id, revision FROM notifications
-       WHERE user_id = ? AND id IN (SELECT value FROM json_each(?))`,
-    ).bind(context.userId, JSON.stringify(input.notification_ids)).all<{ id: string; revision: number }>();
+       WHERE workspace_id = ? AND user_id = ? AND id IN (SELECT value FROM json_each(?))`,
+    ).bind(context.workspaceId, context.userId, JSON.stringify(input.notification_ids)).all<{ id: string; revision: number }>();
     if ((rows.results ?? []).length !== input.notification_ids.length) {
       throw new CollaborationRepositoryError("NOTIFICATION_NOT_FOUND", "Notification not found", 404);
     }
@@ -914,20 +914,21 @@ export class D1CollaborationRepository {
        )
        UPDATE notifications
        SET read_at = COALESCE(read_at, ?), revision = revision + 1, updated_at = ?
-       WHERE user_id = ?
+       WHERE workspace_id = ?
+         AND user_id = ?
          AND id IN (SELECT id FROM requested)
          AND (
            SELECT COUNT(*) FROM notifications current
            JOIN requested ON requested.id = current.id AND requested.expected_revision = current.revision
-           WHERE current.user_id = ?
+           WHERE current.workspace_id = ? AND current.user_id = ?
          ) = (SELECT COUNT(*) FROM requested)
        RETURNING id, revision`,
-    ).bind(JSON.stringify(input.base_revisions), now, now, context.userId, context.userId).all<{ id: string; revision: number }>();
+    ).bind(JSON.stringify(input.base_revisions), now, now, context.workspaceId, context.userId, context.workspaceId, context.userId).all<{ id: string; revision: number }>();
     if ((result.results ?? []).length !== input.notification_ids.length) {
       const currentRows = await this.db.prepare(
         `SELECT id, revision FROM notifications
-         WHERE user_id = ? AND id IN (SELECT value FROM json_each(?))`,
-      ).bind(context.userId, JSON.stringify(input.notification_ids)).all<{ id: string; revision: number }>();
+         WHERE workspace_id = ? AND user_id = ? AND id IN (SELECT value FROM json_each(?))`,
+      ).bind(context.workspaceId, context.userId, JSON.stringify(input.notification_ids)).all<{ id: string; revision: number }>();
       const currentById = new Map((currentRows.results ?? []).map((row) => [row.id, row.revision]));
       const missingId = input.notification_ids.find((id) => !currentById.has(id));
       if (missingId) throw new CollaborationRepositoryError("NOTIFICATION_NOT_FOUND", "Notification not found", 404);
@@ -942,8 +943,8 @@ export class D1CollaborationRepository {
     const now = this.now();
     const result = await this.db.prepare(
       `UPDATE notifications SET read_at = ?, revision = revision + 1, updated_at = ?
-       WHERE user_id = ? AND read_at IS NULL`,
-    ).bind(now, now, context.userId).run();
+       WHERE workspace_id = ? AND user_id = ? AND read_at IS NULL`,
+    ).bind(now, now, context.workspaceId, context.userId).run();
     return { count: result.meta.changes, read_at: now };
   }
 

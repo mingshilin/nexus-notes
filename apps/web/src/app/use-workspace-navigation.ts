@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 
 import type { ProductDomain } from "../navigation/ProductNavigation";
 import { recordInteraction, type InteractionMetric } from "../performance/interaction-budget";
@@ -45,7 +45,7 @@ export function useWorkspaceNavigation(initialDomain: ProductDomain = "notes"): 
     activeDomainRef.current = domain;
     requestedDomainRef.current = domain;
     setRequestedDomain(domain);
-    setActiveDomain(domain);
+    startTransition(() => setActiveDomain(domain));
 
     if (shellFrameRef.current !== null) {
       window.cancelAnimationFrame(shellFrameRef.current);

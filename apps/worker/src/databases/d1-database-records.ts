@@ -82,6 +82,7 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     referenceCollector.add(values);
     const references = referenceCollector.items();
     await this.validateReferenceItems(context, references);
+    const taskDatabase = await this.taskDatabaseDescriptor(context.workspaceId, databaseId, fields.properties);
     const now = this.now();
     const targetId = (context as WorkspaceContext & { targetId?: string }).targetId;
     if (targetId) {
@@ -117,6 +118,21 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
         ).bind(databaseId, now, context.workspaceId, record.note_id));
       }
     }
+    statements.push(...this.taskNotificationStatements({
+      context,
+      databaseId,
+      properties: fields.properties,
+      records: [{
+        id: record.id,
+        revision: record.revision,
+        previousValues: {},
+        nextValues: record.values,
+        isCreate: true,
+      }],
+      now,
+      taskDatabase,
+      condition: this.operationCondition(operation.operationId),
+    }));
     statements.push(
       ...this.auditStatements(
         context,
@@ -304,6 +320,11 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
     }
     const references = referenceCollector.items();
     await this.validateReferenceItems(context, references);
+    const taskDatabase = await this.taskDatabaseDescriptor(context.workspaceId, databaseId, fields.properties);
+    const previousTaskRecords = taskDatabase
+      ? await this.materialize(rows, new Set(fields.properties.map((property) => property.id)))
+      : [];
+    const previousTaskRecordsById = new Map(previousTaskRecords.map((record) => [record.id, record]));
     const now = this.now();
     const expected = prepared.map(({ mutation }) => ({ record_id: mutation.record_id, revision: mutation.base_revision }));
     const requestId = (context as WorkspaceContext & { requestId?: string }).requestId;
@@ -349,6 +370,25 @@ export class D1DatabaseRecordRepository extends DatabaseRepositoryBase {
        ON CONFLICT(record_id, property_id) DO UPDATE SET
          value_json = excluded.value_json, revision = record_values.revision + 1, updated_at = excluded.updated_at`,
     ).bind(context.workspaceId, databaseId, now, JSON.stringify(rows))));
+    statements.push(...this.taskNotificationStatements({
+      context,
+      databaseId,
+      properties: fields.properties,
+      records: taskDatabase
+        ? prepared.map(({ mutation, values }) => {
+          const previousValues = previousTaskRecordsById.get(mutation.record_id)?.values ?? {};
+          return {
+            id: mutation.record_id,
+            revision: mutation.base_revision + 1,
+            previousValues,
+            nextValues: { ...previousValues, ...values },
+          };
+        })
+        : [],
+      now,
+      taskDatabase,
+      condition: operation ? this.operationCondition(operation.operationId) : undefined,
+    }));
     for (const { mutation } of prepared) {
       statements.push(...this.auditStatements(
         context,

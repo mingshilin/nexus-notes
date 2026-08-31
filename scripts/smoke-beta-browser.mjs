@@ -79,7 +79,7 @@ export function parseArgs(argv) {
     publicShell: false,
     authenticated: false,
     cleanupRecovery: false,
-    authModeExplicit: process.env.NEXUS_NOTES_BETA_REQUIRE_AUTH === "1",
+    authModeExplicit: false,
     requireAuth: process.env.NEXUS_NOTES_BETA_REQUIRE_AUTH !== "0",
     userDataDir: process.env[PROFILE_ENV],
     avatarFile: process.env[AVATAR_ENV],
@@ -101,7 +101,13 @@ export function parseArgs(argv) {
   if (options.cleanupRecovery && options.publicShell) {
     throw new Error("Conflicting browser smoke modes: --cleanup-recovery requires authenticated mode");
   }
-  if (options.publicShell) options.requireAuth = false;
+  if (options.publicShell) {
+    options.requireAuth = false;
+    // Public-shell checks must never inherit authenticated browser state.
+    options.userDataDir = undefined;
+    options.avatarFile = undefined;
+    options.sessionToken = undefined;
+  }
   return options;
 }
 
@@ -166,12 +172,13 @@ export function externalPath(value, label, kind = "file") {
   return canonical;
 }
 
-function printSkip(reason) {
+function printBlocked(reason, requiredEnv = [PROFILE_ENV]) {
   console.log(JSON.stringify({
-    status: "SKIP",
+    status: "BLOCKED",
     reason,
-    requiredEnv: [PROFILE_ENV, AVATAR_ENV],
+    requiredEnv,
     optionalBootstrapEnv: SESSION_ENV,
+    profile: "external",
     authenticated: false,
   }));
 }
@@ -1017,14 +1024,30 @@ export async function startBrowserSession(url, options = {}) {
 
 async function run() {
   const options = parseArgs(process.argv.slice(2));
-  const authReady = Boolean(options.userDataDir && options.avatarFile);
-  if (!options.publicShell && !authReady) {
-    printSkip(options.userDataDir ? "AVATAR_FIXTURE_UNSET" : "AUTH_FIXTURE_UNSET");
+  if (!options.publicShell && !options.userDataDir) {
+    printBlocked("AUTHENTICATED_PROFILE_UNSET");
     process.exitCode = 2;
     return;
   }
-  if (options.userDataDir) options.userDataDir = externalPath(options.userDataDir, PROFILE_ENV, "directory");
-  if (options.avatarFile) options.avatarFile = externalPath(options.avatarFile, AVATAR_ENV, "file");
+  try {
+    if (options.userDataDir) options.userDataDir = externalPath(options.userDataDir, PROFILE_ENV, "directory");
+  } catch {
+    printBlocked("AUTHENTICATED_PROFILE_INVALID", [PROFILE_ENV]);
+    process.exitCode = 2;
+    return;
+  }
+  if (!options.publicShell && !options.avatarFile) {
+    printBlocked("AVATAR_FIXTURE_UNSET", [AVATAR_ENV]);
+    process.exitCode = 2;
+    return;
+  }
+  try {
+    if (options.avatarFile) options.avatarFile = externalPath(options.avatarFile, AVATAR_ENV, "file");
+  } catch {
+    printBlocked("AUTHENTICATED_FIXTURE_INVALID", [AVATAR_ENV]);
+    process.exitCode = 2;
+    return;
+  }
   const browserPath = await findBrowser();
   const debugPort = port();
   const temporaryProfile = options.userDataDir ? null : mkdtempSync(join(tmpdir(), "nexus-beta-browser-"));

@@ -1,9 +1,10 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import type {
   CreateReminderInput,
   Note,
   RecurrenceEnd,
   Reminder,
+  ReminderDelivery,
   ReminderChannel,
   ReminderListQuery,
   ReminderRecurrence,
@@ -12,12 +13,9 @@ import type {
 
 import type { KnowledgeClient } from "../data/knowledge-client";
 import type { NotesClient } from "../data/notes-client";
+import { useReminderWorkspaceData, type ReminderWorkspaceClient } from "./use-reminder-workspace-data";
 
-type ReminderPage = { items: Reminder[]; next_cursor: string | null };
-type ReminderClient = Pick<KnowledgeClient, "createReminder" | "updateReminder" | "snoozeReminder" | "deleteReminder"> & {
-  listReminderPage?(input: ReminderListQuery, signal?: AbortSignal): Promise<ReminderPage>;
-  listReminders?(includeCompleted?: boolean, signal?: AbortSignal): Promise<Reminder[]>;
-};
+type ReminderClient = Pick<KnowledgeClient, "createReminder" | "updateReminder" | "snoozeReminder" | "deleteReminder"> & ReminderWorkspaceClient;
 type NoteLookupClient = Pick<NotesClient, "list">;
 type RepeatMode = "none" | ReminderRecurrence["frequency"];
 type EndMode = RecurrenceEnd["type"];
@@ -66,30 +64,67 @@ function defaultTimezone() {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
+function deliveryChannelLabel(channel: ReminderDelivery["channel"]) {
+  return channel === "in_app" ? "站内" : channel === "email" ? "Email" : "Push";
+}
+
+function deliveryStatusLabel(status: ReminderDelivery["status"]) {
+  return status === "queued" ? "已排队" : status === "sent" ? "已发送" : status === "failed" ? "失败" : "已取消";
+}
+
 export function ReminderPanel({
   client,
   notesClient,
+  cacheScope,
   now = () => new Date(),
   defaultTimezone: preferredTimezone = defaultTimezone(),
 }: {
   client: ReminderClient;
   notesClient?: NoteLookupClient;
+  cacheScope?: string;
   now?: () => Date;
   defaultTimezone?: string;
 }) {
-  const [reminders, setReminders] = useState<Reminder[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<ReminderListQuery["status"]>("all");
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const {
+    reminders,
+    setReminders,
+    nextCursor,
+    search,
+    setSearch,
+    debouncedSearch,
+    statusFilter,
+    setStatusFilter,
+    selectedIds,
+    setSelectedIds,
+    loading,
+    refreshing,
+    error,
+    setError,
+    feedback,
+    setFeedback,
+    failedBulkIds,
+    setFailedBulkIds,
+    retryRequest,
+    setRetryRequest,
+    loadMore,
+    deliveryOpenId,
+    deliveryItems,
+    deliveryLoadingId,
+    deliveryErrors,
+    deliveryRetryId,
+    toggleDeliveryStatus,
+    retryDelivery,
+  } = useReminderWorkspaceData({ client, cacheScope });
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<string | null>(null);
-  const [failedBulkIds, setFailedBulkIds] = useState<string[]>([]);
-  const [retryRequest, setRetryRequest] = useState<{ reminder: Reminder; input: UpdateReminderInput; success: string } | null>(null);
+  const mutationScopeRef = useRef<{ client: ReminderClient; cacheScope?: string; generation: number }>({ client, cacheScope, generation: 0 });
+
+  useLayoutEffect(() => {
+    const previous = mutationScopeRef.current;
+    if (previous.client !== client || previous.cacheScope !== cacheScope) {
+      mutationScopeRef.current = { client, cacheScope, generation: previous.generation + 1 };
+      setPending(false);
+    }
+  }, [cacheScope, client]);
 
   const [editing, setEditing] = useState<Reminder | null>(null);
   const [title, setTitle] = useState("");
@@ -108,38 +143,6 @@ export function ReminderPanel({
   const [noteOptions, setNoteOptions] = useState<Note[]>([]);
   const [noteId, setNoteId] = useState("");
   const [notesLoading, setNotesLoading] = useState(false);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedSearch(search.trim().slice(0, 160)), 250);
-    return () => window.clearTimeout(timer);
-  }, [search]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(reminders.length === 0);
-    setRefreshing(reminders.length > 0);
-    setError(null);
-    const load = client.listReminderPage
-      ? client.listReminderPage({ status: statusFilter, query: debouncedSearch || undefined, limit: 50 }, controller.signal)
-      : client.listReminders
-        ? client.listReminders(true, controller.signal).then((items) => ({ items, next_cursor: null }))
-        : Promise.reject(new Error("Reminder list API is unavailable"));
-    void load.then((page) => {
-      if (controller.signal.aborted) return;
-      setReminders(page.items);
-      setNextCursor(page.next_cursor);
-      setSelectedIds(new Set());
-      setFailedBulkIds([]);
-    }).catch(() => {
-      if (!controller.signal.aborted) setError("提醒暂时无法加载，保留最近可用数据。请稍后重试。");
-    }).finally(() => {
-      if (!controller.signal.aborted) {
-        setLoading(false);
-        setRefreshing(false);
-      }
-    });
-    return () => controller.abort();
-  }, [client, debouncedSearch, statusFilter]);
 
   useEffect(() => {
     if (!notesClient) return undefined;
@@ -229,6 +232,10 @@ export function ReminderPanel({
     };
     setPending(true);
     setError(null);
+    const mutationGeneration = mutationScopeRef.current.generation;
+    const isCurrentMutation = () => mutationScopeRef.current.client === client
+      && mutationScopeRef.current.cacheScope === cacheScope
+      && mutationScopeRef.current.generation === mutationGeneration;
     const request = editing
       ? client.updateReminder(editing.id, { ...input, base_revision: editing.revision } satisfies UpdateReminderInput)
       : client.createReminder(input);
@@ -236,10 +243,14 @@ export function ReminderPanel({
       setReminders((current) => editing
         ? current.map((item) => item.id === saved.id ? saved : item)
         : [saved, ...current]);
+      if (!isCurrentMutation()) return;
       setFeedback(editing ? "提醒已更新。" : "提醒已创建。");
       resetForm();
-    }).catch(() => setError(editing ? "提醒更新失败，当前输入仍保留。" : "提醒创建失败，当前输入仍保留。"))
-      .finally(() => setPending(false));
+    }).catch(() => {
+      if (isCurrentMutation()) setError(editing ? "提醒更新失败，当前输入仍保留。" : "提醒创建失败，当前输入仍保留。");
+    }).finally(() => {
+      if (isCurrentMutation()) setPending(false);
+    });
   };
 
   const beginEdit = (reminder: Reminder) => {
@@ -264,16 +275,25 @@ export function ReminderPanel({
   const updateOne = (reminder: Reminder, input: UpdateReminderInput, success: string) => {
     setPending(true);
     setError(null);
+    const mutationGeneration = mutationScopeRef.current.generation;
+    const isCurrentMutation = () => mutationScopeRef.current.client === client
+      && mutationScopeRef.current.cacheScope === cacheScope
+      && mutationScopeRef.current.generation === mutationGeneration;
     return client.updateReminder(reminder.id, input).then((updated) => {
       setReminders((current) => current.map((item) => item.id === updated.id ? updated : item));
+      if (!isCurrentMutation()) return updated;
       setFeedback(success);
       setRetryRequest(null);
       return updated;
     }).catch(() => {
-      setError("提醒状态更新失败，当前提醒仍保留。");
-      setRetryRequest({ reminder, input, success });
+      if (isCurrentMutation()) {
+        setError("提醒状态更新失败，当前提醒仍保留。");
+        setRetryRequest({ reminder, input, success });
+      }
       return undefined;
-    }).finally(() => setPending(false));
+    }).finally(() => {
+      if (isCurrentMutation()) setPending(false);
+    });
   };
 
   const completeReminderBatch = (ids: readonly string[]) => {
@@ -282,6 +302,10 @@ export function ReminderPanel({
     setPending(true);
     setError(null);
     setFeedback(null);
+    const mutationGeneration = mutationScopeRef.current.generation;
+    const isCurrentMutation = () => mutationScopeRef.current.client === client
+      && mutationScopeRef.current.cacheScope === cacheScope
+      && mutationScopeRef.current.generation === mutationGeneration;
     void Promise.allSettled(selected.map((reminder) => client.updateReminder(reminder.id, {
       base_revision: reminder.revision,
       status: "dismissed",
@@ -290,12 +314,15 @@ export function ReminderPanel({
       const failedIds = settled.flatMap((result, index) => result.status === "rejected" ? [selected[index]!.id] : []);
       const byId = new Map(updated.map((item) => [item.id, item]));
       setReminders((current) => current.map((item) => byId.get(item.id) ?? item));
+      if (!isCurrentMutation()) return;
       setSelectedIds(new Set(failedIds));
       setFailedBulkIds(failedIds);
       if (failedIds.length) setError(`${updated.length} 条完成，${failedIds.length} 条未完成；成功结果已保留，可重试失败项。`);
       else setFeedback(`已完成 ${updated.length} 条提醒。重复提醒系列已结束。`);
     })
-      .finally(() => setPending(false));
+      .finally(() => {
+        if (isCurrentMutation()) setPending(false);
+      });
   };
 
   const completeSelected = () => completeReminderBatch([...selectedIds]);
@@ -303,36 +330,42 @@ export function ReminderPanel({
   const snooze = (reminder: Reminder, minutes: 10 | 60 | 1440) => {
     setPending(true);
     setError(null);
+    const mutationGeneration = mutationScopeRef.current.generation;
+    const isCurrentMutation = () => mutationScopeRef.current.client === client
+      && mutationScopeRef.current.cacheScope === cacheScope
+      && mutationScopeRef.current.generation === mutationGeneration;
     void client.snoozeReminder(reminder.id, { base_revision: reminder.revision, minutes }).then((updated) => {
       setReminders((current) => current.map((item) => item.id === updated.id ? updated : item));
+      if (!isCurrentMutation()) return;
       setFeedback("已稍后提醒；重复规则锚点保持不变。");
-    }).catch(() => setError("稍后提醒失败，原提醒时间未改变。"))
-      .finally(() => setPending(false));
+    }).catch(() => {
+      if (isCurrentMutation()) setError("稍后提醒失败，原提醒时间未改变。");
+    }).finally(() => {
+      if (isCurrentMutation()) setPending(false);
+    });
   };
 
   const remove = (reminder: Reminder) => {
     setPending(true);
     setError(null);
+    const mutationGeneration = mutationScopeRef.current.generation;
+    const isCurrentMutation = () => mutationScopeRef.current.client === client
+      && mutationScopeRef.current.cacheScope === cacheScope
+      && mutationScopeRef.current.generation === mutationGeneration;
     void client.deleteReminder(reminder.id, { base_revision: reminder.revision }).then(() => {
       setReminders((current) => current.filter((item) => item.id !== reminder.id));
+      if (!isCurrentMutation()) return;
       setSelectedIds((current) => {
         const next = new Set(current);
         next.delete(reminder.id);
         return next;
       });
       setFeedback("提醒已删除。");
-    }).catch(() => setError("提醒删除失败，当前提醒仍保留。"))
-      .finally(() => setPending(false));
-  };
-
-  const loadMore = () => {
-    if (!client.listReminderPage || !nextCursor || refreshing) return;
-    setRefreshing(true);
-    void client.listReminderPage({ status: statusFilter, query: debouncedSearch || undefined, cursor: nextCursor, limit: 50 }).then((page) => {
-      setReminders((current) => [...current, ...page.items.filter((item) => !current.some((existing) => existing.id === item.id))]);
-      setNextCursor(page.next_cursor);
-    }).catch(() => setError("更多提醒暂时无法加载。"))
-      .finally(() => setRefreshing(false));
+    }).catch(() => {
+      if (isCurrentMutation()) setError("提醒删除失败，当前提醒仍保留。");
+    }).finally(() => {
+      if (isCurrentMutation()) setPending(false);
+    });
   };
 
   const grouped = reminders.reduce<Record<ReminderGroup, Reminder[]>>((result, reminder) => {
@@ -405,9 +438,19 @@ export function ReminderPanel({
               <div className="reminder-summary"><strong>{reminder.title || "未命名提醒"}</strong><time dateTime={reminder.snoozed_until ?? reminder.remind_at}>{new Date(reminder.snoozed_until ?? reminder.remind_at).toLocaleString()}</time><small>{reminder.note_id ? `关联笔记：${reminder.note_id}` : "未关联笔记"} · {statusLabel(reminder.status)} · {reminder.timezone || "UTC"}</small></div>
               <div className="reminder-item-actions">
                 {reminder.status === "pending" ? <><button type="button" disabled={pending} aria-label="稍后 10 分钟" onClick={() => snooze(reminder, 10)}>稍后 10 分钟</button><button type="button" disabled={pending} onClick={() => { void updateOne(reminder, { base_revision: reminder.revision, status: "dismissed" }, "提醒已完成；重复系列已结束。"); }}>完成</button></> : null}
+                {client.listReminderDeliveries ? <button type="button" disabled={pending} aria-expanded={deliveryOpenId === reminder.id} aria-label="查看投递状态" onClick={() => toggleDeliveryStatus(reminder.id)}>投递状态</button> : null}
                 <button type="button" disabled={pending} aria-label="编辑" onClick={() => beginEdit(reminder)}>编辑</button>
                 <button type="button" disabled={pending} aria-label="删除" onClick={() => remove(reminder)}>删除</button>
               </div>
+              {deliveryOpenId === reminder.id ? <div className="reminder-delivery-status" role="region" aria-label={`${reminder.title || "未命名提醒"}投递状态`}>
+                {deliveryLoadingId === reminder.id ? <p className="reminder-state" role="status">正在加载投递状态…</p> : null}
+                {deliveryErrors[reminder.id] ? <p className="reminder-error" role="alert">{deliveryErrors[reminder.id]}</p> : null}
+                {!deliveryLoadingId && !deliveryErrors[reminder.id] && (deliveryItems[reminder.id] ?? []).length === 0 ? <p className="reminder-state">暂无投递记录。</p> : null}
+                {(deliveryItems[reminder.id] ?? []).map((item) => <div className="reminder-delivery-row" key={item.id}>
+                  <span><strong>{deliveryChannelLabel(item.channel)}</strong><small>{deliveryStatusLabel(item.status)} · 尝试 {item.attempt_count}{item.last_error_code ? ` · ${item.last_error_code}` : ""}</small></span>
+                  {item.status === "failed" && client.retryReminderDelivery ? <button type="button" disabled={deliveryRetryId !== null} aria-label={`重试 ${deliveryChannelLabel(item.channel)} 投递`} onClick={() => retryDelivery(reminder.id, item.id)}>{deliveryRetryId === `${reminder.id}:${item.id}` ? "重试中…" : "重试"}</button> : null}
+                </div>)}
+              </div> : null}
             </li>)}
           </ul>
         </section>)}

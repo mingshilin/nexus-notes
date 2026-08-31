@@ -24,6 +24,13 @@ export interface BetaWorkerEnv {
   TURNSTILE_SECRET_KEY: string;
   RESEND_API_KEY: string;
   EMAIL_FROM: string;
+  CALENDAR_OAUTH_REDIRECT_URI?: string;
+  GOOGLE_CALENDAR_REDIRECT_URI?: string;
+  OUTLOOK_CALENDAR_REDIRECT_URI?: string;
+  GOOGLE_CALENDAR_CLIENT_ID?: string;
+  GOOGLE_CALENDAR_CLIENT_SECRET?: string;
+  OUTLOOK_CALENDAR_CLIENT_ID?: string;
+  OUTLOOK_CALENDAR_CLIENT_SECRET?: string;
   DEPLOYMENT_VERSION?: string;
   ANALYTICS?: ObservabilityAnalytics;
 }

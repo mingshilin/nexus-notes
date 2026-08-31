@@ -273,7 +273,7 @@ export class AiToolOrchestrator {
       try {
         requiresConfirmation = evaluateAiToolPolicy({
           tool: normalized.tool,
-          trusted: policy.trusted === true && normalized.tool === "create_note",
+          trusted: policy.trusted === true,
           target,
           externalRecipient: normalized.tool === "send_email",
         }).requiresConfirmation;

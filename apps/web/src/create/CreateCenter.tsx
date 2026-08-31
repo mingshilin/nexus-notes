@@ -1,4 +1,4 @@
-import { Bell, CalendarDays, Database, FileUp, Globe2, Lightbulb, Plus, Zap, X } from "lucide-react";
+import { Bell, CalendarDays, Database, FileUp, Globe2, Lightbulb, ListTodo, Plus, Zap, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useEffect, useId, useRef, useState, type MutableRefObject } from "react";
 import { useWorkbenchModalState } from "../layout/AdaptiveWorkbench";
@@ -22,12 +22,13 @@ export interface CreateCenterProps {
   onWebClipper?: CreateActionHandler;
   onTodayNote?: CreateActionHandler;
   onCreateDatabase?: CreateActionHandler;
+  onCreateTaskDatabase?: CreateActionHandler;
   onCreateReminder?: CreateActionHandler;
   onImport?: CreateActionHandler;
 }
 
 type CreateAction = {
-  id: "note" | "capture" | "clipper" | "today" | "database" | "reminder" | "import";
+  id: "note" | "capture" | "clipper" | "today" | "database" | "task-database" | "reminder" | "import";
   label: string;
   description: string;
   icon: typeof Lightbulb;
@@ -36,7 +37,7 @@ type CreateAction = {
 
 const focusableSelector = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
-export function CreateCenter({ open, onOpenChange, triggerAriaLabel = "创建内容", renderTrigger = true, focusReturnRef, disabled = false, onCreateNote, onQuickCapture, onWebClipper, onTodayNote, onCreateDatabase, onCreateReminder, onImport }: CreateCenterProps) {
+export function CreateCenter({ open, onOpenChange, triggerAriaLabel = "创建内容", renderTrigger = true, focusReturnRef, disabled = false, onCreateNote, onQuickCapture, onWebClipper, onTodayNote, onCreateDatabase, onCreateTaskDatabase, onCreateReminder, onImport }: CreateCenterProps) {
   const setWorkbenchModalOpen = useWorkbenchModalState();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -54,6 +55,7 @@ export function CreateCenter({ open, onOpenChange, triggerAriaLabel = "创建内
     { id: "clipper", label: "Web Clipper", description: "保存网页来源和正文，选择收件箱、今日笔记或数据库。", icon: Globe2, run: onWebClipper },
     { id: "today", label: "今日笔记", description: "打开或创建今天的笔记。", icon: CalendarDays, run: onTodayNote },
     { id: "database", label: "新建数据库", description: "创建一个结构化数据库。", icon: Database, run: onCreateDatabase },
+    { id: "task-database", label: "任务数据库", description: "创建任务名称、状态、负责人、截止日期和三种视图。", icon: ListTodo, run: onCreateTaskDatabase },
     { id: "reminder", label: "新建提醒", description: "打开提醒中心，填写时间并创建提醒。", icon: Bell, run: onCreateReminder },
     { id: "import", label: "导入内容", description: "把 Markdown 或纯文本文件导入为新笔记。", icon: FileUp, run: onImport },
   ];

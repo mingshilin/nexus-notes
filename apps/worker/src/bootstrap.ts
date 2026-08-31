@@ -35,6 +35,7 @@ import { OcrConsumer } from "./attachments/ocr-consumer";
 import { OcrExtractionError, OcrExtractor } from "./attachments/ocr-extractor";
 import { OcrOutboxDispatcher } from "./attachments/ocr-outbox-dispatcher";
 import { D1DatabaseRepository } from "./databases/d1-database-repository";
+import { createTaskNotificationWriter } from "./databases/task-notifications";
 import { registerDatabaseRoutes } from "./routes/databases";
 import { D1CollaborationRepository } from "./collaboration/d1-collaboration-repository";
 import { registerCollaborationRoutes } from "./routes/collaboration";
@@ -72,6 +73,10 @@ import { ReminderDeliveryConsumer } from "./push/reminder-delivery-consumer";
 import { ReminderOutboxDispatcher } from "./push/reminder-outbox-dispatcher";
 import { ResendReminderEmailSender } from "./push/resend-reminder-email";
 import { WebPushSender } from "./push/web-push-sender";
+import { D1CalendarRepository } from "./calendar/d1-calendar-repository";
+import { CalendarService } from "./calendar/calendar-service";
+import { createGoogleCalendarProvider, createOutlookCalendarProvider } from "./calendar/calendar-providers";
+import { registerCalendarRoutes } from "./calendar/calendar-routes";
 
 class ConfigurationError extends Error {
   readonly code = "SERVER_NOT_CONFIGURED";
@@ -277,6 +282,7 @@ function createNoteService(env: BetaWorkerEnv) {
 function createDatabaseRepository(env: BetaWorkerEnv) {
   return new D1DatabaseRepository(env.DB, {
     presence: createPresenceNotifier(env),
+    taskNotifications: createTaskNotificationWriter(env.DB, () => crypto.randomUUID()),
   });
 }
 
@@ -304,6 +310,7 @@ function createKnowledgeService(env: BetaWorkerEnv) {
   const taxonomy = new D1TaxonomyRepository(env.DB);
   const graph = new D1GraphRepository(env.DB);
   const reminders = new D1ReminderRepository(env.DB);
+  const reminderDeliveries = new D1ReminderDeliveryRepository(env.DB);
   return new KnowledgeService({
     search: (...args) => search.search(...args),
     listSavedSearches: (...args) => search.listSavedSearches(...args),
@@ -328,7 +335,7 @@ function createKnowledgeService(env: BetaWorkerEnv) {
     snoozeReminder: (...args) => reminders.snoozeReminder(...args),
     deleteReminder: (...args) => reminders.deleteReminder(...args),
     getReminder: (...args) => reminders.getReminder(...args),
-  });
+  }, { deliveryRepository: reminderDeliveries });
 }
 
 function createAttachmentService(env: BetaWorkerEnv) {
@@ -706,6 +713,51 @@ function createPushService(env: BetaWorkerEnv) {
   );
 }
 
+export function resolveCalendarConfig(env: Pick<BetaWorkerEnv, "APP_BASE_URL" | "CALENDAR_OAUTH_REDIRECT_URI" | "GOOGLE_CALENDAR_REDIRECT_URI" | "OUTLOOK_CALENDAR_REDIRECT_URI" | "GOOGLE_CALENDAR_CLIENT_ID" | "GOOGLE_CALENDAR_CLIENT_SECRET" | "OUTLOOK_CALENDAR_CLIENT_ID" | "OUTLOOK_CALENDAR_CLIENT_SECRET">, provider: "google" | "outlook") {
+  const providerRedirect = provider === "google" ? env.GOOGLE_CALENDAR_REDIRECT_URI : env.OUTLOOK_CALENDAR_REDIRECT_URI;
+  const legacyRedirect = env.CALENDAR_OAUTH_REDIRECT_URI?.trim();
+  let redirectUri = providerRedirect?.trim();
+  if (!redirectUri && legacyRedirect) {
+    try {
+      redirectUri = new URL(legacyRedirect).pathname.endsWith(`/api/v2/calendar/oauth/${provider}/callback`) ? legacyRedirect : undefined;
+    } catch {
+      redirectUri = undefined;
+    }
+  }
+  if (!redirectUri) return undefined;
+  try {
+    if (new URL(redirectUri).origin !== new URL(env.APP_BASE_URL).origin) return undefined;
+  } catch {
+    return undefined;
+  }
+  const clientId = provider === "google" ? env.GOOGLE_CALENDAR_CLIENT_ID : env.OUTLOOK_CALENDAR_CLIENT_ID;
+  const clientSecret = provider === "google" ? env.GOOGLE_CALENDAR_CLIENT_SECRET : env.OUTLOOK_CALENDAR_CLIENT_SECRET;
+  if (!clientId?.trim() || !clientSecret?.trim()) return undefined;
+  return { clientId: clientId.trim(), clientSecret: clientSecret.trim(), redirectUri };
+}
+
+function createCalendarService(env: BetaWorkerEnv) {
+  const stateSecret = env.RATE_LIMIT_SECRET ? new SecureTokenService(`calendar-oauth:${env.RATE_LIMIT_SECRET}`) : undefined;
+  const secretBox = env.USER_SECRETS_ENCRYPTION_KEY ? new UserSecretBox(env.USER_SECRETS_ENCRYPTION_KEY) : undefined;
+  const googleConfig = resolveCalendarConfig(env, "google");
+  const outlookConfig = resolveCalendarConfig(env, "outlook");
+  return new CalendarService(new D1CalendarRepository(env.DB), {
+    stateToken: stateSecret ? {
+      create: () => stateSecret.createSessionToken(),
+      hash: (value: string) => stateSecret.hash(value),
+    } : undefined,
+    secretBox,
+    configs: {
+      ...(googleConfig ? { google: googleConfig } : {}),
+      ...(outlookConfig ? { outlook: outlookConfig } : {}),
+    },
+    providers: {
+      google: createGoogleCalendarProvider(),
+      outlook: createOutlookCalendarProvider(),
+    },
+  });
+}
+
 function createReminderDeliveryConsumer(env: BetaWorkerEnv) {
   const subscriptions = env.USER_SECRETS_ENCRYPTION_KEY
     ? new D1PushSubscriptionRepository(env.DB, new UserSecretBox(env.USER_SECRETS_ENCRYPTION_KEY))
@@ -789,6 +841,7 @@ export function createBetaWorker(options: BetaWorkerOptions = {}) {
   registerOperationsRoutes(registry, createOperationsService);
   registerSyncRoutes(registry, createSyncService);
   registerPushRoutes(registry, createPushService);
+  registerCalendarRoutes(registry, createCalendarService);
 
   return {
     async fetch(request: Request, env: BetaWorkerEnv) {

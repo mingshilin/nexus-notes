@@ -6,6 +6,7 @@ import type { CollaborationClient } from "../../data/collaboration-client";
 import type { OperationsClient } from "../../data/operations-client";
 import type { ProfileClient } from "../../data/profile-client";
 import type { AccountTab } from "../../account";
+import type { AIChatReadContext } from "../../ai/AIChatPanel";
 import { loadAccountCenter, loadAIChatPanel } from "../workspace-domain-loader";
 import type { WorkspaceDomainProps } from "./NotesDomain";
 
@@ -26,7 +27,7 @@ export interface AccountAndAIDomainClient {
 }
 
 export type AccountAndAIDomainSelection =
-  | { kind: "ai"; showStatus?: boolean }
+  | { kind: "ai"; showStatus?: boolean; readContext?: AIChatReadContext }
   | { kind: "account"; workspaces: WorkspaceMembershipSummary[]; activeWorkspaceId: string | null; currentUserId: string; initialTab: AccountTab };
 
 export interface AccountAndAIDomainCallbacks {
@@ -42,13 +43,14 @@ export type AccountAndAIDomainProps = WorkspaceDomainProps<AccountAndAIDomainCli
 
 export function AccountAndAIDomain({ client, workspaceId, selectedEntity, callbacks }: AccountAndAIDomainProps) {
   if (selectedEntity.kind === "ai") {
-    return <Suspense fallback={<p className="database-empty" role="status">正在加载 AI 助手…</p>}><LazyAIChatPanel client={client.api} workspaceId={workspaceId} showStatus={selectedEntity.showStatus} /></Suspense>;
+    return <Suspense fallback={<p className="database-empty" role="status">正在加载 AI 助手…</p>}><LazyAIChatPanel client={client.api} workspaceId={workspaceId} showStatus={selectedEntity.showStatus} readContext={selectedEntity.readContext} /></Suspense>;
   }
 
   return (
     <Suspense fallback={<p className="database-empty" role="status">正在加载账户中心…</p>}>
       <LazyAccountCenter
         client={client.profile}
+        cacheScope={`${selectedEntity.currentUserId}:${selectedEntity.activeWorkspaceId ?? ""}`}
         ai={client.api}
         collaboration={client.collaboration}
         operations={client.operations}

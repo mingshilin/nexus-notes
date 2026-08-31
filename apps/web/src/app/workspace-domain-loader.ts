@@ -6,6 +6,7 @@ export const loadDatabaseWorkbench = () => import("../databases/DatabaseWorkbenc
 export const loadKnowledgeSearchPanel = () => import("../knowledge/KnowledgeSearchPanel");
 export const loadKnowledgeGraphPanel = () => import("../knowledge/KnowledgeGraphPanel");
 export const loadKnowledgeCalendarPanel = () => import("../knowledge/KnowledgeCalendarPanel");
+export const loadExternalCalendarPanel = () => import("../knowledge/ExternalCalendarPanel");
 export const loadReminderPanel = () => import("../reminders/ReminderPanel");
 export const loadAccountCenter = () => import("../account/AccountCenter");
 export const loadAIChatPanel = () => import("../ai/AIChatPanel");
@@ -13,11 +14,8 @@ export const loadCollaborationCenter = () => import("../collaboration/Collaborat
 
 const defaultLoaders: Partial<Record<ProductDomain, DomainModuleLoader>> = {
   databases: loadDatabaseWorkbench,
-  knowledge: () => Promise.all([
-    loadKnowledgeSearchPanel(),
-    loadKnowledgeGraphPanel(),
-    loadKnowledgeCalendarPanel(),
-  ]),
+  // Search is the primary knowledge entry; secondary tools load on demand.
+  knowledge: loadKnowledgeSearchPanel,
   reminders: loadReminderPanel,
   collaboration: loadCollaborationCenter,
   ai: loadAIChatPanel,

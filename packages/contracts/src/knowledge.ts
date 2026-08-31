@@ -64,6 +64,7 @@ export type NoteLink = z.infer<typeof NoteLinkSchema>;
 
 export const ReminderStatusSchema = z.enum(["pending", "sent", "dismissed"]);
 export const ReminderChannelSchema = z.enum(["in_app", "email", "push"]);
+export const ReminderDeliveryStatusSchema = z.enum(["queued", "sent", "failed", "cancelled"]);
 export const ReminderWeekdaySchema = z.enum(["MO", "TU", "WE", "TH", "FR", "SA", "SU"]);
 export const RecurrenceEndSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("never") }).strict(),
@@ -104,6 +105,29 @@ export const ReminderSchema = z.object({
   updated_at: TimestampSchema,
 });
 export type Reminder = z.infer<typeof ReminderSchema>;
+
+export const ReminderDeliverySchema = z.object({
+  id: EntityIdSchema,
+  workspace_id: EntityIdSchema,
+  reminder_id: EntityIdSchema,
+  occurrence_at: TimestampSchema,
+  channel: ReminderChannelSchema,
+  status: ReminderDeliveryStatusSchema,
+  attempt_count: z.number().int().nonnegative().max(1000),
+  last_error_code: z.string().trim().min(1).max(128).nullable(),
+  created_at: TimestampSchema,
+  updated_at: TimestampSchema,
+}).strict();
+export type ReminderDelivery = z.infer<typeof ReminderDeliverySchema>;
+
+export const ReminderDeliveryListResponseSchema = z.object({
+  items: z.array(ReminderDeliverySchema).max(100),
+  next_cursor: z.string().trim().min(1).max(512).nullable(),
+}).strict();
+export type ReminderDeliveryListResponse = z.infer<typeof ReminderDeliveryListResponseSchema>;
+
+export const RetryReminderDeliveryInputSchema = z.object({}).strict();
+export type RetryReminderDeliveryInput = z.infer<typeof RetryReminderDeliveryInputSchema>;
 
 export const CreateReminderInputSchema = z.object({
   note_id: EntityIdSchema.nullable().optional(),

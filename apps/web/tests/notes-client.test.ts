@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { WorkspaceQueryCache } from "../src/data/workspace-query-cache";
 
 type DataExports = Record<string, any>;
 
@@ -29,12 +30,32 @@ afterEach(() => {
 });
 
 describe("NotesClient", () => {
+  it("shares list queries across workspace client instances and invalidates after a write", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async ({ method }: { method?: string }) => method
+      ? { note: { ...note, revision: 2 } }
+      : { items: [note], next_cursor: null }) };
+    const queryCache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const options = { userId: "user-1", queryCache, createId: () => "operation" };
+    const first = new data.NotesClient(api, "ws-1", options);
+    const second = new data.NotesClient(api, "ws-1", options);
+
+    await first.list({ status: "active", limit: 50 });
+    await second.list({ status: "active", limit: 50 });
+    expect(api.request).toHaveBeenCalledOnce();
+
+    await first.update("note-1", { base_revision: 1, title: "Updated", source: "manual" });
+    await second.list({ status: "active", limit: 50 });
+    expect(api.request).toHaveBeenCalledTimes(3);
+  });
+
   it("opens or creates a daily note as a non-retryable idempotent command", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async () => ({ note: { ...note, daily_date: "2026-08-23" } })) };
     const client = new data.NotesClient(api, "ws-1", { createId: () => "daily-operation-1" });
 
-    await expect(client.openOrCreateDaily("2026-08-23")).resolves.toMatchObject({ daily_date: "2026-08-23" });
+    const controller = new AbortController();
+    await expect(client.openOrCreateDaily("2026-08-23", controller.signal)).resolves.toMatchObject({ daily_date: "2026-08-23" });
 
     expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
       path: "/api/v2/notes/daily",
@@ -42,7 +63,7 @@ describe("NotesClient", () => {
       body: { daily_date: "2026-08-23" },
       headers: { "x-workspace-id": "ws-1" },
       requestClass: "command",
-      policy: expect.objectContaining({ retry: 0, idempotencyKey: "daily-operation-1" }),
+      policy: expect.objectContaining({ retry: 0, idempotencyKey: "daily-operation-1", signal: controller.signal }),
     }));
   });
 
@@ -123,6 +144,19 @@ describe("NotesClient", () => {
     }));
   });
 
+  it("forwards optional abort signals for note updates and permanent deletion", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async (options: { method?: string }) => options.method === "DELETE" ? { deleted: true } : { note }) };
+    const client = new data.NotesClient(api, "ws-1", { createId: () => "operation-1" });
+    const controller = new AbortController();
+
+    await client.update("note-1", { base_revision: 1, title: "Updated", source: "manual" }, { signal: controller.signal });
+    await client.deletePermanently("note-1", { base_revision: 1 }, controller.signal);
+
+    expect(api.request.mock.calls[0]?.[0].policy.signal).toBe(controller.signal);
+    expect(api.request.mock.calls[1]?.[0].policy.signal).toBe(controller.signal);
+  });
+
   it("sends permanent deletion as a non-retryable DELETE command", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async () => ({ deleted: true })) };
@@ -167,7 +201,8 @@ describe("NotesClient", () => {
     await client.get("note-1");
     await client.quickCapture({ content: "Quick thought" });
     await client.listRevisions("note-1");
-    await client.restore("note-1", 1, { base_revision: 1 });
+    const restoreController = new AbortController();
+    await client.restore("note-1", 1, { base_revision: 1 }, restoreController.signal);
 
     expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET"])).toEqual([
       ["/api/v2/notes", "POST"],
@@ -177,6 +212,7 @@ describe("NotesClient", () => {
       ["/api/v2/notes/note-1/revisions/1/restore", "POST"],
     ]);
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
+    expect(api.request.mock.calls[4]?.[0].policy.signal).toBe(restoreController.signal);
   });
 
   it("sends Web Clipper captures to the dedicated endpoint with an idempotency key", async () => {

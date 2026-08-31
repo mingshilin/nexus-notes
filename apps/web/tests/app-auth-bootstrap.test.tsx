@@ -66,6 +66,76 @@ describe("App authentication bootstrap", () => {
     expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({ headers: { "x-workspace-id": "ws-1" } }));
   });
 
+  it("loads the next notes page without losing the active view filter", async () => {
+    const authClient = { session: vi.fn(async () => authenticatedSession("ws-1")) };
+    const firstNote = {
+      id: "note-1", workspace_id: "ws-1", folder_id: null, database_id: null,
+      created_by: "user-1", updated_by: "user-1", title: "First note", content: "First body",
+      status: "active" as const, is_favorite: false, is_pinned: false, daily_date: null,
+      revision: 1, created_at: "2026-08-28T00:00:00.000Z", updated_at: "2026-08-28T00:00:00.000Z",
+    };
+    const secondNote = { ...firstNote, id: "note-2", title: "Second note" };
+    const apiClient = { request: vi.fn(async (request: { path: string }) => {
+      if (request.path.startsWith("/api/v2/notes?")) {
+        return request.path.includes("cursor=next-note")
+          ? { items: [secondNote], next_cursor: null }
+          : { items: [firstNote], next_cursor: "next-note" };
+      }
+      return { items: [], next_cursor: null };
+    }) };
+
+    render(<App authClient={authClient as any} apiClient={apiClient as any} workspaceId="ws-1" turnstileSiteKey="test" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    const loadMore = await screen.findByRole("button", { name: "加载更多笔记" });
+    fireEvent.click(loadMore);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /Second note/ })).toBeInTheDocument());
+    expect(apiClient.request.mock.calls.some(([request]) => {
+      const url = new URL(request.path, "https://nexus.test");
+      return url.pathname === "/api/v2/notes"
+        && url.searchParams.get("status") === "active"
+        && url.searchParams.get("limit") === "50"
+        && url.searchParams.get("cursor") === "next-note";
+    })).toBe(true);
+  });
+
+  it("ignores a late notes page when the workspace changes", async () => {
+    const noteForPage = [{
+      id: "note-old", workspace_id: "ws-1", folder_id: null, database_id: null,
+      created_by: "user-1", updated_by: "user-1", title: "Old page", content: "Old body",
+      status: "active" as const, is_favorite: false, is_pinned: false, daily_date: null,
+      revision: 1, created_at: "2026-08-28T00:00:00.000Z", updated_at: "2026-08-28T00:00:00.000Z",
+    }];
+    const latePage = deferred<{ items: typeof noteForPage; next_cursor: null }>();
+    const sessions = {
+      one: { user: { id: "user-1", email: "one@example.test" }, workspaces: [{ id: "ws-1", name: "One", slug: "one", role: "owner" as const, revision: 1 }], active_workspace_id: "ws-1" },
+      two: { user: { id: "user-2", email: "two@example.test" }, workspaces: [{ id: "ws-2", name: "Two", slug: "two", role: "owner" as const, revision: 1 }], active_workspace_id: "ws-2" },
+    };
+    const authClient = { session: vi.fn(async () => sessions.one) };
+    const nextAuthClient = { session: vi.fn(async () => sessions.two) };
+    const apiClient = { request: vi.fn((request: { path: string; policy?: { signal?: AbortSignal }; headers?: Record<string, string> }) => {
+      if (request.path.startsWith("/api/v2/notes?")) {
+        if (request.headers?.["x-workspace-id"] === "ws-1" && request.path.includes("cursor=next-note")) return latePage.promise;
+        return request.headers?.["x-workspace-id"] === "ws-1"
+          ? Promise.resolve({ items: noteForPage, next_cursor: "next-note" })
+          : Promise.resolve({ items: [], next_cursor: null });
+      }
+      return Promise.resolve({ items: [], next_cursor: null });
+    }) };
+    const { rerender } = render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: "加载更多笔记" }));
+    await waitFor(() => {
+      const call = apiClient.request.mock.calls.find(([request]) => request.path.includes("cursor=next-note"));
+      expect(call).toBeDefined();
+    });
+
+    rerender(<App authClient={nextAuthClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+    await act(async () => latePage.resolve({ items: [{ ...noteForPage[0], id: "late-old" }], next_cursor: null }));
+    expect(screen.queryByRole("button", { name: /late-old|Old page/ })).not.toBeInTheDocument();
+  });
+
   it("uses controlled MIME and OCR filters in the active workspace query", async () => {
     const authClient = { session: vi.fn(async () => authenticatedSession("ws-1")) };
     const apiClient = { request: vi.fn(async () => ({ items: [], next_cursor: null })) };

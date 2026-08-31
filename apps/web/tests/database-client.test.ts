@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { serializeDatabaseCsv } from "@nexus/domain";
+import { WorkspaceQueryCache } from "../src/data/workspace-query-cache";
 
 async function loadData() {
   return await import("../src/data") as Record<string, any>;
@@ -16,6 +17,26 @@ function deferred<T>() {
 }
 
 describe("DatabaseClient", () => {
+  it("shares workspace database reads across client instances while isolating caller aborts", async () => {
+    const pending = deferred<{ items: Array<{ id: string; name: string }> }>();
+    const api = { request: vi.fn(() => pending.promise) };
+    const cache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const firstClient = new (await loadData()).DatabaseClient(api, "ws-1", { userId: "user-1", queryCache: cache });
+    const secondClient = new (await loadData()).DatabaseClient(api, "ws-1", { userId: "user-1", queryCache: cache });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+
+    const first = firstClient.listDatabases(firstController.signal);
+    const second = secondClient.listDatabases(secondController.signal);
+
+    expect(api.request).toHaveBeenCalledOnce();
+    firstController.abort();
+    pending.resolve({ items: [{ id: "db-1", name: "Projects" }] });
+
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    await expect(second).resolves.toEqual([{ id: "db-1", name: "Projects" }]);
+  });
+
   it("caches a database bootstrap for two minutes and invalidates it after a mutation", async () => {
     const data = await loadData();
     let now = 1_000;
@@ -42,6 +63,77 @@ describe("DatabaseClient", () => {
     await client.bootstrap({ databaseId: "db-1", limit: 25 });
     expect(api.request).toHaveBeenCalledTimes(4);
     expect(api.request.mock.calls[0]![0].path).toBe("/api/v2/databases/bootstrap?database_id=db-1&limit=25");
+  });
+
+  it("primes derived shared database reads from bootstrap without duplicate requests", async () => {
+    const data = await loadData();
+    const database = { id: "db-1", name: "Projects" };
+    const bundle = { database, role: "editor", properties: [], views: [], templates: [] };
+    const bootstrap = {
+      items: [database],
+      selected_database_id: "db-1",
+      bundle,
+      records: { items: [], next_cursor: null },
+    };
+    const api = { request: vi.fn(async ({ path }: { path: string }) => path.includes("/bootstrap")
+      ? bootstrap
+      : path === "/api/v2/databases" ? { items: [database] } : bundle) };
+    const queryCache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const client = new data.DatabaseClient(api, "ws-1", { userId: "user-1", queryCache, now: () => 1_000 });
+
+    await expect(client.bootstrap({ databaseId: "db-1", limit: 50 })).resolves.toBe(bootstrap);
+    await expect(client.listDatabases()).resolves.toEqual([database]);
+    await expect(client.getDatabase("db-1")).resolves.toBe(bundle);
+
+    expect(api.request).toHaveBeenCalledOnce();
+  });
+
+  it("does not let a slower bootstrap replace a newer settled list result", async () => {
+    const data = await loadData();
+    const bootstrapRequest = deferred<any>();
+    const listRequest = deferred<{ items: Array<{ id: string; name: string }> }>();
+    const api = {
+      request: vi.fn(({ path }: { path: string }) => path.includes("/bootstrap") ? bootstrapRequest.promise : listRequest.promise),
+    };
+    const queryCache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const client = new data.DatabaseClient(api, "ws-1", { userId: "user-1", queryCache });
+    const bootstrap = client.bootstrap({ databaseId: "db-1", limit: 50 });
+    const list = client.listDatabases();
+
+    listRequest.resolve({ items: [{ id: "db-new", name: "New" }] });
+    await expect(list).resolves.toEqual([{ id: "db-new", name: "New" }]);
+    bootstrapRequest.resolve({
+      items: [{ id: "db-old", name: "Old" }], selected_database_id: "db-old", bundle: null,
+      records: { items: [], next_cursor: null },
+    });
+    await bootstrap;
+
+    await expect(client.listDatabases()).resolves.toEqual([{ id: "db-new", name: "New" }]);
+    expect(api.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not reinsert a stale bootstrap into shared cache after mutation invalidation", async () => {
+    const data = await loadData();
+    const bootstrapRequest = deferred<any>();
+    const api = {
+      request: vi.fn(({ path, method }: { path: string; method?: string }) => {
+        if (path.includes("/bootstrap")) return bootstrapRequest.promise;
+        if (method === "POST") return Promise.resolve({ database: { id: "db-created", name: "Created" } });
+        return Promise.resolve({ items: [{ id: "db-fresh", name: "Fresh" }] });
+      }),
+    };
+    const queryCache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const client = new data.DatabaseClient(api, "ws-1", { userId: "user-1", queryCache });
+    const bootstrap = client.bootstrap({ databaseId: "db-old", limit: 50 });
+    await client.createDatabase({ name: "Created", description: "" });
+    bootstrapRequest.resolve({
+      items: [{ id: "db-old", name: "Old" }], selected_database_id: "db-old", bundle: null,
+      records: { items: [], next_cursor: null },
+    });
+    await bootstrap;
+
+    await expect(client.listDatabases()).resolves.toEqual([{ id: "db-fresh", name: "Fresh" }]);
+    expect(api.request.mock.calls.filter(([input]) => input.path === "/api/v2/databases" && !input.method)).toHaveLength(1);
   });
 
   it("serves stale database cache while revalidating and keeps it after an aborted refresh", async () => {

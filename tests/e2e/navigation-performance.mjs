@@ -1,6 +1,5 @@
-import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
 import {
+  externalPath,
   runNavigationPerformanceScenario,
   startBrowserSession,
 } from "../../scripts/smoke-beta-browser.mjs";
@@ -15,32 +14,38 @@ function emit(status, reason, extra = {}) {
 if (!profile) {
   emit("BLOCKED", "AUTHENTICATED_PROFILE_UNSET", { requiredEnv: ["NEXUS_NOTES_BETA_USER_DATA_DIR"] });
   process.exitCode = 2;
-} else if (!existsSync(resolve(profile)) || !statSync(resolve(profile)).isDirectory()) {
-  emit("BLOCKED", "AUTHENTICATED_PROFILE_INVALID", { profile: "external" });
-  process.exitCode = 2;
 } else {
-  let session;
+  let externalProfile;
   try {
-    session = await startBrowserSession(url, {
-      userDataDir: profile,
-      headed: process.env.NEXUS_NOTES_BROWSER_HEADED === "1",
-    });
-    const evidence = await runNavigationPerformanceScenario(session.cdp);
-    if (session.diagnostics.state.consoleErrors > 0 || session.diagnostics.state.exceptionCount > 0) {
-      emit("FAIL", "BROWSER_RUNTIME_DIAGNOSTICS", { diagnostics: session.diagnostics.state });
-      process.exitCode = 1;
-    } else {
-      emit("PASS", "NAVIGATION_BUDGETS_COMPLETED", { profile: "external", evidence });
+    externalProfile = externalPath(profile, "NEXUS_NOTES_BETA_USER_DATA_DIR", "directory");
+  } catch {
+    emit("BLOCKED", "AUTHENTICATED_PROFILE_INVALID", { profile: "external" });
+    process.exitCode = 2;
+  }
+  if (externalProfile) {
+    let session;
+    try {
+      session = await startBrowserSession(url, {
+        userDataDir: externalProfile,
+        headed: process.env.NEXUS_NOTES_BROWSER_HEADED === "1",
+      });
+      const evidence = await runNavigationPerformanceScenario(session.cdp);
+      if (session.diagnostics.state.consoleErrors > 0 || session.diagnostics.state.exceptionCount > 0) {
+        emit("FAIL", "BROWSER_RUNTIME_DIAGNOSTICS", { diagnostics: session.diagnostics.state });
+        process.exitCode = 1;
+      } else {
+        emit("PASS", "NAVIGATION_BUDGETS_COMPLETED", { profile: "external", evidence });
+      }
+    } catch (error) {
+      if (error?.gateBlocked) {
+        emit("BLOCKED", error.code ?? "NAVIGATION_FIXTURE_UNAVAILABLE", { profile: "external" });
+        process.exitCode = 2;
+      } else {
+        emit("FAIL", "NAVIGATION_BROWSER_FLOW_FAILED");
+        process.exitCode = 1;
+      }
+    } finally {
+      await session?.close();
     }
-  } catch (error) {
-    if (error?.gateBlocked) {
-      emit("BLOCKED", error.code ?? "NAVIGATION_FIXTURE_UNAVAILABLE", { profile: "external" });
-      process.exitCode = 2;
-    } else {
-      emit("FAIL", "NAVIGATION_BROWSER_FLOW_FAILED");
-      process.exitCode = 1;
-    }
-  } finally {
-    await session?.close();
   }
 }

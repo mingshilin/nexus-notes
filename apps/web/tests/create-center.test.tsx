@@ -148,6 +148,19 @@ describe("CreateCenter", () => {
     expect(screen.queryByRole("dialog", { name: "创建内容" })).not.toBeInTheDocument();
   });
 
+  it("exposes a task database shortcut when the workspace supports it", async () => {
+    const onCreateTaskDatabase = vi.fn(async () => ({ status: "completed" as const }));
+    render(<CreateCenter
+      open
+      onOpenChange={vi.fn()}
+      onCreateTaskDatabase={onCreateTaskDatabase}
+      renderTrigger={false}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "任务数据库" }));
+    await waitFor(() => expect(onCreateTaskDatabase).toHaveBeenCalledOnce());
+  });
+
   it("explains unavailable actions instead of exposing silent no-op buttons", () => {
     render(<CreateCenterHarness />);
     fireEvent.click(screen.getByRole("button", { name: "创建内容" }));

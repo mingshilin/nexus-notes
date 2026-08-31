@@ -3,6 +3,21 @@ import { describe, expect, it, vi } from "vitest";
 import { AIChatPanel } from "../src/ai/AIChatPanel";
 
 describe("AIChatPanel", () => {
+  function actionResponse(summary: string) {
+    return {
+      message: `${summary}消息`,
+      model: "beta-model",
+      action_proposals: [{
+        action_id: "shared-action-id",
+        tool: "create_note" as const,
+        summary,
+        input: { title: summary, content: `${summary}内容` },
+        requires_confirmation: true,
+        expires_at: "2099-08-25T01:00:00.000Z",
+      }],
+    };
+  }
+
   it("shows an explicit configuration status without exposing provider secrets", async () => {
     const client = { request: vi.fn(async (options: { path: string }) => options.path === "/api/v2/ai/status" || options.path === "/api/v2/ai/config" ? { configured: false, source: "unconfigured" } : { message: "unused", model: "beta-model" }) };
 
@@ -34,6 +49,24 @@ describe("AIChatPanel", () => {
     expect(client.request.mock.calls.every(([input]) => input.path === "/api/v2/ai/status")).toBe(true);
   });
 
+  it("checks the server AI status before revealing the default chat surface", async () => {
+    const client = {
+      request: vi.fn(async (options: { path: string }) => {
+        if (options.path === "/api/v2/ai/status") {
+          throw Object.assign(new Error("AI service is disabled"), { code: "SERVER_NOT_CONFIGURED", status: 503 });
+        }
+        throw new Error("chat must remain gated");
+      }),
+    };
+
+    render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
+
+    expect(await screen.findByText("AI 助手当前不可用", { exact: false })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "输入问题" })).not.toBeInTheDocument();
+    expect(client.request).toHaveBeenCalledOnce();
+    expect(client.request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/ai/status" }));
+  });
+
   it("locks the default chat surface after the server reports that AI is disabled", async () => {
     const client = {
       request: vi.fn(async (input: { path: string }) => {
@@ -45,13 +78,13 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "你好" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "你好" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("AI 助手当前不可用", { exact: false })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "输入问题" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "发送" })).not.toBeInTheDocument();
-    expect(client.request).toHaveBeenCalledTimes(1);
+    expect(client.request).toHaveBeenCalledTimes(2);
   });
 
   it("tests and saves a personal OpenAI-compatible configuration without redisplaying the key", async () => {
@@ -85,7 +118,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    const input = screen.getByRole("textbox", { name: "输入问题" });
+    const input = await screen.findByRole("textbox", { name: "输入问题" });
     expect(input).toHaveAttribute("maxlength", "4000");
     fireEvent.change(input, { target: { value: "帮我排优先级" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
@@ -99,6 +132,144 @@ describe("AIChatPanel", () => {
     expect(await screen.findByText("先处理最重要的一项。" )).toBeInTheDocument();
   });
 
+  it("sends only the selected note and database context until workspace search is enabled", async () => {
+    const client = {
+      request: vi.fn(async () => ({ message: "已读取当前内容。", model: "beta-model" })),
+    };
+
+    render(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-1"], selected_database_ids: ["db-1"] }}
+    />);
+    expect(await screen.findByRole("checkbox", { name: "允许搜索工作区" })).not.toBeChecked();
+
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "总结当前内容" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/ai/chat",
+      body: {
+        messages: [{ role: "user", content: "总结当前内容" }],
+        read_context: {
+          selected_note_ids: ["note-1"],
+          selected_database_ids: ["db-1"],
+          allow_workspace_search: false,
+        },
+      },
+    })));
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "允许搜索工作区" }));
+    expect(screen.getByRole("checkbox", { name: "允许搜索工作区" })).toBeChecked();
+  });
+
+  it("invalidates a pending chat when the explicit read scope changes and restores the prompt", async () => {
+    let resolveChat!: (value: { message: string; model: string }) => void;
+    const request = vi.fn((input: { path: string }) => input.path === "/api/v2/ai/chat"
+      ? new Promise<{ message: string; model: string }>((resolve) => { resolveChat = resolve; })
+      : Promise.resolve({ configured: true, source: "server_default" }));
+    const client = { request };
+    const view = render(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a"], selected_database_ids: ["db-a"] }}
+    />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: "允许搜索工作区" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "总结范围 A" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/ai/chat" })));
+    const chatRequest = request.mock.calls.find(([input]) => input.path === "/api/v2/ai/chat")?.[0];
+    const signal = chatRequest?.policy.signal as AbortSignal;
+
+    view.rerender(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-b"], selected_database_ids: ["db-b"] }}
+    />);
+
+    await waitFor(() => expect(signal.aborted).toBe(true));
+    expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("总结范围 A");
+    expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: "允许搜索工作区" })).not.toBeChecked();
+    expect(screen.getByRole("alert")).toHaveTextContent("AI 读取范围已变化，请确认当前范围后重新发送。");
+
+    resolveChat({ message: "范围 A 的晚到回复", model: "beta-model" });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("范围 A 的晚到回复")).not.toBeInTheDocument();
+  });
+
+  it("keeps a pending chat when new arrays contain the same ordered scope ids", async () => {
+    let resolveChat!: (value: { message: string; model: string }) => void;
+    const request = vi.fn((input: { path: string }) => input.path === "/api/v2/ai/chat"
+      ? new Promise<{ message: string; model: string }>((resolve) => { resolveChat = resolve; })
+      : Promise.resolve({ configured: true, source: "server_default" }));
+    const client = { request };
+    const view = render(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a", "note-b"], selected_database_ids: ["db-a"] }}
+    />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "保持当前范围" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/ai/chat" })));
+    const chatRequest = request.mock.calls.find(([input]) => input.path === "/api/v2/ai/chat")?.[0];
+    const signal = chatRequest?.policy.signal as AbortSignal;
+
+    view.rerender(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a", "note-b"], selected_database_ids: ["db-a"] }}
+    />);
+
+    expect(signal.aborted).toBe(false);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    resolveChat({ message: "同一范围回复", model: "beta-model" });
+    expect(await screen.findByText("同一范围回复")).toBeInTheDocument();
+  });
+
+  it("clears completed scope state while preserving an unsent draft", async () => {
+    const request = vi.fn(async (input: { path: string }) => input.path === "/api/v2/ai/chat"
+      ? {
+          message: "范围 A 的回复",
+          model: "beta-model",
+          action_proposals: [{
+            action_id: "scope-a-action",
+            tool: "create_note" as const,
+            summary: "范围 A 的待确认操作",
+            input: { title: "旧范围", content: "旧范围内容" },
+            requires_confirmation: true,
+            expires_at: "2099-08-25T01:00:00.000Z",
+          }],
+        }
+      : { configured: true, source: "server_default" });
+    const client = { request, confirmAiAction: vi.fn(), rejectAiAction: vi.fn() };
+    const view = render(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a"], selected_database_ids: [] }}
+    />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "生成旧范围操作" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText("范围 A 的待确认操作")).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "尚未发送的草稿" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "允许搜索工作区" }));
+
+    view.rerender(<AIChatPanel
+      client={client as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-b"], selected_database_ids: [] }}
+    />);
+
+    await waitFor(() => expect(screen.queryByText("范围 A 的待确认操作")).not.toBeInTheDocument());
+    expect(screen.queryByText("范围 A 的回复")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认执行" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("尚未发送的草稿");
+    expect(screen.getByRole("checkbox", { name: "允许搜索工作区" })).not.toBeChecked();
+    expect(screen.getByRole("alert")).toHaveTextContent("AI 读取范围已变化，请确认当前范围后重新发送。");
+  });
+
   it("clears the transcript when the workspace changes", async () => {
     const client = {
       request: vi.fn(async (input: { path: string }) => input.path === "/api/v2/ai/chat"
@@ -106,7 +277,7 @@ describe("AIChatPanel", () => {
         : { configured: false }),
     };
     const view = render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    const input = screen.getByRole("textbox", { name: "输入问题" });
+    const input = await screen.findByRole("textbox", { name: "输入问题" });
     fireEvent.change(input, { target: { value: "只属于工作区一的问题" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(await screen.findByText("工作区一的回复")).toBeInTheDocument();
@@ -114,7 +285,7 @@ describe("AIChatPanel", () => {
     view.rerender(<AIChatPanel client={client as any} workspaceId="ws-2" />);
 
     expect(screen.queryByText("工作区一的回复")).not.toBeInTheDocument();
-    expect(screen.getByText("可以问我如何整理任务、拆解目标或改进笔记结构。")).toBeInTheDocument();
+    expect(await screen.findByText("可以问我如何整理任务、拆解目标或改进笔记结构。")).toBeInTheDocument();
   });
 
   it("does not restore a response after clearing an in-flight conversation", async () => {
@@ -123,7 +294,7 @@ describe("AIChatPanel", () => {
       ? new Promise<{ message: string; model: string }>((resolve) => { resolveRequest = resolve; })
       : Promise.resolve({ configured: true }));
     render(<AIChatPanel client={{ request } as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "待清空的问题" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "待清空的问题" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/ai/chat" })));
 
@@ -141,7 +312,7 @@ describe("AIChatPanel", () => {
       ? new Promise<{ message: string; model: string }>((resolve) => { resolveRequest = resolve; })
       : Promise.resolve({ configured: false }));
     const view = render(<AIChatPanel client={{ request } as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "旧工作区问题" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "旧工作区问题" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/ai/chat" })));
 
@@ -150,7 +321,7 @@ describe("AIChatPanel", () => {
     await act(async () => { await Promise.resolve(); });
 
     expect(screen.queryByText("旧工作区的晚到回复")).not.toBeInTheDocument();
-    expect(screen.getByText("可以问我如何整理任务、拆解目标或改进笔记结构。")).toBeInTheDocument();
+    expect(await screen.findByText("可以问我如何整理任务、拆解目标或改进笔记结构。")).toBeInTheDocument();
   });
 
   it("fills a quick prompt without sending it", async () => {
@@ -186,7 +357,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "你好" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "你好" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("当前没有可用的 AI");
@@ -194,21 +365,29 @@ describe("AIChatPanel", () => {
   });
 
   it("does not duplicate a failed question when the user retries", async () => {
+    let chatAttempt = 0;
+    let rejectFirst!: (error: unknown) => void;
     const client = {
-      request: vi.fn()
-        .mockRejectedValueOnce(Object.assign(new Error("provider unavailable"), { code: "AI_PROVIDER_UNAVAILABLE" }))
-        .mockResolvedValueOnce({ message: "已重试", model: "beta-model" }),
+      request: vi.fn(async (input: { path: string }) => {
+        if (input.path === "/api/v2/ai/status") return { configured: true, source: "server_default" };
+        chatAttempt += 1;
+        if (chatAttempt === 1) return new Promise<never>((_resolve, reject) => { rejectFirst = reject; });
+        return { message: "已重试", model: "beta-model" };
+      }),
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    const input = screen.getByRole("textbox", { name: "输入问题" });
+    const input = await screen.findByRole("textbox", { name: "输入问题" });
     fireEvent.change(input, { target: { value: "重试这个问题" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(chatAttempt).toBe(1));
+    rejectFirst(Object.assign(new Error("provider unavailable"), { code: "AI_PROVIDER_UNAVAILABLE" }));
     await screen.findByRole("alert");
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
-    await waitFor(() => expect(client.request).toHaveBeenCalledTimes(2));
-    expect(client.request.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+    await waitFor(() => expect(client.request).toHaveBeenCalledTimes(3));
+    const chatCalls = client.request.mock.calls.filter(([input]) => input.path === "/api/v2/ai/chat");
+    expect(chatCalls[1]?.[0]).toEqual(expect.objectContaining({
       body: { messages: [{ role: "user", content: "重试这个问题" }] },
     }));
     expect(await screen.findByText("已重试")).toBeInTheDocument();
@@ -247,7 +426,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "帮我执行后续动作" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "帮我执行后续动作" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
     const confirmButtons = await screen.findAllByRole("button", { name: "确认执行" });
@@ -261,6 +440,160 @@ describe("AIChatPanel", () => {
     expect(await screen.findByText("已确认")).toBeInTheDocument();
     expect(screen.getByText("创建复盘笔记")).toBeInTheDocument();
     expect(rejectAiAction).not.toHaveBeenCalled();
+  });
+
+  it("does not repopulate a stale confirmation after the explicit read scope changes", async () => {
+    let chatAttempt = 0;
+    let resolveConfirm!: (value: { action: { action_id: string; status: "executed"; revision: number } }) => void;
+    const request = vi.fn(async (input: { path: string }) => {
+      if (input.path === "/api/v2/ai/status") return { configured: true, source: "server_default" };
+      chatAttempt += 1;
+      return actionResponse(chatAttempt === 1 ? "旧范围提案" : "新范围提案");
+    });
+    const confirmAiAction = vi.fn(() => new Promise<{ action: { action_id: string; status: "executed"; revision: number } }>((resolve) => {
+      resolveConfirm = resolve;
+    }));
+    const view = render(<AIChatPanel
+      client={{ request, confirmAiAction, rejectAiAction: vi.fn() } as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a"], selected_database_ids: [] }}
+    />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "确认旧范围" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "旧范围提案" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+    await waitFor(() => expect(confirmAiAction).toHaveBeenCalledOnce());
+
+    view.rerender(<AIChatPanel
+      client={{ request, confirmAiAction, rejectAiAction: vi.fn() } as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-b"], selected_database_ids: [] }}
+    />);
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "旧范围提案" })).not.toBeInTheDocument());
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "确认新范围" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "新范围提案" })).toBeInTheDocument();
+
+    resolveConfirm({ action: { action_id: "shared-action-id", status: "executed", revision: 2 } });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("待确认")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认执行" })).toBeInTheDocument();
+    expect(screen.queryByText("已确认")).not.toBeInTheDocument();
+  });
+
+  it("does not repopulate a stale rejection after the explicit read scope changes", async () => {
+    let chatAttempt = 0;
+    let resolveReject!: (value: { action: { action_id: string; rejected: boolean } }) => void;
+    const request = vi.fn(async (input: { path: string }) => {
+      if (input.path === "/api/v2/ai/status") return { configured: true, source: "server_default" };
+      chatAttempt += 1;
+      return actionResponse(chatAttempt === 1 ? "旧范围拒绝提案" : "新范围拒绝提案");
+    });
+    const rejectAiAction = vi.fn(() => new Promise<{ action: { action_id: string; rejected: boolean } }>((resolve) => {
+      resolveReject = resolve;
+    }));
+    const view = render(<AIChatPanel
+      client={{ request, confirmAiAction: vi.fn(), rejectAiAction } as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-a"], selected_database_ids: [] }}
+    />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "拒绝旧范围" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "旧范围拒绝提案" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
+    await waitFor(() => expect(rejectAiAction).toHaveBeenCalledOnce());
+
+    view.rerender(<AIChatPanel
+      client={{ request, confirmAiAction: vi.fn(), rejectAiAction } as any}
+      workspaceId="ws-1"
+      readContext={{ selected_note_ids: ["note-b"], selected_database_ids: [] }}
+    />);
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "旧范围拒绝提案" })).not.toBeInTheDocument());
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "拒绝新范围" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "新范围拒绝提案" })).toBeInTheDocument();
+
+    resolveReject({ action: { action_id: "shared-action-id", rejected: true } });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("待确认")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "拒绝" })).toBeInTheDocument();
+    expect(screen.queryByText("已拒绝")).not.toBeInTheDocument();
+  });
+
+  it("does not repopulate a stale confirmation after clearing the conversation", async () => {
+    let chatAttempt = 0;
+    let resolveConfirm!: (value: { action: { action_id: string; status: "executed"; revision: number } }) => void;
+    const request = vi.fn(async (input: { path: string }) => {
+      if (input.path === "/api/v2/ai/status") return { configured: true, source: "server_default" };
+      chatAttempt += 1;
+      return actionResponse(chatAttempt === 1 ? "清空前提案" : "清空后提案");
+    });
+    const confirmAiAction = vi.fn(() => new Promise<{ action: { action_id: string; status: "executed"; revision: number } }>((resolve) => {
+      resolveConfirm = resolve;
+    }));
+    render(<AIChatPanel client={{ request, confirmAiAction, rejectAiAction: vi.fn() } as any} workspaceId="ws-1" />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "清空前确认" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "清空前提案" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+    await waitFor(() => expect(confirmAiAction).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "清空对话" }));
+
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "清空后确认" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "清空后提案" })).toBeInTheDocument();
+
+    resolveConfirm({ action: { action_id: "shared-action-id", status: "executed", revision: 2 } });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("待确认")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认执行" })).toBeInTheDocument();
+    expect(screen.queryByText("已确认")).not.toBeInTheDocument();
+  });
+
+  it("does not repopulate a stale rejection after clearing the conversation", async () => {
+    let chatAttempt = 0;
+    let resolveReject!: (value: { action: { action_id: string; rejected: boolean } }) => void;
+    const request = vi.fn(async (input: { path: string }) => {
+      if (input.path === "/api/v2/ai/status") return { configured: true, source: "server_default" };
+      chatAttempt += 1;
+      return actionResponse(chatAttempt === 1 ? "清空前拒绝提案" : "清空后拒绝提案");
+    });
+    const rejectAiAction = vi.fn(() => new Promise<{ action: { action_id: string; rejected: boolean } }>((resolve) => {
+      resolveReject = resolve;
+    }));
+    render(<AIChatPanel client={{ request, confirmAiAction: vi.fn(), rejectAiAction } as any} workspaceId="ws-1" />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "清空前拒绝" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "清空前拒绝提案" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
+    await waitFor(() => expect(rejectAiAction).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "清空对话" }));
+
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "清空后拒绝" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("heading", { name: "清空后拒绝提案" })).toBeInTheDocument();
+
+    resolveReject({ action: { action_id: "shared-action-id", rejected: true } });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("待确认")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "拒绝" })).toBeInTheDocument();
+    expect(screen.queryByText("已拒绝")).not.toBeInTheDocument();
   });
 
   it("rejects a proposal, handles expiry, and never persists sensitive AI content in browser storage", async () => {
@@ -289,7 +622,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "send secret prompt" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "send secret prompt" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("private@example.test")).toBeInTheDocument();
@@ -328,7 +661,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "重试 action" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "重试 action" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
     fireEvent.click((await screen.findAllByRole("button", { name: "确认执行" }))[0]!);
@@ -360,7 +693,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "更新笔记" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "更新笔记" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     fireEvent.click((await screen.findAllByRole("button", { name: "确认执行" }))[0]!);
 
@@ -390,7 +723,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "更新笔记" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "更新笔记" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     fireEvent.click((await screen.findAllByRole("button", { name: "确认执行" }))[0]!);
 
@@ -419,7 +752,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "更新笔记" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "更新笔记" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     fireEvent.click((await screen.findAllByRole("button", { name: "确认执行" }))[0]!);
 
@@ -444,7 +777,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "继续执行" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "继续执行" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("AI 操作仍在执行，请稍后重试。")).toBeInTheDocument();
@@ -476,7 +809,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "更新笔记" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "更新笔记" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     fireEvent.click((await screen.findAllByRole("button", { name: "确认执行" }))[0]!);
 
@@ -512,7 +845,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "更新笔记" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "更新笔记" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     fireEvent.click((await screen.findAllByRole("button", { name: "确认执行" }))[0]!);
 
@@ -540,7 +873,7 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "更新高版本笔记" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "更新高版本笔记" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     fireEvent.click((await screen.findAllByRole("button", { name: "确认执行" }))[0]!);
 
@@ -563,13 +896,13 @@ describe("AIChatPanel", () => {
     };
 
     render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
-    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "执行两个操作" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "输入问题" }), { target: { value: "执行两个操作" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("AI 操作已完成。")).toBeInTheDocument();
     expect(await screen.findByText("AI 操作执行失败，请重新发起。")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重新发起" }));
-    expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("请重新发起刚才未完成的 AI 操作");
+    expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("执行两个操作");
   });
 
   it("automatically expires proposals after their expires_at without waiting for a server rejection", async () => {
@@ -596,6 +929,10 @@ describe("AIChatPanel", () => {
       };
 
       render(<AIChatPanel client={client as any} workspaceId="ws-1" />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
       fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "帮我执行后续动作" } });
       fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
@@ -612,7 +949,7 @@ describe("AIChatPanel", () => {
       expect(screen.getByText("已过期")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "确认执行" })).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "拒绝" })).not.toBeInTheDocument();
-      expect(client.request).toHaveBeenCalledTimes(1);
+      expect(client.request).toHaveBeenCalledTimes(2);
       expect(client.confirmAiAction).not.toHaveBeenCalled();
       expect(client.rejectAiAction).not.toHaveBeenCalled();
     } finally {
@@ -626,7 +963,11 @@ describe("AIChatPanel", () => {
       ? new Promise<{ message: string; model: string }>((resolve) => { resolveRequest = resolve; })
       : Promise.resolve({ configured: true }));
     const view = render(<AIChatPanel client={{ request } as any} workspaceId="ws-1" showStatus />);
-    const input = await screen.findByRole("textbox", { name: "输入问题" });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const input = screen.getByRole("textbox", { name: "输入问题" });
     fireEvent.change(input, { target: { value: "测试" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({ path: "/api/v2/ai/chat" })));

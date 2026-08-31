@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 import { ApiClientError } from "../src/data/api-client";
@@ -14,8 +14,19 @@ const session = {
 
 const findNoteTitle = () => screen.findByRole("textbox", { name: "笔记标题" }, { timeout: 3000 });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  return {
+    promise: new Promise<T>((next, fail) => { resolve = next; reject = fail; }),
+    resolve,
+    reject,
+  };
+}
+
 type NoteApiOptions = {
   createNote?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
+  createFolder?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
   listDatabases?: () => Promise<unknown>;
   openOrCreateDaily?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
   listNotes?: (workspaceId: string) => Promise<unknown>;
@@ -70,13 +81,18 @@ function serverNoteForFlow() {
 
 function createApiClient(options: NoteApiOptions = {}) {
   let nextNoteId = 1;
-  const request = vi.fn(async (input: { path: string; method?: string; body?: Record<string, unknown>; headers?: Record<string, string> }) => {
+  let folderRequest: { path: string; method?: string; body?: Record<string, unknown>; policy?: { signal?: AbortSignal } } | null = null;
+  const request = vi.fn(async (input: { path: string; method?: string; body?: Record<string, unknown>; headers?: Record<string, string>; policy?: { signal?: AbortSignal } }) => {
     if (input.path === "/api/v2/databases" && input.method !== "POST") return options.listDatabases?.() ?? { items: [] };
-    if (input.path === "/api/v2/attachments/uploads" && input.method === "POST") return { attachment: { id: "attachment-editor-1", filename: input.body?.filename ?? "diagram.png", note_id: input.body?.note_id ?? null } };
-    if (input.path === "/api/v2/attachments/attachment-editor-1/content" && input.method === "PUT") return { attachment: { id: "attachment-editor-1", filename: "diagram.png", note_id: "attachment-note" } };
-    if (input.path === "/api/v2/attachments/attachment-editor-1/complete" && input.method === "POST") return { attachment: { id: "attachment-editor-1", filename: "diagram.png", note_id: "attachment-note" } };
+    if (input.path === "/api/v2/attachments/uploads" && input.method === "POST") return { attachment: { id: "attachment-editor-1", workspace_id: "ws-1", filename: input.body?.filename ?? "diagram.png", note_id: input.body?.note_id ?? null } };
+    if (input.path === "/api/v2/attachments/attachment-editor-1/content" && input.method === "PUT") return { attachment: { id: "attachment-editor-1", workspace_id: "ws-1", filename: "diagram.png", note_id: "attachment-note" } };
+    if (input.path === "/api/v2/attachments/attachment-editor-1/complete" && input.method === "POST") return { attachment: { id: "attachment-editor-1", workspace_id: "ws-1", filename: "diagram.png", note_id: "attachment-note" } };
     if (input.path.startsWith("/api/v2/attachments")) return { items: [], next_cursor: null };
     if (input.path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
+    if (input.path === "/api/v2/folders" && input.method === "POST") {
+      folderRequest = input;
+      return options.createFolder?.(input) ?? { folder: { id: "folder-1", workspace_id: "ws-1", name: String(input.body?.name ?? ""), position: 0 } };
+    }
     if (input.path.startsWith("/api/v2/notifications/unread")) return { unread_count: 0 };
     if (input.path === "/api/v2/ai/chat" && input.method === "POST") return options.aiChat?.(input) ?? { message: "AI 摘要", model: "beta-model" };
     if (input.path === "/api/v2/notes?status=active&limit=50") return options.listNotes?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
@@ -130,7 +146,7 @@ function createApiClient(options: NoteApiOptions = {}) {
     }
     return { items: [], next_cursor: null };
   });
-  return { request };
+  return { request, getFolderRequest: () => folderRequest };
 }
 
 function renderWorkspace(apiClient: ReturnType<typeof createApiClient>, width = 929) {
@@ -205,6 +221,52 @@ describe("live note workspace flow", () => {
       method: "POST",
       body: { base_revision: 2 },
     }));
+  });
+
+  it("ignores a late revision restore after the user selects another note", async () => {
+    const first = { ...serverNoteForFlow(), id: "history-note", title: "第一篇", content: "第一篇正文", revision: 2 };
+    const second = { ...serverNoteForFlow(), id: "second-note", title: "第二篇", content: "第二篇正文", revision: 1 };
+    const revision = {
+      id: "history-revision-1",
+      workspace_id: "ws-1",
+      note_id: first.id,
+      revision: 1,
+      title: "旧标题",
+      content: "旧内容",
+      source: "manual" as const,
+      created_by: "user-1",
+      created_at: "2026-08-22T00:00:00.000Z",
+    };
+    let resolveRestore!: (value: unknown) => void;
+    const pendingRestore = new Promise<unknown>((resolve) => { resolveRestore = resolve; });
+    const apiClient = createApiClient({
+      listNotes: async () => ({ items: [first, second], next_cursor: null }),
+      listRevisions: async () => ({ items: [revision] }),
+      restoreRevision: async () => pendingRestore,
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^第一篇/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开版本历史" }));
+    await screen.findByText("旧标题");
+    fireEvent.click(screen.getByRole("button", { name: "恢复版本 1" }));
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/history-note/revisions/1/restore",
+      method: "POST",
+    })));
+
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: /^第二篇/ }));
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("第二篇");
+
+    await act(async () => {
+      resolveRestore({ note: { ...first, title: "旧标题", content: "旧内容", revision: 3 } });
+      await pendingRestore;
+    });
+
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("第二篇");
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("第二篇正文");
   });
 
   it("switches the selected note between Markdown preview and editing without changing its content", async () => {
@@ -420,6 +482,36 @@ describe("live note workspace flow", () => {
     resolveDaily({ note: { ...serverNoteForFlow(), id: "daily-created", title: `Daily Note ${request.body!.daily_date}`, daily_date: request.body!.daily_date } });
     expect(await findNoteTitle()).toHaveValue(`Daily Note ${request.body!.daily_date}`);
     await waitFor(() => expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveFocus());
+  });
+
+  it("does not let a late Daily response replace a note selected while opening", async () => {
+    const current = { ...serverNoteForFlow(), id: "selected-while-daily-opens", title: "继续阅读", content: "当前阅读内容" };
+    let resolveDaily!: (value: unknown) => void;
+    const dailyBlocked = new Promise<unknown>((resolve) => { resolveDaily = resolve; });
+    const apiClient = createApiClient({
+      listNotes: async () => ({ items: [current], next_cursor: null }),
+      listToday: async () => ({ items: [], next_cursor: null }),
+      openOrCreateDaily: async () => dailyBlocked,
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "今日" }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开今日笔记" }));
+    await waitFor(() => expect(apiClient.request.mock.calls.filter(([request]) => request.path === "/api/v2/notes/daily" && request.method === "POST")).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "全部" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^继续阅读/ }));
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("继续阅读");
+
+    const request = apiClient.request.mock.calls.find(([input]) => input.path === "/api/v2/notes/daily")![0];
+    await act(async () => {
+      resolveDaily({ note: { ...serverNoteForFlow(), id: "late-daily", title: "迟到的今日笔记", daily_date: request.body!.daily_date } });
+      await dailyBlocked;
+    });
+
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("继续阅读");
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("当前阅读内容");
   });
 
   it("keeps the current draft and Today view when opening today's note fails", async () => {
@@ -878,6 +970,54 @@ describe("live note workspace flow", () => {
     expect(screen.queryByRole("button", { name: /Filed during sync/ })).not.toBeInTheDocument();
   });
 
+  it("aborts an in-flight folder creation when the workspace changes", async () => {
+    const folderResponse = deferred<unknown>();
+    const apiClient = createApiClient({ createFolder: async () => folderResponse.promise });
+    renderWorkspaceWithStore(apiClient, createDraftStore());
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    const organization = (await screen.findAllByRole("region", { name: "笔记整理" }))[0]!;
+    fireEvent.change(within(organization).getByRole("textbox", { name: "新建文件夹名称" }), { target: { value: "切换期间创建" } });
+    fireEvent.click(within(organization).getByRole("button", { name: "创建文件夹" }));
+    await waitFor(() => expect(apiClient.getFolderRequest()).not.toBeNull());
+
+    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 Workspace two" }));
+
+    await waitFor(() => expect(apiClient.getFolderRequest()?.policy?.signal?.aborted).toBe(true));
+    folderResponse.resolve({ folder: { id: "folder-1", workspace_id: "ws-1", name: "切换期间创建", position: 0 } });
+  });
+
+  it("does not show an old draft-save failure on a newly created draft", async () => {
+    const firstSave = deferred<void>();
+    const save = vi.spyOn(NoteDraftController.prototype, "save").mockImplementation(() => firstSave.promise);
+    const createBlocked = deferred<unknown>();
+    const other = { ...serverNoteForFlow(), id: "other-note", title: "另一篇笔记", content: "另一篇正文" };
+    const apiClient = createApiClient({ listNotes: async () => ({ items: [other], next_cursor: null }), createNote: async () => createBlocked.promise });
+    renderWorkspaceWithStore(apiClient, createDraftStore());
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    const firstTitle = await findNoteTitle();
+    await waitFor(() => expect(firstTitle).toHaveValue(""));
+    fireEvent.change(firstTitle, { target: { value: "旧草稿" } });
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /另一篇笔记/ }));
+    expect(await findNoteTitle()).toHaveValue("另一篇笔记");
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    expect(await findNoteTitle()).toHaveValue("");
+
+    await act(async () => {
+      firstSave.reject(new Error("old draft save failed"));
+      await firstSave.promise.catch(() => undefined);
+    });
+    expect(screen.queryByText("本地草稿保存失败，当前内容仍保留在编辑器中。请重试。")).not.toBeInTheDocument();
+    save.mockRestore();
+  });
+
   it("does not duplicate the initial empty draft write from an effect", async () => {
     let resolveCreate!: (value: unknown) => void;
     const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });
@@ -978,6 +1118,50 @@ describe("live note workspace flow", () => {
     expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("远程正文");
     expect(updateNote).toHaveBeenCalledTimes(1);
     expect((await localStore.getDraft("ws-1", "local-adopt"))?.pending_patch).toBeUndefined();
+  });
+
+  it("does not let a late conflict resolution overwrite a newly selected note", async () => {
+    const base = { ...serverNoteForFlow(), id: "server-late-conflict", title: "旧服务器标题", content: "旧服务器正文", revision: 1 };
+    const latest = { ...base, title: "远程标题", content: "远程正文", revision: 2, updated_at: "2026-08-24T00:00:02.000Z" };
+    const localDraft: LocalDraft = {
+      workspace_id: "ws-1",
+      entity_id: "local-late-conflict",
+      title: "本地标题",
+      content: "本地正文",
+      updated_at: "2026-08-24T00:00:03.000Z",
+      draft_generation: 1,
+      next_patch_generation: 2,
+      server_note: base,
+      server_note_id: base.id,
+      server_revision: base.revision,
+      server_updated_at: base.updated_at,
+      pending_patch: { key: "local-late-conflict:patch:1", generation: 1, base_revision: 1, title: "本地标题", content: "本地正文", source: "manual" },
+    };
+    const other = { ...serverNoteForFlow(), id: "other-note", title: "另一篇笔记", content: "另一篇正文" };
+    const resolution = deferred<LocalDraft | null>();
+    const resolveConflict = vi.spyOn(NoteDraftController.prototype, "resolveConflict").mockImplementation(() => resolution.promise);
+    const apiClient = createApiClient({
+      listNotes: async () => ({ items: [other], next_cursor: null }),
+      updateNote: async () => {
+        throw new ApiClientError({ code: "NOTE_CONFLICT", message: "conflict", retryable: false, details: { server_note: latest } }, 409);
+      },
+    });
+    renderWorkspaceWithStore(apiClient, createDraftStore([localDraft]));
+
+    expect(await screen.findByRole("region", { name: "笔记冲突恢复" })).toHaveTextContent("远程正文");
+    fireEvent.click(screen.getByRole("button", { name: "采用服务器版本" }));
+    await waitFor(() => expect(resolveConflict).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /另一篇笔记/ }));
+    expect(await findNoteTitle()).toHaveValue("另一篇笔记");
+
+    await act(async () => {
+      resolution.resolve(localDraft);
+      await resolution.promise;
+    });
+
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("另一篇笔记"));
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("另一篇正文");
   });
 
   it("recovers only after note loading settles and never overwrites a selected server note", async () => {

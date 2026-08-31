@@ -86,6 +86,8 @@ describe("v2 knowledge routes", () => {
       listReminderPage: vi.fn(async () => ({ items: [], next_cursor: "cursor-2" })),
       snoozeReminder: vi.fn(async () => ({ id: "reminder-1", revision: 3 })),
       deleteReminder: vi.fn(async () => undefined),
+      listReminderDeliveries: vi.fn(async () => [{ id: "delivery-1", status: "failed" }]),
+      retryReminderDelivery: vi.fn(async () => ({ id: "delivery-1", status: "queued" })),
     };
     const registry = (worker.createRouteRegistry as any)({
       requestId: () => "req-knowledge-actions",
@@ -114,6 +116,8 @@ describe("v2 knowledge routes", () => {
       registry.fetch(request("/api/v2/reminders?status=overdue&query=review&limit=25"), {}),
       registry.fetch(request("/api/v2/reminders/reminder-1/snooze", { method: "POST", body: JSON.stringify({ base_revision: 2, minutes: 60 }) }), {}),
       registry.fetch(request("/api/v2/reminders/reminder-1", { method: "DELETE", body: JSON.stringify({ base_revision: 3 }) }), {}),
+      registry.fetch(request("/api/v2/reminders/reminder-1/deliveries"), {}),
+      registry.fetch(request("/api/v2/reminders/reminder-1/deliveries/delivery-1/retry", { method: "POST" }), {}),
     ]);
 
     expect(responses.every((response: Response) => response.status >= 200 && response.status < 300)).toBe(true);
@@ -129,6 +133,8 @@ describe("v2 knowledge routes", () => {
     expect(service.deleteReminder).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "reminder-1", {
       base_revision: 3,
     });
+    expect(service.listReminderDeliveries).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "reminder-1");
+    expect(service.retryReminderDelivery).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "reminder-1", "delivery-1");
   });
 
   it("registers a workspace calendar feed route with bounded date filters", async () => {
