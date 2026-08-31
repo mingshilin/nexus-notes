@@ -407,6 +407,7 @@ function AuthenticatedWorkspace({
     abort: abortTaskDatabaseCreation,
   } = useTaskDatabaseCreation({
     client: databaseClient,
+    transport: apiClient,
     workspaceId,
     role,
     logoutPending,

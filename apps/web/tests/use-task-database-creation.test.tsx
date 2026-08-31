@@ -35,7 +35,9 @@ function setup(workspaceId: string): TaskDatabaseSetup {
 describe("useTaskDatabaseCreation", () => {
   it("does not publish a late setup from the previous workspace", async () => {
     const pending = deferred<TaskDatabaseSetup>();
-    const createSetup = vi.fn(() => pending.promise);
+    const createSetup = vi.fn()
+      .mockImplementationOnce(() => pending.promise)
+      .mockResolvedValueOnce(setup("ws-1"));
     const setDatabases = vi.fn();
     const setSelectedDatabaseId = vi.fn();
     const setDatabaseBundle = vi.fn();
@@ -108,5 +110,53 @@ describe("useTaskDatabaseCreation", () => {
       message: "任务数据库创建失败，未完成的结构会自动清理；请重试。",
     });
     expect(setDatabaseError).not.toHaveBeenCalled();
+  });
+
+  it("does not start a second setup when an A-B-A scope cycle returns before setup settles", async () => {
+    const pending = deferred<TaskDatabaseSetup>();
+    const createSetup = vi.fn(() => pending.promise);
+    const transport = {};
+    const oldClient = {} as DatabaseClient;
+    const newClient = {} as DatabaseClient;
+    const shared = {
+      role: "owner" as const,
+      logoutPending: false,
+      createSetup,
+      setDatabases: vi.fn(),
+      setSelectedDatabaseId: vi.fn(),
+      setDatabaseBundle: vi.fn(),
+      setDatabaseRecords: vi.fn(),
+      setDatabaseRecordsNextCursor: vi.fn(),
+      setDatabaseError: vi.fn(),
+      setDatabaseRefreshVersion: vi.fn(),
+      setActivePane: vi.fn(),
+      transitionToDomain: vi.fn(),
+    };
+    const first = renderHook(
+      () => useTaskDatabaseCreation({ ...shared, client: oldClient, workspaceId: "ws-1", transport }),
+    );
+    let firstCreation!: Promise<unknown>;
+    act(() => { firstCreation = first.result.current.create(); });
+    first.unmount();
+
+    const second = renderHook(
+      () => useTaskDatabaseCreation({ ...shared, client: newClient, workspaceId: "ws-2", transport }),
+    );
+    second.unmount();
+    const third = renderHook(
+      () => useTaskDatabaseCreation({ ...shared, client: oldClient, workspaceId: "ws-1", transport }),
+    );
+    let secondCreation!: Promise<unknown>;
+    act(() => { secondCreation = third.result.current.create(); });
+
+    await expect(secondCreation).resolves.toMatchObject({ status: "rejected" });
+    expect(createSetup).toHaveBeenCalledOnce();
+    pending.resolve(setup("ws-1"));
+    await expect(firstCreation).resolves.toMatchObject({ status: "rejected" });
+    let afterSettledCreation!: Promise<unknown>;
+    act(() => { afterSettledCreation = third.result.current.create(); });
+    await expect(afterSettledCreation).resolves.toEqual({ status: "completed" });
+    expect(createSetup).toHaveBeenCalledTimes(2);
+    third.unmount();
   });
 });

@@ -24,19 +24,22 @@ untouched.
 - Setup failures retain the existing Create Center rejection message and do not
   leave a stale database-page error behind.
 - StrictMode effect replay restores the mounted lifecycle correctly.
+- A stable `ApiClient` transport/workspace lease remains registered until the
+  multi-step setup settles, so an A-B-A remount cannot start a duplicate backend
+  setup; the lease is released after settlement for a later legitimate create.
 
 ## Verification Evidence
 
 | Check | Result |
 | --- | --- |
-| Focused task-database, Create Center, database-controller regression | `3 files / 20 tests` passed |
+| Focused task-database, Create Center, database-controller regression | `3 files / 21 tests` passed |
 | Full Beta Web | `99 files / 745 tests` passed |
 | Full Beta Worker | `97 files / 615 tests` passed |
 | Contracts / Domain / UI | `62 + 31 + 2 tests` passed |
 | Legacy frontend / Worker | `161 + 63 tests` passed |
 | Lint / build / production audit | passed; `0 vulnerabilities` |
 | Deploy readiness / forbidden preload | passed; no `markdown-vendor`, `ocr-vendor`, or `ai-vendor` initial preload |
-| Independent task review | PASS; no Critical, Important, or Minor findings |
+| Independent task review | PASS after A-B-A lease hardening; no Critical or Important findings |
 
 The final web entry chunk is `378.93 kB`; the build emitted no Vite `>500 kB`
 warning.

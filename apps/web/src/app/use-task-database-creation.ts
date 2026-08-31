@@ -9,6 +9,7 @@ type CreateTaskDatabaseResult =
 
 interface UseTaskDatabaseCreationParams {
   client: DatabaseClient;
+  transport?: object;
   workspaceId?: string;
   role: WorkspaceRoleContract;
   logoutPending: boolean;
@@ -36,8 +37,36 @@ interface TaskDatabaseRequest {
   scopeToken: object;
 }
 
+const setupLeases = new WeakMap<object, Map<string, Promise<TaskDatabaseSetup>>>();
+
+function setupLeaseFor(transport: object, workspaceId: string) {
+  let leases = setupLeases.get(transport);
+  if (!leases) {
+    leases = new Map();
+    setupLeases.set(transport, leases);
+  }
+  return leases.get(workspaceId);
+}
+
+function setSetupLease(transport: object, workspaceId: string, setup: Promise<TaskDatabaseSetup>) {
+  let leases = setupLeases.get(transport);
+  if (!leases) {
+    leases = new Map();
+    setupLeases.set(transport, leases);
+  }
+  leases.set(workspaceId, setup);
+}
+
+function clearSetupLease(transport: object, workspaceId: string, setup: Promise<TaskDatabaseSetup>) {
+  const leases = setupLeases.get(transport);
+  if (leases?.get(workspaceId) !== setup) return;
+  leases.delete(workspaceId);
+  if (leases.size === 0) setupLeases.delete(transport);
+}
+
 export function useTaskDatabaseCreation({
   client,
+  transport,
   workspaceId,
   role,
   logoutPending,
@@ -54,6 +83,7 @@ export function useTaskDatabaseCreation({
 }: UseTaskDatabaseCreationParams) {
   const mountedRef = useRef(true);
   const requestRef = useRef<TaskDatabaseRequest | null>(null);
+  const leaseTransport = transport ?? client;
   const scopeToken = useMemo(() => ({}), [client, logoutPending, role, workspaceId]);
   const scopeRef = useRef<TaskDatabaseScope>({ client, workspaceId, role, logoutPending, token: scopeToken });
   scopeRef.current = { client, workspaceId, role, logoutPending, token: scopeToken };
@@ -98,11 +128,14 @@ export function useTaskDatabaseCreation({
       || current.logoutPending
     ) return { status: "rejected", message: "当前工作区已切换或没有创建任务数据库的权限。" };
     if (!workspaceId) return { status: "rejected", message: "当前没有可用工作区，暂时无法创建任务数据库。" };
+    if (setupLeaseFor(leaseTransport, workspaceId)) return { status: "rejected", message: "当前工作区已有任务数据库正在创建，请稍候。" };
 
     const request = { scopeToken };
     requestRef.current = request;
+    const setupPromise = Promise.resolve().then(() => createSetup(client));
+    setSetupLease(leaseTransport, workspaceId, setupPromise);
     try {
-      const setup = await createSetup(client);
+      const setup = await setupPromise;
       if (!isCurrent(request)) return { status: "rejected", message: "工作区已切换，任务数据库仍在原工作区处理中。" };
       if (setup.database.workspace_id !== workspaceId) throw new Error("Task database response scope mismatch");
       setDatabases((databases) => [...databases.filter((database) => database.id !== setup.database.id), setup.database]);
@@ -120,11 +153,13 @@ export function useTaskDatabaseCreation({
       return { status: "rejected", message: "任务数据库创建失败，未完成的结构会自动清理；请重试。" };
     } finally {
       if (requestRef.current === request) requestRef.current = null;
+      clearSetupLease(leaseTransport, workspaceId, setupPromise);
     }
   }, [
     client,
     createSetup,
     isCurrent,
+    leaseTransport,
     role,
     scopeToken,
     setActivePane,
