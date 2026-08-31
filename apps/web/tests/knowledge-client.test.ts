@@ -114,6 +114,25 @@ describe("KnowledgeClient", () => {
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
   });
 
+  it("passes an optional abort signal through folder creation", async () => {
+    const data = await loadData();
+    const controller = new AbortController();
+    const api = {
+      request: vi.fn(async () => ({
+        folder: { id: "folder-1", workspace_id: "ws-1", name: "Projects", position: 0 },
+      })),
+    };
+    const client = new data.KnowledgeClient(api, "ws-1");
+
+    await client.createFolder({ name: "Projects" }, controller.signal);
+
+    expect(api.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/folders",
+      method: "POST",
+      policy: expect.objectContaining({ signal: controller.signal, retry: 0 }),
+    }));
+  });
+
   it("caches reminder pages for one minute and invalidates them after snooze or delete", async () => {
     const data = await loadData();
     let now = 1_000;

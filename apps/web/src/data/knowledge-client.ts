@@ -108,8 +108,8 @@ export class KnowledgeClient {
     return this.listQuery<Folder>("/api/v2/folders", "folders", signal);
   }
 
-  createFolder(input: CreateFolderInput) {
-    return this.command<{ folder: Folder }>("/api/v2/folders", "POST", input).then(({ folder }) => folder);
+  createFolder(input: CreateFolderInput, signal?: AbortSignal) {
+    return this.command<{ folder: Folder }>("/api/v2/folders", "POST", input, signal).then(({ folder }) => folder);
   }
 
   listTags(signal?: AbortSignal) {

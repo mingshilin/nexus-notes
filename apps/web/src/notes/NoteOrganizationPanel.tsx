@@ -2,6 +2,10 @@ import { FolderPlus, Folder as FolderIcon } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import type { Folder } from "@nexus/contracts";
 
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 export interface NoteOrganizationPanelProps {
   folders: Folder[];
   selectedFolderId: string | null;
@@ -30,7 +34,8 @@ export function NoteOrganizationPanel({
     if (!nextName || pending || disabled) return;
     setPending(true);
     setError(null);
-    void onCreateFolder(nextName).then(() => setName("")).catch(() => {
+    void onCreateFolder(nextName).then(() => setName("")).catch((error: unknown) => {
+      if (isAbortError(error)) return;
       setError("文件夹创建失败，请重试。当前输入仍保留。");
     }).finally(() => setPending(false));
   };

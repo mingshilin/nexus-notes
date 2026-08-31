@@ -541,6 +541,20 @@ describe("App product navigation", () => {
     expect(within(organization).getByRole("textbox", { name: "新建文件夹名称" })).toHaveValue("");
   });
 
+  it("keeps folder input intact when creation is aborted by a scope change", async () => {
+    const onCreateFolder = vi.fn(async () => { throw new DOMException("scope changed", "AbortError"); });
+    render(<NoteOrganizationPanel folders={[]} selectedFolderId={null} onSelectFolder={vi.fn()} onCreateFolder={onCreateFolder} />);
+
+    const organization = screen.getByRole("region", { name: "笔记整理" });
+    const folderName = within(organization).getByRole("textbox", { name: "新建文件夹名称" });
+    fireEvent.change(folderName, { target: { value: "保留输入" } });
+    fireEvent.click(within(organization).getByRole("button", { name: "创建文件夹" }));
+
+    await waitFor(() => expect(onCreateFolder).toHaveBeenCalledWith("保留输入"));
+    expect(folderName).toHaveValue("保留输入");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("renders truthful knowledge, AI, and account destinations", async () => {
     render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} turnstileSiteKey="test" />);
 

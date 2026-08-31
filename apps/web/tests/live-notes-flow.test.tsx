@@ -26,6 +26,7 @@ function deferred<T>() {
 
 type NoteApiOptions = {
   createNote?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
+  createFolder?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
   listDatabases?: () => Promise<unknown>;
   openOrCreateDaily?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
   listNotes?: (workspaceId: string) => Promise<unknown>;
@@ -80,13 +81,18 @@ function serverNoteForFlow() {
 
 function createApiClient(options: NoteApiOptions = {}) {
   let nextNoteId = 1;
-  const request = vi.fn(async (input: { path: string; method?: string; body?: Record<string, unknown>; headers?: Record<string, string> }) => {
+  let folderRequest: { path: string; method?: string; body?: Record<string, unknown>; policy?: { signal?: AbortSignal } } | null = null;
+  const request = vi.fn(async (input: { path: string; method?: string; body?: Record<string, unknown>; headers?: Record<string, string>; policy?: { signal?: AbortSignal } }) => {
     if (input.path === "/api/v2/databases" && input.method !== "POST") return options.listDatabases?.() ?? { items: [] };
     if (input.path === "/api/v2/attachments/uploads" && input.method === "POST") return { attachment: { id: "attachment-editor-1", workspace_id: "ws-1", filename: input.body?.filename ?? "diagram.png", note_id: input.body?.note_id ?? null } };
     if (input.path === "/api/v2/attachments/attachment-editor-1/content" && input.method === "PUT") return { attachment: { id: "attachment-editor-1", workspace_id: "ws-1", filename: "diagram.png", note_id: "attachment-note" } };
     if (input.path === "/api/v2/attachments/attachment-editor-1/complete" && input.method === "POST") return { attachment: { id: "attachment-editor-1", workspace_id: "ws-1", filename: "diagram.png", note_id: "attachment-note" } };
     if (input.path.startsWith("/api/v2/attachments")) return { items: [], next_cursor: null };
     if (input.path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
+    if (input.path === "/api/v2/folders" && input.method === "POST") {
+      folderRequest = input;
+      return options.createFolder?.(input) ?? { folder: { id: "folder-1", workspace_id: "ws-1", name: String(input.body?.name ?? ""), position: 0 } };
+    }
     if (input.path.startsWith("/api/v2/notifications/unread")) return { unread_count: 0 };
     if (input.path === "/api/v2/ai/chat" && input.method === "POST") return options.aiChat?.(input) ?? { message: "AI 摘要", model: "beta-model" };
     if (input.path === "/api/v2/notes?status=active&limit=50") return options.listNotes?.(input.headers?.["x-workspace-id"] ?? "ws-1") ?? { items: [], next_cursor: null };
@@ -140,7 +146,7 @@ function createApiClient(options: NoteApiOptions = {}) {
     }
     return { items: [], next_cursor: null };
   });
-  return { request };
+  return { request, getFolderRequest: () => folderRequest };
 }
 
 function renderWorkspace(apiClient: ReturnType<typeof createApiClient>, width = 929) {
@@ -962,6 +968,25 @@ describe("live note workspace flow", () => {
 
     await waitFor(() => expect(localStore.removeDraft).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: /Filed during sync/ })).not.toBeInTheDocument();
+  });
+
+  it("aborts an in-flight folder creation when the workspace changes", async () => {
+    const folderResponse = deferred<unknown>();
+    const apiClient = createApiClient({ createFolder: async () => folderResponse.promise });
+    renderWorkspaceWithStore(apiClient, createDraftStore());
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    const organization = (await screen.findAllByRole("region", { name: "笔记整理" }))[0]!;
+    fireEvent.change(within(organization).getByRole("textbox", { name: "新建文件夹名称" }), { target: { value: "切换期间创建" } });
+    fireEvent.click(within(organization).getByRole("button", { name: "创建文件夹" }));
+    await waitFor(() => expect(apiClient.getFolderRequest()).not.toBeNull());
+
+    fireEvent.click(screen.getByRole("button", { name: "账户" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "工作区" }));
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 Workspace two" }));
+
+    await waitFor(() => expect(apiClient.getFolderRequest()?.policy?.signal?.aborted).toBe(true));
+    folderResponse.resolve({ folder: { id: "folder-1", workspace_id: "ws-1", name: "切换期间创建", position: 0 } });
   });
 
   it("does not duplicate the initial empty draft write from an effect", async () => {

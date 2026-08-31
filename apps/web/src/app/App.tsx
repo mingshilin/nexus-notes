@@ -41,6 +41,7 @@ import { useNoteRevisionRestore } from "./use-note-revision-restore";
 import { useDailyNoteOpen } from "./use-daily-note-open";
 import { useNoteMutations } from "./use-note-mutations";
 import { useNoteConflictResolution } from "./use-note-conflict-resolution";
+import { useNoteFolderCreation } from "./use-note-folder-creation";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
 import { NotesContextPanel } from "./NotesContextPanel";
 import { DatabaseContextPanel } from "./DatabaseContextPanel";
@@ -815,12 +816,17 @@ function AuthenticatedWorkspace({
     }
   };
 
-  const createFolder = async (name: string) => {
-    if (!workspaceId) throw new Error("Workspace is required");
-    const folder = await knowledgeClient.createFolder({ name });
-    setFolders((current) => [...current, folder].sort((left, right) => left.position - right.position || left.name.localeCompare(right.name)));
-    selectFolderFilter(folder.id);
-  };
+  const {
+    createFolder,
+    abort: abortFolderCreation,
+  } = useNoteFolderCreation({
+    knowledgeClient,
+    workspaceId,
+    role,
+    logoutPending,
+    setFolders,
+    selectFolderFilter,
+  });
 
   const handleQuickCapture = (note: Note) => {
     setNotes((current) => [note, ...current.filter((item) => item.id !== note.id)]);
@@ -1220,6 +1226,7 @@ function AuthenticatedWorkspace({
       await onWorkspaceChange(nextWorkspaceId);
       abortRecoveryRequests();
       abortKnowledgeRecoveryActions();
+      abortFolderCreation();
       abortUpload();
       abortTodayNoteOpen();
       abortDatabaseRequests();
