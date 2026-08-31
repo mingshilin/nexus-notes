@@ -23,7 +23,6 @@ import { NoteTagPanel } from "../notes/NoteTagPanel";
 import { NoteAiActions } from "../ai/NoteAiActions";
 import { CommandPalette, type CommandAction } from "../commands/CommandPalette";
 import { CreateCenter, ImportExportCenter, type CreateActionResult } from "../create";
-import { createTaskDatabase } from "../databases/task-database";
 import { InviteRedemptionPage } from "../collaboration/InviteRedemptionPage";
 import { PublicSharePage } from "../collaboration/PublicSharePage";
 import type { CollaborationCommentTarget, CollaborationShareTarget } from "../collaboration/collaboration-types";
@@ -42,6 +41,7 @@ import { useDailyNoteOpen } from "./use-daily-note-open";
 import { useNoteMutations } from "./use-note-mutations";
 import { useNoteConflictResolution } from "./use-note-conflict-resolution";
 import { useNoteFolderCreation } from "./use-note-folder-creation";
+import { useTaskDatabaseCreation } from "./use-task-database-creation";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
 import { NotesContextPanel } from "./NotesContextPanel";
 import { DatabaseContextPanel } from "./DatabaseContextPanel";
@@ -402,6 +402,24 @@ function AuthenticatedWorkspace({
     creatingFirstDatabase,
     createDatabaseFromName,
   } = databaseController;
+  const {
+    create: createTaskDatabaseFromCenter,
+    abort: abortTaskDatabaseCreation,
+  } = useTaskDatabaseCreation({
+    client: databaseClient,
+    workspaceId,
+    role,
+    logoutPending,
+    setDatabases,
+    setSelectedDatabaseId,
+    setDatabaseBundle,
+    setDatabaseRecords,
+    setDatabaseRecordsNextCursor,
+    setDatabaseError,
+    setDatabaseRefreshVersion,
+    setActivePane,
+    transitionToDomain,
+  });
   const scopedDatabases = filterWorkspaceDatabases(databases, workspaceId);
   const scopedDatabaseBundle = scopeDatabaseBundle(databaseBundle, workspaceId);
   const activeDatabaseId = getActiveDatabaseId(selectedDatabaseId, scopedDatabaseBundle, workspaceId);
@@ -1115,25 +1133,6 @@ function AuthenticatedWorkspace({
     });
   };
 
-  const createTaskDatabaseFromCenter = async (): Promise<CreateActionResult> => {
-    if (!workspaceId || role === "viewer") return { status: "rejected", message: "当前工作区没有创建任务数据库的权限。" };
-    try {
-      const setup = await createTaskDatabase(databaseClient);
-      setDatabases((current) => [...current.filter((database) => database.id !== setup.database.id), setup.database]);
-      setSelectedDatabaseId(setup.database.id);
-      setDatabaseBundle(null);
-      setDatabaseRecords([]);
-      setDatabaseRecordsNextCursor(null);
-      setDatabaseError(null);
-      setDatabaseRefreshVersion((version) => version + 1);
-      setActivePane("canvas");
-      transitionToDomain("databases");
-      return { status: "completed" };
-    } catch {
-      return { status: "rejected", message: "任务数据库创建失败，未完成的结构会自动清理；请重试。" };
-    }
-  };
-
   const openDatabaseCreation = () => {
     setFeatureMapOpen(false);
     setFirstDatabaseName("");
@@ -1227,6 +1226,7 @@ function AuthenticatedWorkspace({
       abortRecoveryRequests();
       abortKnowledgeRecoveryActions();
       abortFolderCreation();
+      abortTaskDatabaseCreation();
       abortUpload();
       abortTodayNoteOpen();
       abortDatabaseRequests();
