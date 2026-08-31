@@ -989,6 +989,35 @@ describe("live note workspace flow", () => {
     folderResponse.resolve({ folder: { id: "folder-1", workspace_id: "ws-1", name: "切换期间创建", position: 0 } });
   });
 
+  it("does not show an old draft-save failure on a newly created draft", async () => {
+    const firstSave = deferred<void>();
+    const save = vi.spyOn(NoteDraftController.prototype, "save").mockImplementation(() => firstSave.promise);
+    const createBlocked = deferred<unknown>();
+    const other = { ...serverNoteForFlow(), id: "other-note", title: "另一篇笔记", content: "另一篇正文" };
+    const apiClient = createApiClient({ listNotes: async () => ({ items: [other], next_cursor: null }), createNote: async () => createBlocked.promise });
+    renderWorkspaceWithStore(apiClient, createDraftStore());
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    const firstTitle = await findNoteTitle();
+    await waitFor(() => expect(firstTitle).toHaveValue(""));
+    fireEvent.change(firstTitle, { target: { value: "旧草稿" } });
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /另一篇笔记/ }));
+    expect(await findNoteTitle()).toHaveValue("另一篇笔记");
+    fireEvent.click(screen.getAllByRole("button", { name: "新建笔记" })[0]!);
+    expect(await findNoteTitle()).toHaveValue("");
+
+    await act(async () => {
+      firstSave.reject(new Error("old draft save failed"));
+      await firstSave.promise.catch(() => undefined);
+    });
+    expect(screen.queryByText("本地草稿保存失败，当前内容仍保留在编辑器中。请重试。")).not.toBeInTheDocument();
+    save.mockRestore();
+  });
+
   it("does not duplicate the initial empty draft write from an effect", async () => {
     let resolveCreate!: (value: unknown) => void;
     const createBlocked = new Promise((resolve) => { resolveCreate = resolve; });

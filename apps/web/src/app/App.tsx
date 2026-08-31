@@ -42,6 +42,7 @@ import { useNoteMutations } from "./use-note-mutations";
 import { useNoteConflictResolution } from "./use-note-conflict-resolution";
 import { useNoteFolderCreation } from "./use-note-folder-creation";
 import { useTaskDatabaseCreation } from "./use-task-database-creation";
+import { useNoteDraftInput } from "./use-note-draft-input";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
 import { NotesContextPanel } from "./NotesContextPanel";
 import { DatabaseContextPanel } from "./DatabaseContextPanel";
@@ -520,6 +521,25 @@ function AuthenticatedWorkspace({
     completePermanentDelete,
   });
   const {
+    updateActiveDraftInput,
+  } = useNoteDraftInput({
+    draftController,
+    workspaceId,
+    role,
+    logoutPending,
+    selectedNoteId,
+    creatingNote,
+    activeDraftId,
+    activeDraftIdRef,
+    draftTitleRef,
+    draftContentRef,
+    mountedRef,
+    setDraftTitle,
+    setDraftContent,
+    setNoteMessage,
+    setNoteError,
+  });
+  const {
     resolve: resolveNoteConflict,
   } = useNoteConflictResolution({
     draftController,
@@ -950,22 +970,6 @@ function AuthenticatedWorkspace({
     permanentDeleteFocusTargetRef.current = "origin";
     setPermanentDeleteError(null);
     setPermanentDeleteOpen(true);
-  };
-
-  const updateActiveDraftInput = (title: string, content: string) => {
-    if (logoutPending) return;
-    draftTitleRef.current = title;
-    draftContentRef.current = content;
-    setDraftTitle(title);
-    setDraftContent(content);
-    setNoteMessage(null);
-    if (workspaceId && activeDraftIdRef.current) {
-      void draftController.save(workspaceId, activeDraftIdRef.current, title, content).catch(() => {
-        if (mountedRef.current && activeDraftIdRef.current) {
-          setNoteError("本地草稿保存失败，当前内容仍保留在编辑器中。请重试。");
-        }
-      });
-    }
   };
 
   const {
