@@ -38,6 +38,7 @@ import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
 import { useNoteMutations } from "./use-note-mutations";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
 import { NotesContextPanel } from "./NotesContextPanel";
+import { DatabaseContextPanel } from "./DatabaseContextPanel";
 import { NotesDomain, type NotesDomainCallbacks, type NotesEditorState, type NotesOverviewState } from "./domains/NotesDomain";
 import { DatabaseDomain, type DatabaseDomainCallbacks, type DatabaseDomainSelection } from "./domains/DatabaseDomain";
 import { KnowledgeDomain } from "./domains/KnowledgeDomain";
@@ -1501,62 +1502,33 @@ function AuthenticatedWorkspace({
   );
 
   const databaseContextualList = (
-    <div className="context-content">
-      <div className="context-heading">
-        <div><small>STRUCTURE</small><h2>数据库</h2></div>
-        <button
-          className="primary-create-note"
-          type="button"
-          aria-label="新建数据库"
-          onClick={() => {
-            if (scopedDatabases.length === 0) {
-              setActivePane("canvas");
-              return;
-            }
-            setFirstDatabaseName("");
-            setDatabaseCreateOpen(true);
-          }}
-        >
-          <Plus aria-hidden="true" size={17} />
-          <span>新建数据库</span>
-        </button>
-      </div>
-      {databaseCreateOpen && scopedDatabases.length > 0 ? (
-        <form
-          className="database-create-inline"
-          aria-label="新建数据库表单"
-          onSubmit={(event) => {
-            event.preventDefault();
-            createFirstDatabase();
-          }}
-        >
-          <label>数据库名称<input aria-label="新建数据库名称" value={firstDatabaseName} onChange={(event) => setFirstDatabaseName(event.target.value)} autoFocus /></label>
-          <div className="database-create-inline-actions">
-            <button type="button" onClick={() => setDatabaseCreateOpen(false)}>取消</button>
-            <button type="submit" disabled={!firstDatabaseName.trim() || creatingFirstDatabase}>{creatingFirstDatabase ? "创建中…" : "创建数据库"}</button>
-          </div>
-        </form>
-      ) : null}
-      {databaseLoading && scopedDatabases.length === 0 ? <p className="database-empty" role="status">正在加载数据库…</p> : null}
-      {databaseError ? <p className="database-operation-error" role="alert">{databaseError}</p> : null}
-      {scopedDatabases.map((database) => (
-        <button
-          key={database.id}
-          className={database.id === selectedDatabaseId ? "note-row selected" : "note-row"}
-          type="button"
-          onClick={() => {
-            setSelectedDatabaseId(database.id);
-            setSelectedDatabaseRecordId(null);
-            setSelectedCommentId(null);
-            setResolvedNotificationRecord(null);
-            setActivePane("canvas");
-          }}
-        >
-          <strong>{database.name}</strong><p>{database.description || "Structured database"}</p>
-        </button>
-      ))}
-      {!databaseLoading && !databaseError && scopedDatabases.length === 0 ? <p className="database-empty">尚未创建数据库。</p> : null}
-    </div>
+    <DatabaseContextPanel
+      databases={scopedDatabases}
+      selectedDatabaseId={selectedDatabaseId}
+      loading={databaseLoading}
+      error={databaseError}
+      createOpen={databaseCreateOpen}
+      name={firstDatabaseName}
+      creating={creatingFirstDatabase}
+      onCreateRequest={() => {
+        if (scopedDatabases.length === 0) {
+          setActivePane("canvas");
+          return;
+        }
+        setFirstDatabaseName("");
+        setDatabaseCreateOpen(true);
+      }}
+      onCreateOpenChange={setDatabaseCreateOpen}
+      onNameChange={setFirstDatabaseName}
+      onCreate={createFirstDatabase}
+      onSelect={(database) => {
+        setSelectedDatabaseId(database.id);
+        setSelectedDatabaseRecordId(null);
+        setSelectedCommentId(null);
+        setResolvedNotificationRecord(null);
+        setActivePane("canvas");
+      }}
+    />
   );
 
   const recoveryPanel = (
