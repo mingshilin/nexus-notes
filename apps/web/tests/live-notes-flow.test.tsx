@@ -72,9 +72,9 @@ function createApiClient(options: NoteApiOptions = {}) {
   let nextNoteId = 1;
   const request = vi.fn(async (input: { path: string; method?: string; body?: Record<string, unknown>; headers?: Record<string, string> }) => {
     if (input.path === "/api/v2/databases" && input.method !== "POST") return options.listDatabases?.() ?? { items: [] };
-    if (input.path === "/api/v2/attachments/uploads" && input.method === "POST") return { attachment: { id: "attachment-editor-1", filename: input.body?.filename ?? "diagram.png", note_id: input.body?.note_id ?? null } };
-    if (input.path === "/api/v2/attachments/attachment-editor-1/content" && input.method === "PUT") return { attachment: { id: "attachment-editor-1", filename: "diagram.png", note_id: "attachment-note" } };
-    if (input.path === "/api/v2/attachments/attachment-editor-1/complete" && input.method === "POST") return { attachment: { id: "attachment-editor-1", filename: "diagram.png", note_id: "attachment-note" } };
+    if (input.path === "/api/v2/attachments/uploads" && input.method === "POST") return { attachment: { id: "attachment-editor-1", workspace_id: "ws-1", filename: input.body?.filename ?? "diagram.png", note_id: input.body?.note_id ?? null } };
+    if (input.path === "/api/v2/attachments/attachment-editor-1/content" && input.method === "PUT") return { attachment: { id: "attachment-editor-1", workspace_id: "ws-1", filename: "diagram.png", note_id: "attachment-note" } };
+    if (input.path === "/api/v2/attachments/attachment-editor-1/complete" && input.method === "POST") return { attachment: { id: "attachment-editor-1", workspace_id: "ws-1", filename: "diagram.png", note_id: "attachment-note" } };
     if (input.path.startsWith("/api/v2/attachments")) return { items: [], next_cursor: null };
     if (input.path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
     if (input.path.startsWith("/api/v2/notifications/unread")) return { unread_count: 0 };

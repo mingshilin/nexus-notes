@@ -215,4 +215,17 @@ describe("KnowledgeClient", () => {
     expect(api.request.mock.calls[4]?.[0].body).toEqual({ attachment_ids: ["attachment-1"] });
     expect(api.request.mock.calls[5]?.[0].body).toEqual({ attachment_ids: ["attachment-1", "attachment-2"] });
   });
+
+  it("forwards optional abort signals for attachment completion and cleanup", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ attachment: { id: "attachment-1" }, deleted: true })) };
+    const client = new data.KnowledgeClient(api, "ws-1");
+    const controller = new AbortController();
+
+    await Reflect.apply(client.completeAttachmentUpload, client, ["attachment-1", controller.signal]);
+    await Reflect.apply(client.deleteAttachment, client, ["attachment-1", controller.signal]);
+
+    expect(api.request.mock.calls[0]?.[0].policy.signal).toBe(controller.signal);
+    expect(api.request.mock.calls[1]?.[0].policy.signal).toBe(controller.signal);
+  });
 });

@@ -4,7 +4,7 @@ import {
   UserRound,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { MAX_UPLOAD_BYTES, NoteSchema, SUPPORTED_ATTACHMENT_MIME_TYPES } from "@nexus/contracts";
+import { NoteSchema } from "@nexus/contracts";
 import type { AuthSession, AuthUserSummary, DatabaseRecord, KnowledgeDiagnostic, Note, NoteRevision, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient, ApiClientError } from "../data/api-client";
@@ -36,6 +36,7 @@ import { useDatabaseWorkspaceController } from "./use-database-workspace-control
 import { runVerifiedDatabaseMutation } from "./use-database-workspace-data";
 import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
 import { useKnowledgeRecoveryActions } from "./use-knowledge-recovery-actions";
+import { useAttachmentUpload } from "./use-attachment-upload";
 import { useNoteMutations } from "./use-note-mutations";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
 import { NotesContextPanel } from "./NotesContextPanel";
@@ -106,10 +107,6 @@ function LogoutCleanupRecovery({ failed, deleted, onRetry }: { failed: boolean; 
 function resetTokenFromLocation() {
   if (typeof window === "undefined") return undefined;
   return new URLSearchParams(window.location.search).get("reset_token") ?? undefined;
-}
-
-function isSupportedAttachmentMime(value: string): value is typeof SUPPORTED_ATTACHMENT_MIME_TYPES[number] {
-  return (SUPPORTED_ATTACHMENT_MIME_TYPES as readonly string[]).includes(value);
 }
 
 function isEditableTarget(target: EventTarget | null) {
@@ -256,7 +253,6 @@ function AuthenticatedWorkspace({
   const [resolvedNotificationRecord, setResolvedNotificationRecord] = useState<DatabaseRecord | null>(null);
   const [databaseRefreshVersion, setDatabaseRefreshVersion] = useState(0);
   const [serviceWorkerUpdate, setServiceWorkerUpdate] = useState<ServiceWorkerUpdate | null>(null);
-  const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
   const createCenterFocusTargetRef = useRef<HTMLButtonElement | null>(null);
@@ -944,6 +940,28 @@ function AuthenticatedWorkspace({
     }
   };
 
+  const {
+    upload: uploadAttachment,
+    abortUpload,
+    isUploading: uploadingAttachment,
+  } = useAttachmentUpload({
+    knowledgeClient,
+    workspaceId,
+    role,
+    logoutPending,
+    selectedNoteId,
+    creatingNote,
+    draftTitleRef,
+    draftContentRef,
+    setAttachments,
+    setRetryFeedback,
+    setUploadError,
+    setNoteError,
+    setNoteMessage,
+    updateActiveDraftInput,
+    refreshRecovery,
+  });
+
   const installSyncedDraft = (syncedWorkspaceId: string, draftId: string, result: DraftSyncResult) => {
     if (!mountedRef.current) return;
     const wasActiveDraft = activeDraftIdRef.current === draftId;
@@ -1119,7 +1137,8 @@ function AuthenticatedWorkspace({
   useEffect(() => () => {
     abortInspectorRequests();
     abortKnowledgeRecoveryActions();
-  }, [abortInspectorRequests, abortKnowledgeRecoveryActions]);
+    abortUpload();
+  }, [abortInspectorRequests, abortKnowledgeRecoveryActions, abortUpload]);
 
   const createFirstDatabase = () => {
     void createDatabaseFromName(firstDatabaseName).then((created) => {
@@ -1152,56 +1171,6 @@ function AuthenticatedWorkspace({
     transitionToDomain("databases");
     setActivePane(scopedDatabases.length > 0 ? "context" : "canvas");
     setDatabaseCreateOpen(scopedDatabases.length > 0);
-  };
-
-  const uploadAttachment = (file: File, insertIntoEditor = false) => {
-    const targetNoteId = selectedNoteId;
-    if (!workspaceId || role === "viewer" || uploadingAttachment) return Promise.resolve();
-    const mimeType = file.type;
-    if (!isSupportedAttachmentMime(mimeType)) {
-      setUploadError("不支持这个附件类型。请上传 PDF、JPG、PNG、WEBP 或纯文本文件。");
-      if (insertIntoEditor) setNoteError("附件类型不受支持，正文内容未改变。");
-      return Promise.resolve();
-    }
-    if (file.size <= 0 || file.size > MAX_UPLOAD_BYTES) {
-      setUploadError("附件必须大于 0 且不超过 25 MB。");
-      if (insertIntoEditor) setNoteError("附件大小不符合要求，正文内容未改变。");
-      return Promise.resolve();
-    }
-
-    setUploadingAttachment(true);
-    setUploadError(null);
-    let reservedId: string | null = null;
-    return (async () => {
-      try {
-        const reserved = await knowledgeClient.createAttachmentUpload({
-          filename: file.name,
-          mime_type: mimeType,
-          size_bytes: file.size,
-          note_id: selectedNoteId,
-        });
-        reservedId = reserved.id;
-        const uploaded = await knowledgeClient.uploadAttachmentContent(reserved.id, await file.arrayBuffer());
-        const completed = await knowledgeClient.completeAttachmentUpload(uploaded.id);
-        setAttachments((current) => [completed, ...current.filter((attachment) => attachment.id !== completed.id)]);
-        setRetryFeedback(`已上传 ${file.name}，OCR 已加入队列。`);
-        if (insertIntoEditor && targetNoteId && targetNoteId === selectedNoteId && !creatingNote) {
-          const safeLabel = file.name.replace(/[\[\]\r\n]/gu, "_");
-          const link = `[${safeLabel}](/api/v2/attachments/${encodeURIComponent(completed.id)}/file)`;
-          const separator = draftContentRef.current.trim() ? "\n\n" : "";
-          updateActiveDraftInput(draftTitleRef.current, `${draftContentRef.current}${separator}${link}`);
-          setNoteError(null);
-          setNoteMessage("附件已插入正文，保存笔记后生效。");
-        }
-        refreshRecovery();
-      } catch {
-        if (reservedId) await knowledgeClient.deleteAttachment(reservedId).catch(() => undefined);
-        setUploadError("附件上传失败，请重新选择文件。未完成的上传会自动清理。");
-        if (insertIntoEditor) setNoteError("附件上传失败，正文内容仍保留。请重试。");
-      } finally {
-        if (mountedRef.current) setUploadingAttachment(false);
-      }
-    })();
   };
 
   const changeDomain = (domain: ProductDomain, options?: { collaborationSection?: "people" | "comments" | "shares" }) => {
@@ -1288,6 +1257,7 @@ function AuthenticatedWorkspace({
       await onWorkspaceChange(nextWorkspaceId);
       abortRecoveryRequests();
       abortKnowledgeRecoveryActions();
+      abortUpload();
       abortDatabaseRequests();
       abortInspectorRequests();
     } catch (error) {

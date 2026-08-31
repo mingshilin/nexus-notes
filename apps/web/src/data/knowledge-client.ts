@@ -323,11 +323,12 @@ export class KnowledgeClient {
     }).then(({ attachment }) => attachment);
   }
 
-  completeAttachmentUpload(attachmentId: string) {
+  completeAttachmentUpload(attachmentId: string, signal?: AbortSignal) {
     return this.command<{ attachment: Attachment }>(
       `/api/v2/attachments/${encodeURIComponent(attachmentId)}/complete`,
       "POST",
       { upload_id: attachmentId },
+      signal,
     ).then(({ attachment }) => attachment);
   }
 
@@ -359,13 +360,13 @@ export class KnowledgeClient {
     );
   }
 
-  deleteAttachment(attachmentId: string) {
+  deleteAttachment(attachmentId: string, signal?: AbortSignal) {
     return this.client.request<{ deleted: true }>({
       path: `/api/v2/attachments/${encodeURIComponent(attachmentId)}`,
       method: "DELETE",
       headers: this.headers(),
       requestClass: "command",
-      policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId() },
+      policy: { timeoutMs: 8_000, retry: 0, idempotencyKey: this.createId(), signal },
     });
   }
 
