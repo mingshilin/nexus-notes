@@ -56,11 +56,18 @@ describe("collaboration center", () => {
   it("replaces the notes placeholder, opens notifications from the unread button, and marks a deep link read", async () => {
     const { App } = await import("../src/index") as Record<string, any>;
     const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "ming@example.com", displayName: "Ming" }, workspaces: [{ id: "ws-1", name: "Nexus", slug: "nexus", role: "owner", revision: 1 }], active_workspace_id: "ws-1" })) };
+    const currentNote = {
+      id: "note-1", workspace_id: "ws-1", folder_id: null, database_id: null,
+      created_by: "user-1", updated_by: "user-1", title: "当前笔记", content: "正文",
+      status: "active", is_favorite: false, is_pinned: false, daily_date: null,
+      revision: 1, created_at: now, updated_at: now,
+    };
     const apiClient = { request: vi.fn(async ({ path, method }: { path: string; method?: string }) => {
       if (path.startsWith("/api/v2/attachments")) return { items: [], next_cursor: null };
       if (path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
       if (path === "/api/v2/notifications/unread") return { unread_count: 1 };
       if (path === "/api/v2/notifications?limit=25") return { items: [notification], next_cursor: null };
+      if (path.startsWith("/api/v2/notes?")) return { items: [currentNote], next_cursor: null };
       if (path === "/api/v2/notifications/notification-1/read" && method === "POST") return { notification_ids: [notification.id], read_at: now };
       if (path === "/api/v2/members") return { items: [member] };
       if (path === "/api/v2/invitations") return { items: [invitation] };

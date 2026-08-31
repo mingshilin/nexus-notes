@@ -7,13 +7,12 @@ import {
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { MAX_UPLOAD_BYTES, NoteSchema, SUPPORTED_ATTACHMENT_MIME_TYPES } from "@nexus/contracts";
-import type { AuthSession, AuthUserSummary, Database, DatabaseRecord, Folder, KnowledgeDiagnostic, Note, NoteLink, NoteRevision, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
+import type { AuthSession, AuthUserSummary, DatabaseRecord, KnowledgeDiagnostic, Note, NoteRevision, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient, ApiClientError } from "../data/api-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic } from "../knowledge/KnowledgeRecoveryPanel";
 import type { ServiceWorkerUpdate } from "../data/service-worker";
 import { useWorkbenchMode } from "../layout/use-mobile-layout";
-import type { DatabaseClient } from "../data/database-client";
 import { BetaLocalStore } from "../data/local-store";
 import { NoteDraftController, type DraftSyncResult, type NoteDraftStore } from "../notes/note-draft-controller";
 import { useWorkspaceSync } from "../data/use-workspace-sync";
@@ -30,14 +29,14 @@ import { CreateCenter, ImportExportCenter, type CreateActionResult } from "../cr
 import { createTaskDatabase } from "../databases/task-database";
 import { InviteRedemptionPage } from "../collaboration/InviteRedemptionPage";
 import { PublicSharePage } from "../collaboration/PublicSharePage";
-import { NotificationCenter } from "../collaboration/NotificationCenter";
-import type { CollaborationCommentTarget, CollaborationShareTarget, NotificationTarget } from "../collaboration/collaboration-types";
+import type { CollaborationCommentTarget, CollaborationShareTarget } from "../collaboration/collaboration-types";
 import { routeCollaborationClientFor, useWorkspaceClients } from "./use-workspace-clients";
 import { useWorkspaceNavigation } from "./use-workspace-navigation";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { clearWorkspaceQueryCache } from "../data/workspace-query-cache";
 import { localDateKey, noteMatchesListView, type NoteListView } from "./use-notes-list-data";
 import { useDatabaseWorkspaceController } from "./use-database-workspace-controller";
+import { runVerifiedDatabaseMutation } from "./use-database-workspace-data";
 import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
 import { useNoteMutations } from "./use-note-mutations";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
@@ -45,8 +44,9 @@ import { NotesDomain, type NotesDomainCallbacks, type NotesEditorState, type Not
 import { DatabaseDomain, type DatabaseDomainCallbacks, type DatabaseDomainSelection } from "./domains/DatabaseDomain";
 import { KnowledgeDomain } from "./domains/KnowledgeDomain";
 import { AccountAndAIDomain, type AccountAndAIDomainCallbacks, type AccountAndAIDomainSelection } from "./domains/AccountAndAIDomain";
+import { CollaborationDomain, CollaborationNotificationSurface } from "./domains/CollaborationDomain";
+import { filterWorkspaceDatabaseRecords, filterWorkspaceDatabases, getActiveDatabaseId, getVerifiedCollaborationTarget, scopeDatabaseBundle, useCollaborationWorkspaceController } from "./use-collaboration-workspace-controller";
 import {
-  loadCollaborationCenter,
   loadReminderPanel,
   preloadWorkspaceDomain,
 } from "./workspace-domain-loader";
@@ -55,11 +55,6 @@ const LazyReminderPanel = lazy(async () => {
   const module = await loadReminderPanel();
   return { default: module.ReminderPanel };
 });
-const LazyCollaborationCenter = lazy(async () => {
-  const module = await loadCollaborationCenter();
-  return { default: module.CollaborationCenter };
-});
-
 const defaultApiClient = new ApiClient();
 const defaultAuthClient = new AuthClient(defaultApiClient);
 const authClientRegistry = new WeakMap<object, AuthClient>([[defaultApiClient, defaultAuthClient]]);
@@ -117,43 +112,12 @@ function isSupportedAttachmentMime(value: string): value is typeof SUPPORTED_ATT
   return (SUPPORTED_ATTACHMENT_MIME_TYPES as readonly string[]).includes(value);
 }
 
-function isAborted(error: unknown, signal: AbortSignal) {
-  return signal.aborted || (error instanceof DOMException && error.name === "AbortError");
-}
-
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) return false;
   const element = target as HTMLElement;
   return ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName)
     || element.isContentEditable
     || Boolean(element.closest("[contenteditable='true']"));
-}
-
-function isRecordNotFound(error: unknown) {
-  if (!error || typeof error !== "object") return false;
-  const details = error as { code?: string; status?: number };
-  return details.code === "RECORD_NOT_FOUND" && details.status === 404;
-}
-
-async function resolveDatabaseNotificationTarget(
-  client: DatabaseClient,
-  target: NotificationTarget,
-  signal: AbortSignal,
-) {
-  const databases = await client.listDatabases(signal);
-  const candidates = target.databaseId
-    ? databases.filter((database) => database.id === target.databaseId)
-    : databases;
-  for (const database of candidates) {
-    try {
-      const record = await client.getRecord(database.id, target.targetId, signal);
-      return { database, databases, record };
-    } catch (error) {
-      if (isRecordNotFound(error)) continue;
-      throw error;
-    }
-  }
-  throw Object.assign(new Error("Database notification target was not found"), { code: "RECORD_NOT_FOUND", status: 404 });
 }
 
 function routeFromLocation(): AppRoute {
@@ -253,8 +217,6 @@ function AuthenticatedWorkspace({
     navigateWorkspaceDomain(domain);
   }, [navigateWorkspaceDomain]);
   const [navigationUser, setNavigationUser] = useState(user);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [notificationOpen, setNotificationOpen] = useState(false);
   const [notesRefreshVersion, setNotesRefreshVersion] = useState(0);
   const [workspaceModal, setWorkspaceModal] = useState<WorkspaceModal | null>(null);
   const createCenterOpen = workspaceModal === "create";
@@ -297,8 +259,6 @@ function AuthenticatedWorkspace({
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const inspectorOpenerRef = useRef<HTMLElement | null>(null);
-  const notificationOpenerRef = useRef<HTMLElement | null>(null);
-  const notificationTargetController = useRef<AbortController | null>(null);
   const createCenterFocusTargetRef = useRef<HTMLButtonElement | null>(null);
   const openCreateCenter = useCallback((opener?: HTMLButtonElement | null) => {
     const active = typeof document !== "undefined" && document.activeElement instanceof HTMLButtonElement
@@ -445,6 +405,16 @@ function AuthenticatedWorkspace({
     creatingFirstDatabase,
     createDatabaseFromName,
   } = databaseController;
+  const scopedDatabases = filterWorkspaceDatabases(databases, workspaceId);
+  const scopedDatabaseBundle = scopeDatabaseBundle(databaseBundle, workspaceId);
+  const activeDatabaseId = getActiveDatabaseId(selectedDatabaseId, scopedDatabaseBundle, workspaceId);
+  const verifiedDatabaseBundle = activeDatabaseId ? scopedDatabaseBundle : null;
+  const verifiedNotificationDatabaseId = resolvedNotificationRecord && resolvedNotificationRecord.workspace_id === workspaceId
+    ? resolvedNotificationRecord.database_id
+    : null;
+  const visibleDatabaseId = verifiedNotificationDatabaseId ?? activeDatabaseId;
+  const scopedDatabaseIds = visibleDatabaseId ? new Set([visibleDatabaseId]) : new Set<string>();
+  const scopedDatabaseRecords = filterWorkspaceDatabaseRecords(databaseRecords, workspaceId, scopedDatabaseIds);
   const {
     attachments,
     setAttachments,
@@ -538,12 +508,42 @@ function AuthenticatedWorkspace({
   const visibleNotes = noteFolderFilter === null
     ? notes
     : notes.filter((note) => note.folder_id === noteFolderFilter);
-  const noteTargets = notes.map((note) => ({
+  const noteTargets = notes.filter((note) => note.workspace_id === workspaceId).map((note) => ({
     type: "note" as const,
     id: note.id,
     label: note.title.trim() || "未命名笔记",
   }));
   const userId = user.id;
+  const collaborationController = useCollaborationWorkspaceController({
+    client: collaborationClient,
+    databaseClient,
+    workspaceId,
+    userId,
+    collaborationEnabled,
+    role,
+    notes,
+    databases,
+    databaseRecords,
+    setSelectedNoteId,
+    setSelectedDatabaseId,
+    setSelectedDatabaseRecordId,
+    setResolvedNotificationRecord,
+    setSelectedCommentId,
+    setCollaborationInitialSection,
+    setDatabases,
+    setDatabaseError,
+    transitionToDomain,
+  });
+  const {
+    unreadCount,
+    notificationOpen,
+    notificationOpenerRef,
+    toggleNotifications,
+    closeNotifications,
+    onNotificationRead,
+    navigateNotificationTarget,
+    targetError,
+  } = collaborationController;
 
   const applyWorkspaceSyncChange = useCallback(async (change: SyncChange) => {
     if (change.entity_type !== "note") return;
@@ -652,11 +652,6 @@ function AuthenticatedWorkspace({
   };
 
   const closeInspector = () => setInspectorOpen(false);
-  const toggleNotifications = (opener: HTMLElement) => {
-    if (!collaborationEnabled) return;
-    notificationOpenerRef.current = opener;
-    setNotificationOpen((open) => !open);
-  };
 
   const startNewNote = async (): Promise<CreateActionResult> => {
     if (logoutPending) return { status: "rejected", message: "正在退出登录，请稍候。" };
@@ -1102,36 +1097,7 @@ function AuthenticatedWorkspace({
     return () => { cancelled = true; };
   }, [draftController, logoutPending, notesLoading, workspaceId]);
 
-  useEffect(() => {
-    if (!workspaceId || !collaborationEnabled) {
-      setUnreadCount(0);
-      return undefined;
-    }
-    const controller = new AbortController();
-    const loadUnreadCount = () => {
-      void collaborationClient.getUnreadCount(controller.signal).then((count) => {
-        if (!controller.signal.aborted) setUnreadCount(count);
-      }).catch(() => {
-        if (!controller.signal.aborted) setUnreadCount(0);
-      });
-    };
-    const idleWindow = window as Window & {
-      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-      cancelIdleCallback?: (handle: number) => void;
-    };
-    const idleHandle = idleWindow.requestIdleCallback?.(loadUnreadCount, { timeout: 500 });
-    const timer = idleHandle === undefined ? window.setTimeout(loadUnreadCount, 100) : undefined;
-    return () => {
-      if (timer !== undefined) window.clearTimeout(timer);
-      if (idleHandle !== undefined) idleWindow.cancelIdleCallback?.(idleHandle);
-      controller.abort();
-    };
-  }, [collaborationClient, collaborationEnabled, workspaceId]);
-
-  useEffect(() => () => {
-    notificationTargetController.current?.abort();
-    abortInspectorRequests();
-  }, [abortInspectorRequests]);
+  useEffect(() => () => abortInspectorRequests(), [abortInspectorRequests]);
 
   const createFirstDatabase = () => {
     void createDatabaseFromName(firstDatabaseName).then((created) => {
@@ -1162,8 +1128,8 @@ function AuthenticatedWorkspace({
     setFeatureMapOpen(false);
     setFirstDatabaseName("");
     transitionToDomain("databases");
-    setActivePane(databases.length > 0 ? "context" : "canvas");
-    setDatabaseCreateOpen(databases.length > 0);
+    setActivePane(scopedDatabases.length > 0 ? "context" : "canvas");
+    setDatabaseCreateOpen(scopedDatabases.length > 0);
   };
 
   const updateDiagnosticNotes = async (
@@ -1394,7 +1360,6 @@ function AuthenticatedWorkspace({
       abortRecoveryRequests();
       abortDatabaseRequests();
       abortInspectorRequests();
-      notificationTargetController.current?.abort();
     } catch (error) {
       draftController.resume();
       throw error;
@@ -1597,7 +1562,7 @@ function AuthenticatedWorkspace({
           type="button"
           aria-label="新建数据库"
           onClick={() => {
-            if (databases.length === 0) {
+            if (scopedDatabases.length === 0) {
               setActivePane("canvas");
               return;
             }
@@ -1609,7 +1574,7 @@ function AuthenticatedWorkspace({
           <span>新建数据库</span>
         </button>
       </div>
-      {databaseCreateOpen && databases.length > 0 ? (
+      {databaseCreateOpen && scopedDatabases.length > 0 ? (
         <form
           className="database-create-inline"
           aria-label="新建数据库表单"
@@ -1625,19 +1590,25 @@ function AuthenticatedWorkspace({
           </div>
         </form>
       ) : null}
-      {databaseLoading && databases.length === 0 ? <p className="database-empty" role="status">正在加载数据库…</p> : null}
+      {databaseLoading && scopedDatabases.length === 0 ? <p className="database-empty" role="status">正在加载数据库…</p> : null}
       {databaseError ? <p className="database-operation-error" role="alert">{databaseError}</p> : null}
-      {databases.map((database) => (
+      {scopedDatabases.map((database) => (
         <button
           key={database.id}
           className={database.id === selectedDatabaseId ? "note-row selected" : "note-row"}
           type="button"
-          onClick={() => { setSelectedDatabaseId(database.id); setSelectedDatabaseRecordId(null); setSelectedCommentId(null); setResolvedNotificationRecord(null); setActivePane("canvas"); }}
+          onClick={() => {
+            setSelectedDatabaseId(database.id);
+            setSelectedDatabaseRecordId(null);
+            setSelectedCommentId(null);
+            setResolvedNotificationRecord(null);
+            setActivePane("canvas");
+          }}
         >
           <strong>{database.name}</strong><p>{database.description || "Structured database"}</p>
         </button>
       ))}
-      {!databaseLoading && !databaseError && databases.length === 0 ? <p className="database-empty">尚未创建数据库。</p> : null}
+      {!databaseLoading && !databaseError && scopedDatabases.length === 0 ? <p className="database-empty">尚未创建数据库。</p> : null}
     </div>
   );
 
@@ -1804,13 +1775,13 @@ function AuthenticatedWorkspace({
     onCreateFirstDatabase: createFirstDatabase,
     onMutation: () => setDatabaseRefreshVersion((version) => version + 1),
     onRecordsPageRequest: requestDatabasePage,
-    onBoardMove: (input) => databaseClient.boardMove(databaseBundle?.database.id ?? selectedDatabaseId ?? "", input),
-    onCalendarAssign: (input) => databaseClient.calendarAssign(databaseBundle?.database.id ?? selectedDatabaseId ?? "", input),
+    onBoardMove: (input) => runVerifiedDatabaseMutation(activeDatabaseId, (databaseId) => databaseClient.boardMove(databaseId, input)),
+    onCalendarAssign: (input) => runVerifiedDatabaseMutation(activeDatabaseId, (databaseId) => databaseClient.calendarAssign(databaseId, input)),
   };
   const databaseDomainSelection: DatabaseDomainSelection = {
-    bundle: databaseBundle,
-    databases,
-    records: databaseRecords,
+    bundle: verifiedDatabaseBundle,
+    databases: scopedDatabases,
+    records: scopedDatabaseRecords,
     recordsNextCursor: databaseRecordsNextCursor,
     loading: databaseLoading,
     error: databaseError,
@@ -1874,86 +1845,74 @@ function AuthenticatedWorkspace({
       <p className="product-domain-lead">当前没有可用工作区或协作能力。选择其他产品区域不会更改你的笔记数据。</p>
     </section>
   );
-  const collaborationRecords = resolvedNotificationRecord && !databaseRecords.some((record) => record.id === resolvedNotificationRecord.id)
-    ? [...databaseRecords, resolvedNotificationRecord]
-    : databaseRecords;
+  const candidateResolvedNotificationRecord = resolvedNotificationRecord;
+  const scopedResolvedNotificationRecord = (() => {
+    if (!candidateResolvedNotificationRecord) return null;
+    if (candidateResolvedNotificationRecord.workspace_id !== workspaceId) return null;
+    if (!scopedDatabaseIds.has(candidateResolvedNotificationRecord.database_id)) return null;
+    return candidateResolvedNotificationRecord;
+  })();
+  const collaborationRecords = scopedResolvedNotificationRecord && !scopedDatabaseRecords.some((record) => record.id === scopedResolvedNotificationRecord.id)
+    ? [...scopedDatabaseRecords, scopedResolvedNotificationRecord]
+    : scopedDatabaseRecords;
   const recordTargets: CollaborationCommentTarget[] = collaborationRecords.map((record) => ({
       type: "database_record" as const,
       id: record.id,
-      label: `${record.id === resolvedNotificationRecord?.id ? `${databases.find((database) => database.id === record.database_id)?.name ?? "数据库"} / ` : ""}${Object.values(record.values).find((value): value is string => typeof value === "string" && Boolean(value.trim())) ?? `Record ${record.id}`}`,
+      label: `${record.id === scopedResolvedNotificationRecord?.id ? `${scopedDatabases.find((database) => database.id === record.database_id)?.name ?? "数据库"} / ` : ""}${Object.values(record.values).find((value): value is string => typeof value === "string" && Boolean(value.trim())) ?? `Record ${record.id}`}`,
     }));
   const commentTargets: CollaborationCommentTarget[] = [
     ...noteTargets,
-    ...(selectedNoteId && !noteTargets.some((target) => target.id === selectedNoteId)
-      ? [{ type: "note" as const, id: selectedNoteId, label: "通知中的笔记" }]
-      : []),
     ...recordTargets,
-    ...(selectedDatabaseRecordId && !recordTargets.some((target) => target.id === selectedDatabaseRecordId)
-      ? [{ type: "database_record" as const, id: selectedDatabaseRecordId, label: "通知中的数据库记录" }]
-      : []),
   ];
   const shareTargets: CollaborationShareTarget[] = [
     ...noteTargets,
-    ...(databaseBundle?.views.map((view) => ({
+    ...(verifiedDatabaseBundle?.views.map((view) => ({
       type: "database_view" as const,
       id: view.id,
-      label: `${databaseBundle.database.name} / ${view.name}`,
+      label: `${verifiedDatabaseBundle.database.name} / ${view.name}`,
     })) ?? []),
   ];
-  const activeCollaborationTarget = selectedDatabaseRecordId
-    ? { type: "database_record" as const, id: selectedDatabaseRecordId }
-    : selectedNoteId
-      ? { type: "note" as const, id: selectedNoteId }
-      : undefined;
-  const navigateNotificationTarget = (target: NotificationTarget) => {
-    setNotificationOpen(false);
-    notificationTargetController.current?.abort();
-    if (target.targetType === "note") {
-      setSelectedNoteId(target.targetId);
-      setSelectedDatabaseRecordId(null);
-      setResolvedNotificationRecord(null);
-      setSelectedCommentId(target.commentId);
-      setCollaborationInitialSection("comments");
-      transitionToDomain("collaboration");
-      return;
-    }
-
-    const selectTarget = (availableDatabases: Database[], database: Database, record: DatabaseRecord) => {
-      setDatabases(availableDatabases);
-      setSelectedDatabaseId(database.id);
-      setSelectedDatabaseRecordId(record.id);
-      setResolvedNotificationRecord(record);
-      setSelectedCommentId(target.commentId);
-      setDatabaseError(null);
-      setCollaborationInitialSection("comments");
-      transitionToDomain("collaboration");
-    };
-    const loadedRecord = collaborationRecords.find((record) => record.id === target.targetId && (!target.databaseId || record.database_id === target.databaseId));
-    const loadedDatabase = loadedRecord ? databases.find((database) => database.id === loadedRecord.database_id) : undefined;
-    if (loadedRecord && loadedDatabase) {
-      selectTarget(databases, loadedDatabase, loadedRecord);
-      return;
-    }
-
-    if (!workspaceId) return;
-    const controller = new AbortController();
-    notificationTargetController.current = controller;
-    void resolveDatabaseNotificationTarget(databaseClient, target, controller.signal).then(({ database, databases: availableDatabases, record }) => {
-      if (!controller.signal.aborted) selectTarget(availableDatabases, database, record);
-    }).catch((error: unknown) => {
-      if (isAborted(error, controller.signal)) return;
-      setSelectedDatabaseRecordId(target.targetId);
-      setResolvedNotificationRecord(null);
-      setSelectedCommentId(target.commentId);
-      setDatabaseError("无法定位通知中的数据库记录。");
-      setCollaborationInitialSection("comments");
-      transitionToDomain("collaboration");
-    }).finally(() => {
-      if (notificationTargetController.current === controller) notificationTargetController.current = null;
-    });
-  };
+  const activeCollaborationTarget = getVerifiedCollaborationTarget(selectedDatabaseRecordId, selectedNoteId, commentTargets);
+  const collaborationDomainCanvas = collaborationEnabled && workspaceId ? (
+    <CollaborationDomain
+      client={collaborationClient}
+      workspaceId={workspaceId}
+      userId={userId}
+      role={role}
+      initialSection={collaborationInitialSection}
+      activeTarget={activeCollaborationTarget}
+      selectedCommentId={selectedCommentId}
+      commentTargets={commentTargets}
+      shareTargets={shareTargets}
+      targetError={targetError}
+    />
+  ) : null;
+  const collaborationNotificationLayer = collaborationEnabled && workspaceId ? (
+    <CollaborationNotificationSurface
+      client={collaborationClient}
+      workspaceId={workspaceId}
+      userId={userId}
+      notificationOpen={notificationOpen}
+      unreadCount={unreadCount}
+      notificationOpener={notificationOpenerRef.current}
+      onNotificationClose={closeNotifications}
+      onNotificationRead={onNotificationRead}
+      onNotificationDeepLink={navigateNotificationTarget}
+    />
+  ) : null;
+  const activeDomainCanvas = activeDomain === "collaboration"
+    ? collaborationEnabled && workspaceId ? collaborationDomainCanvas : collaborationUnavailableCanvas
+    : activeDomain === "databases"
+      ? databaseDomainCanvas
+      : activeDomain === "knowledge"
+        ? knowledgeDomainCanvas
+        : activeDomain === "reminders"
+          ? remindersCanvas
+          : activeDomain === "ai" || activeDomain === "account"
+            ? accountAndAIDomainCanvas
+            : notesDomainCanvas;
   const inspectorTitle = activeDomain === "databases"
-    ? databaseBundle?.database.name ?? "数据库"
+    ? verifiedDatabaseBundle?.database.name ?? "数据库"
     : activeDomain === "collaboration"
       ? "协作中心"
       : activeDomain === "knowledge"
@@ -2000,19 +1959,10 @@ function AuthenticatedWorkspace({
         onActivePaneChange={setActivePane}
         onInspectorOpen={openInspector}
         onInspectorClose={closeInspector}
+        persistentLayer={collaborationNotificationLayer}
       >
         <>
-        {activeDomain === "collaboration" ? collaborationEnabled && workspaceId ? <Suspense fallback={<p className="database-empty" role="status">正在加载协作中心…</p>}><LazyCollaborationCenter client={collaborationClient} workspaceId={workspaceId} userId={userId} role={role} initialSection={collaborationInitialSection} activeTarget={activeCollaborationTarget} selectedCommentId={selectedCommentId} commentTargets={commentTargets} shareTargets={shareTargets} /></Suspense> : collaborationUnavailableCanvas : activeDomain === "databases" ? databaseDomainCanvas : activeDomain === "knowledge" ? knowledgeDomainCanvas : activeDomain === "reminders" ? remindersCanvas : activeDomain === "ai" || activeDomain === "account" ? accountAndAIDomainCanvas : notesDomainCanvas}
-        <NotificationCenter
-          client={collaborationClient}
-          open={notificationOpen}
-          unreadCount={unreadCount}
-          cacheScope={`${userId}:${workspaceId ?? ""}`}
-          opener={notificationOpenerRef.current}
-          onClose={() => setNotificationOpen(false)}
-          onNotificationRead={(count) => setUnreadCount((current) => Math.max(0, current - count))}
-          onDeepLink={navigateNotificationTarget}
-        />
+        {activeDomainCanvas}
         </>
       </WorkspaceShell>
       </div>
@@ -2034,7 +1984,7 @@ function AuthenticatedWorkspace({
       {webClipperOpen && workspaceId ? (
         <WebClipperPanel
           client={notesClient}
-          databases={databases}
+          databases={scopedDatabases}
           onClose={() => setWorkspaceModal(null)}
           onCaptured={handleWebClipperCapture}
         />

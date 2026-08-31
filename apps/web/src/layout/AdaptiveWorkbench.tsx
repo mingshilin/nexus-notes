@@ -19,6 +19,7 @@ export interface AdaptiveWorkbenchProps {
   onActivePaneChange?: (pane: "context" | "canvas") => void;
   onInspectorOpen?: (opener: HTMLElement) => void;
   onInspectorClose: () => void;
+  persistentLayer?: ReactNode;
   children: ReactNode;
 }
 
@@ -59,6 +60,7 @@ export function AdaptiveWorkbench({
   onActivePaneChange,
   onInspectorOpen,
   onInspectorClose,
+  persistentLayer,
   children,
 }: AdaptiveWorkbenchProps) {
   const detectedMode = useWorkbenchMode();
@@ -122,6 +124,8 @@ export function AdaptiveWorkbench({
       ) : (
         <Canvas desktopCreateAction={desktopCreateAction} modalOpen={modalOpen}>{children}</Canvas>
       )}
+
+      {persistentLayer}
 
       {inspectorModalOpen ? (
         <div className="inspector-backdrop" onMouseDown={onInspectorClose} onKeyDown={(event) => { if (event.key === "Escape") onInspectorClose(); }}>

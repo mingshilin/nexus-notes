@@ -40,6 +40,44 @@ function pageLimit(bundle: DatabaseBundle | null) {
   return typeof configured === "number" && Number.isFinite(configured) ? configured : 50;
 }
 
+function scopeBootstrap(bootstrap: DatabaseBootstrap, workspaceId: string): DatabaseBootstrap {
+  const items = bootstrap.items.filter((database) => database.workspace_id === workspaceId);
+  const selectedId = bootstrap.selected_database_id;
+  const selectedDatabase = selectedId ? items.find((database) => database.id === selectedId) : undefined;
+  const sourceBundle = bootstrap.bundle;
+  const bundle = sourceBundle
+    && selectedDatabase
+    && sourceBundle.database.workspace_id === workspaceId
+    && sourceBundle.database.id === selectedId
+    ? {
+        ...sourceBundle,
+        properties: sourceBundle.properties.filter((property) => property.workspace_id === workspaceId && property.database_id === selectedId),
+        views: sourceBundle.views.filter((view) => view.workspace_id === workspaceId && view.database_id === selectedId),
+        templates: sourceBundle.templates.filter((template) => template.workspace_id === workspaceId && template.database_id === selectedId),
+      }
+    : null;
+  if (!bundle || !selectedId) {
+    return { items, selected_database_id: null, bundle: null, records: { items: [], next_cursor: null } };
+  }
+  return {
+    items,
+    selected_database_id: selectedId,
+    bundle,
+    records: {
+      items: bootstrap.records.items.filter((record) => record.workspace_id === workspaceId && record.database_id === selectedId),
+      next_cursor: bootstrap.records.next_cursor,
+    },
+  };
+}
+
+export function runVerifiedDatabaseMutation<T>(
+  activeDatabaseId: string | null,
+  mutation: (databaseId: string) => Promise<T>,
+) {
+  if (!activeDatabaseId) return Promise.reject(new Error("当前数据库不可用。"));
+  return mutation(activeDatabaseId);
+}
+
 export function useDatabaseWorkspaceData({
   client,
   workspaceId,
@@ -49,7 +87,7 @@ export function useDatabaseWorkspaceData({
   resolvedNotificationRecord,
 }: UseDatabaseWorkspaceDataParams): DatabaseWorkspaceDataState {
   const [databases, setDatabases] = useState<Database[]>([]);
-  const [selectedDatabaseId, setSelectedDatabaseId] = useState<string | null>(null);
+  const [selectedDatabaseId, setSelectedDatabaseIdState] = useState<string | null>(null);
   const [databaseBundle, setDatabaseBundle] = useState<DatabaseBundle | null>(null);
   const [databaseRecords, setDatabaseRecords] = useState<DatabaseRecord[]>([]);
   const [databaseRecordsNextCursor, setDatabaseRecordsNextCursor] = useState<string | null>(null);
@@ -59,8 +97,23 @@ export function useDatabaseWorkspaceData({
   const requestGenerationRef = useRef(0);
   const workspaceRef = useRef<string | undefined>(workspaceId);
   const clientRef = useRef(client);
+  const selectedDatabaseIdRef = useRef<string | null>(selectedDatabaseId);
   const selectionSyncRef = useRef<string | null>(null);
   const lastRequestKeyRef = useRef<string | null>(null);
+  selectedDatabaseIdRef.current = selectedDatabaseId;
+
+  const setSelectedDatabaseId: Dispatch<SetStateAction<string | null>> = useCallback((value) => {
+    const current = selectedDatabaseIdRef.current;
+    const next = typeof value === "function" ? value(current) : value;
+    if (next !== current) {
+      selectedDatabaseIdRef.current = next;
+      setDatabaseBundle(null);
+      setDatabaseRecords([]);
+      setDatabaseRecordsNextCursor(null);
+      setDatabaseError(null);
+    }
+    setSelectedDatabaseIdState(next);
+  }, []);
 
   const abortDatabaseRequests = useCallback(() => {
     requestGenerationRef.current += 1;
@@ -144,18 +197,19 @@ export function useDatabaseWorkspaceData({
       signal: controller.signal,
     }).then((bootstrap: DatabaseBootstrap) => {
       if (controller.signal.aborted || generation !== requestGenerationRef.current) return;
-      selectionSyncRef.current = bootstrap.selected_database_id;
-      setDatabases(bootstrap.items);
-      setSelectedDatabaseId(bootstrap.selected_database_id);
-      setDatabaseBundle(bootstrap.bundle);
-      const targetRecord = bootstrap.bundle
-        && effectiveNotificationRecord?.database_id === bootstrap.bundle.database.id
-        && !bootstrap.records.items.some((record) => record.id === effectiveNotificationRecord.id)
+      const scopedBootstrap = scopeBootstrap(bootstrap, workspaceId);
+      selectionSyncRef.current = scopedBootstrap.selected_database_id;
+      setDatabases(scopedBootstrap.items);
+      setSelectedDatabaseId(scopedBootstrap.selected_database_id);
+      setDatabaseBundle(scopedBootstrap.bundle);
+      const targetRecord = scopedBootstrap.bundle
+        && effectiveNotificationRecord?.database_id === scopedBootstrap.bundle.database.id
+        && !scopedBootstrap.records.items.some((record) => record.id === effectiveNotificationRecord.id)
         ? effectiveNotificationRecord
         : null;
-      const records = targetRecord ? [targetRecord, ...bootstrap.records.items] : bootstrap.records.items;
+      const records = targetRecord ? [targetRecord, ...scopedBootstrap.records.items] : scopedBootstrap.records.items;
       setDatabaseRecords(records);
-      setDatabaseRecordsNextCursor(bootstrap.records.next_cursor);
+      setDatabaseRecordsNextCursor(scopedBootstrap.records.next_cursor);
     }).catch((error: unknown) => {
       if (!isAborted(error, controller.signal) && generation === requestGenerationRef.current) {
         setDatabaseError("数据库内容暂时无法加载，保留最近可用数据。");
@@ -189,7 +243,12 @@ export function useDatabaseWorkspaceData({
     const controller = new AbortController();
     const generation = requestGenerationRef.current;
     void client.listDatabases(controller.signal).then((items) => {
-      if (!controller.signal.aborted && generation === requestGenerationRef.current) setDatabases(items);
+      if (!controller.signal.aborted
+        && generation === requestGenerationRef.current
+        && clientRef.current === client
+        && workspaceRef.current === workspaceId) {
+        setDatabases(items.filter((database) => database.workspace_id === workspaceId));
+      }
     }).catch(() => {
       // The clipper remains usable for Inbox and Daily when discovery is unavailable.
     });
@@ -197,9 +256,15 @@ export function useDatabaseWorkspaceData({
   }, [client, webClipperOpen, workspaceId]);
 
   const requestDatabasePage: RecordsPageRequest = useCallback(({ cursor, limit, viewId, signal }) => {
-    if (!workspaceId || !selectedDatabaseId) return Promise.resolve({ items: [], next_cursor: null });
-    return client.listRecords(selectedDatabaseId, { cursor: cursor ?? undefined, viewId, limit, signal });
-  }, [client, selectedDatabaseId, workspaceId]);
+    const requestDatabaseId = databaseBundle
+      && databaseBundle.database.workspace_id === workspaceId
+      && selectedDatabaseId !== null
+      && databaseBundle.database.id === selectedDatabaseId
+      ? databaseBundle.database.id
+      : null;
+    if (!workspaceId || !requestDatabaseId) return Promise.resolve({ items: [], next_cursor: null });
+    return client.listRecords(requestDatabaseId, { cursor: cursor ?? undefined, viewId, limit, signal });
+  }, [client, databaseBundle, selectedDatabaseId, workspaceId]);
 
   useEffect(() => () => abortDatabaseRequests(), [abortDatabaseRequests]);
 

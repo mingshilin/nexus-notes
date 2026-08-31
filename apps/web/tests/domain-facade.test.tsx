@@ -11,9 +11,11 @@ vi.mock("../src/app/workspace-domain-loader", () => ({
   loadKnowledgeCalendarPanel: async () => ({ KnowledgeCalendarPanel: () => <section aria-label="知识日历 facade">知识日历</section> }),
   loadAccountCenter: async () => ({ AccountCenter: ({ onWorkspaceChange }: { onWorkspaceChange(workspaceId: string): void }) => <section aria-label="账户 facade"><button type="button" onClick={() => onWorkspaceChange("ws-2")}>切换工作区</button></section> }),
   loadAIChatPanel: async () => ({ AIChatPanel: () => <section aria-label="AI facade">AI</section> }),
+  loadCollaborationCenter: async () => ({ CollaborationCenter: () => <section aria-label="协作 facade">协作内容</section> }),
 }));
 
 import { AccountAndAIDomain, type AccountAndAIDomainCallbacks } from "../src/app/domains/AccountAndAIDomain";
+import { CollaborationDomain, CollaborationNotificationSurface } from "../src/app/domains/CollaborationDomain";
 import { DatabaseDomain, type DatabaseDomainCallbacks } from "../src/app/domains/DatabaseDomain";
 import { KnowledgeDomain } from "../src/app/domains/KnowledgeDomain";
 import { NotesDomain, type NotesDomainCallbacks } from "../src/app/domains/NotesDomain";
@@ -180,5 +182,47 @@ describe("workspace domain facades", () => {
 
     expect(screen.getByTestId("stable-workspace-navigation")).toBe(stableNavigation);
     expect(screen.getByRole("heading", { name: "创建第一个数据库" })).toBeVisible();
+  });
+
+  it("keeps one notification surface while toggling the collaboration facade", async () => {
+    const client = {
+      listNotifications: vi.fn(async () => ({ items: [], next_cursor: null })),
+      readNotification: vi.fn(),
+      readNotifications: vi.fn(),
+      readAllNotifications: vi.fn(),
+    };
+    const notificationProps = {
+      client: client as never,
+      workspaceId: "ws-1",
+      userId: "user-1",
+      unreadCount: 0,
+      notificationOpener: null,
+      onNotificationClose: vi.fn(),
+      onNotificationRead: vi.fn(),
+      onNotificationDeepLink: vi.fn(),
+    };
+    const view = render(<><div><CollaborationDomain client={client as never} workspaceId="ws-1" userId="user-1" role="owner" initialSection="people" /></div><CollaborationNotificationSurface {...notificationProps} notificationOpen={false} /></>);
+    expect(await screen.findByRole("region", { name: "协作 facade" })).toBeVisible();
+
+    view.rerender(<><div /> <CollaborationNotificationSurface {...notificationProps} notificationOpen /></>);
+    expect(screen.queryByRole("region", { name: "协作 facade" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "通知中心" })).toBeInTheDocument();
+    expect(screen.getAllByRole("dialog", { name: "通知中心" })).toHaveLength(1);
+  });
+
+  it("shows a recoverable deep-link error without creating an actionable target", async () => {
+    render(<CollaborationDomain
+      client={{} as never}
+      workspaceId="ws-1"
+      userId="user-1"
+      role="owner"
+      initialSection="comments"
+      targetError="无法定位通知中的数据库记录。"
+      commentTargets={[]}
+      shareTargets={[]}
+    />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法定位通知中的数据库记录。");
+    expect(screen.queryByRole("combobox", { name: "评论目标" })).not.toBeInTheDocument();
   });
 });

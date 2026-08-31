@@ -213,6 +213,76 @@ describe("workspace performance foundation", () => {
     expect(screen.getByRole("region", { name: "数据库页面" })).toBeVisible();
   });
 
+  it("keeps the persistent notification layer mounted while the domain loading shell is visible", () => {
+    const persistentLayer = <section aria-label="稳定通知层">通知</section>;
+    const { rerender } = render(<WorkspaceShell
+      activeDomain="notes"
+      requestedDomain="notes"
+      domainPending={false}
+      mode="desktop"
+      navigation={<nav aria-label="测试导航" />}
+      inspectorOpen={false}
+      onInspectorClose={vi.fn()}
+      persistentLayer={persistentLayer}
+    >
+      <section aria-label="笔记页面">笔记</section>
+    </WorkspaceShell>);
+    const stableLayer = screen.getByRole("region", { name: "稳定通知层" });
+
+    rerender(<WorkspaceShell
+      activeDomain="notes"
+      requestedDomain="databases"
+      domainPending
+      mode="desktop"
+      navigation={<nav aria-label="测试导航" />}
+      inspectorOpen={false}
+      onInspectorClose={vi.fn()}
+      persistentLayer={persistentLayer}
+    >
+      <section aria-label="数据库页面">数据库</section>
+    </WorkspaceShell>);
+
+    expect(screen.getByRole("status", { name: "正在打开数据库" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "稳定通知层" })).toBe(stableLayer);
+  });
+
+  it("keeps the persistent notification layer mounted in the mobile context pane", () => {
+    const persistentLayer = <section aria-label="移动稳定通知层">通知</section>;
+    const { rerender } = render(<WorkspaceShell
+      activeDomain="notes"
+      requestedDomain="notes"
+      domainPending={false}
+      mode="mobile"
+      activePane="canvas"
+      navigation={<nav aria-label="测试导航" />}
+      contextualList={<div>上下文</div>}
+      inspectorOpen={false}
+      onInspectorClose={vi.fn()}
+      persistentLayer={persistentLayer}
+    >
+      <section aria-label="移动笔记页面">笔记</section>
+    </WorkspaceShell>);
+    const stableLayer = screen.getByRole("region", { name: "移动稳定通知层" });
+
+    rerender(<WorkspaceShell
+      activeDomain="notes"
+      requestedDomain="databases"
+      domainPending
+      mode="mobile"
+      activePane="context"
+      navigation={<nav aria-label="测试导航" />}
+      contextualList={<div>上下文</div>}
+      inspectorOpen={false}
+      onInspectorClose={vi.fn()}
+      persistentLayer={persistentLayer}
+    >
+      <section aria-label="移动数据库页面">数据库</section>
+    </WorkspaceShell>);
+
+    expect(screen.getByRole("region", { name: "移动稳定通知层" })).toBe(stableLayer);
+    expect(screen.getByTestId("task-pane")).toHaveTextContent("上下文");
+  });
+
   it("commits the requested shell immediately while the lazy module is unresolved", async () => {
     const authClient = {
       session: vi.fn(async () => ({

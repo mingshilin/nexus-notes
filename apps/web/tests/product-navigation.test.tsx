@@ -468,7 +468,7 @@ describe("App product navigation", () => {
   it("loads workspace databases when Web Clipper opens from the notes domain", async () => {
     const apiClient = {
       request: vi.fn(async (request: { path: string }) => {
-        if (request.path === "/api/v2/databases") return { items: [{ id: "db-1", name: "Reading List" }] };
+        if (request.path === "/api/v2/databases") return { items: [{ id: "db-1", workspace_id: "ws-1", name: "Reading List" }] };
         if (request.path === "/api/v2/notifications/unread") return { unread_count: 0 };
         return { items: [], next_cursor: null };
       }),
