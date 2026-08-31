@@ -4,8 +4,10 @@
 
 Fixed the GitHub `Public Beta CI` failure caused by Windows-only backslash path
 construction in `tests/frontend/release-smoke.test.ts`. On Linux, the old
-template literal `${tmpdir()}\\nexus-...` produced a newline in the path and
-`mkdtemp` failed with `EACCES`. The fixtures now use `path.join()`.
+template literal `${tmpdir()}\\nexus-...` inserted a literal backslash. Linux
+treated that backslash as a filename character instead of a separator, so the
+absolute path no longer targeted the temporary directory and `mkdtemp` failed
+with `EACCES`. The fixtures now use `path.join()`.
 
 ## Verification Evidence
 
