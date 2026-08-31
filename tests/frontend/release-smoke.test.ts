@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -57,7 +57,7 @@ describe("release browser smoke modes", () => {
   });
 
   it("reports a separate blocked reason when the external profile exists but the avatar fixture is missing", () => {
-    const profile = mkdtempSync(`${tmpdir()}\\nexus-beta-release-profile-`);
+    const profile = mkdtempSync(join(tmpdir(), "nexus-beta-release-profile-"));
     try {
       const result = runAuthenticatedGate([`--user-data-dir=${profile}`]);
       expect(result.status).toBe(2);
@@ -73,7 +73,7 @@ describe("release browser smoke modes", () => {
   });
 
   it("reports an invalid external profile without starting a browser", () => {
-    const profile = `${tmpdir()}\\nexus-beta-profile-does-not-exist-${Date.now()}`;
+    const profile = join(tmpdir(), `nexus-beta-profile-does-not-exist-${Date.now()}`);
     const result = runAuthenticatedGate([`--user-data-dir=${profile}`, `--avatar-file=${profile}.png`]);
     expect(result.status).toBe(2);
     expect(JSON.parse(result.stdout.trim())).toMatchObject({
@@ -84,7 +84,7 @@ describe("release browser smoke modes", () => {
   });
 
   it("validates the external profile before checking the avatar fixture", () => {
-    const profile = `${tmpdir()}\\nexus-beta-profile-does-not-exist-${Date.now()}`;
+    const profile = join(tmpdir(), `nexus-beta-profile-does-not-exist-${Date.now()}`);
     const result = runAuthenticatedGate([`--user-data-dir=${profile}`]);
     expect(result.status).toBe(2);
     expect(JSON.parse(result.stdout.trim())).toMatchObject({
@@ -96,8 +96,8 @@ describe("release browser smoke modes", () => {
   });
 
   it("reports an invalid avatar fixture separately from a valid external profile", () => {
-    const profile = mkdtempSync(`${tmpdir()}\\nexus-beta-release-profile-`);
-    const avatar = `${tmpdir()}\\nexus-beta-avatar-does-not-exist-${Date.now()}.png`;
+    const profile = mkdtempSync(join(tmpdir(), "nexus-beta-release-profile-"));
+    const avatar = join(tmpdir(), `nexus-beta-avatar-does-not-exist-${Date.now()}.png`);
     try {
       const result = runAuthenticatedGate([`--user-data-dir=${profile}`, `--avatar-file=${avatar}`]);
       expect(result.status).toBe(2);
