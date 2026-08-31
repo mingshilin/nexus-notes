@@ -1,9 +1,7 @@
 import {
   LayoutGrid,
   Plus,
-  Search,
   UserRound,
-  X,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { MAX_UPLOAD_BYTES, NoteSchema, SUPPORTED_ATTACHMENT_MIME_TYPES } from "@nexus/contracts";
@@ -20,7 +18,6 @@ import type { SyncChange } from "../data/sync-engine";
 import { ProductNavigation, type AccountSubsection, type ProductDomain } from "../navigation/ProductNavigation";
 import { QuickCapturePanel } from "../notes/QuickCapturePanel";
 import { WebClipperPanel } from "../notes/WebClipperPanel";
-import { NoteOrganizationPanel } from "../notes/NoteOrganizationPanel";
 import { NoteLinksPanel } from "../notes/NoteLinksPanel";
 import { NoteTagPanel } from "../notes/NoteTagPanel";
 import { NoteAiActions } from "../ai/NoteAiActions";
@@ -40,6 +37,7 @@ import { runVerifiedDatabaseMutation } from "./use-database-workspace-data";
 import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
 import { useNoteMutations } from "./use-note-mutations";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
+import { NotesContextPanel } from "./NotesContextPanel";
 import { NotesDomain, type NotesDomainCallbacks, type NotesEditorState, type NotesOverviewState } from "./domains/NotesDomain";
 import { DatabaseDomain, type DatabaseDomainCallbacks, type DatabaseDomainSelection } from "./domains/DatabaseDomain";
 import { KnowledgeDomain } from "./domains/KnowledgeDomain";
@@ -1469,88 +1467,37 @@ function AuthenticatedWorkspace({
   );
 
   const contextualList = (
-    <div className="context-content">
-      <div className="context-heading">
-        <div><small>CREATE</small><h2>所有笔记</h2></div>
-        <div className="context-heading-actions">
-          <button className="secondary-create-note" type="button" aria-label="快速捕获" onClick={() => setQuickCaptureOpen(true)}>
-            <span>快速捕获</span>
-          </button>
-          <button className="secondary-create-note context-entry-action" type="button" aria-label="创建内容" onClick={(event) => openCreateCenter(event.currentTarget)}>
-            <Plus aria-hidden="true" size={15} />
-            <span>创建内容</span>
-          </button>
-          <button className="secondary-create-note context-entry-action" type="button" aria-label="个人资料与设置（笔记列表）" onClick={() => openAccountSubsection("personal")}>
-            <UserRound aria-hidden="true" size={15} />
-            <span>个人资料</span>
-          </button>
-          <button className="primary-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
-            <Plus aria-hidden="true" size={17} />
-            <span>新建笔记</span>
-          </button>
-        </div>
-      </div>
-      <NoteOrganizationPanel
-        folders={folders}
-        selectedFolderId={noteFolderFilter}
-        loading={folderLoading}
-        disabled={logoutPending || !workspaceId}
-        onSelectFolder={selectFolderFilter}
-        onCreateFolder={createFolder}
-      />
-      <nav className="note-list-views" aria-label="笔记视图">
-        {([["all", "全部"], ["inbox", "收件箱"], ["today", "今日"], ["favorites", "收藏"], ["pinned", "置顶"], ["archived", "归档"], ["trash", "回收站"]] as const).map(([view, label]) => (
-          <button key={view} type="button" aria-pressed={noteListView === view} className={noteListView === view ? "active" : ""} onClick={() => changeNoteListView(view)}>{label}</button>
-        ))}
-      </nav>
-      {noteListView === "today" ? (
-        <button className="primary-create-note daily-note-action" type="button" disabled={logoutPending || dailyNoteOpening} onClick={openTodayNote}>
-          {dailyNoteOpening ? "正在打开今日笔记…" : "打开今日笔记"}
-        </button>
-      ) : null}
-      {noteListView === "today" && activePane === "context" && noteError ? <p className="database-operation-error" role="alert">{noteError}</p> : null}
-      <div className="search-field" role="search">
-        <Search aria-hidden="true" size={15} />
-        <input aria-label="搜索笔记" placeholder="搜索标题、正文、标签…" maxLength={500} value={noteSearchQuery} onChange={(event) => setNoteSearchQuery(event.target.value)} />
-        {noteSearchQuery ? (
-          <button className="search-clear-button" type="button" aria-label="清除笔记搜索" title="清除搜索" onClick={() => setNoteSearchQuery("")}>
-            <X aria-hidden="true" size={15} />
-          </button>
-        ) : null}
-      </div>
-      {noteSearchQuery.trim() !== debouncedNoteSearchQuery ? <p className="search-status" role="status" aria-live="polite">正在搜索…</p> : null}
-      {notesLoading ? <p className="database-empty" role="status">正在加载笔记…</p> : null}
-      {notesError ? <p className="database-operation-error" role="alert">{notesError}</p> : null}
-      {!notesLoading && visibleNotes.length === 0 ? (
-        <div className="note-empty-state">
-          {debouncedNoteSearchQuery ? (
-            <>
-              <p className="database-empty">没有找到匹配笔记。</p>
-              <button className="secondary-create-note" type="button" onClick={() => setNoteSearchQuery("")}>清除搜索</button>
-            </>
-          ) : (
-            <>
-              <p className="database-empty">暂无笔记，开始记录你的想法。</p>
-              <button className="primary-create-note note-empty-create-note" type="button" aria-label="新建笔记" disabled={logoutPending} onClick={startNewNote}>
-                <Plus aria-hidden="true" size={17} />
-                <span>新建笔记</span>
-              </button>
-            </>
-          )}
-        </div>
-      ) : null}
-      {visibleNotes.map((note) => (
-        <button key={note.id} className={note.id === selectedNoteId ? "note-row selected" : "note-row"} type="button" onClick={() => selectNote(note)}>
-          <strong>{note.title.trim() || "未命名笔记"}</strong><span>{new Date(note.updated_at).toLocaleDateString()}</span>
-          <p>{note.content.trim().slice(0, 80) || "空白笔记"}</p>
-        </button>
-      ))}
-      {notesNextCursor ? (
-        <button className="secondary-create-note note-list-load-more" type="button" disabled={notesPageLoading} onClick={loadMoreNotes}>
-          {notesPageLoading ? "正在加载更多笔记…" : "加载更多笔记"}
-        </button>
-      ) : null}
-    </div>
+    <NotesContextPanel
+      workspaceId={workspaceId}
+      folders={folders}
+      selectedFolderId={noteFolderFilter}
+      folderLoading={folderLoading}
+      disabled={logoutPending}
+      noteListView={noteListView}
+      onQuickCapture={() => setQuickCaptureOpen(true)}
+      onOpenCreateCenter={openCreateCenter}
+      onOpenProfile={() => openAccountSubsection("personal")}
+      onStartNewNote={startNewNote}
+      onSelectFolder={selectFolderFilter}
+      onCreateFolder={createFolder}
+      onChangeNoteListView={changeNoteListView}
+      dailyNoteOpening={dailyNoteOpening}
+      onOpenTodayNote={openTodayNote}
+      noteError={noteError}
+      activePane={activePane}
+      noteSearchQuery={noteSearchQuery}
+      debouncedNoteSearchQuery={debouncedNoteSearchQuery}
+      onSearchChange={setNoteSearchQuery}
+      onClearSearch={() => setNoteSearchQuery("")}
+      notesLoading={notesLoading}
+      notesError={notesError}
+      visibleNotes={visibleNotes}
+      selectedNoteId={selectedNoteId}
+      onSelectNote={selectNote}
+      notesNextCursor={notesNextCursor}
+      notesPageLoading={notesPageLoading}
+      onLoadMoreNotes={loadMoreNotes}
+    />
   );
 
   const databaseContextualList = (
