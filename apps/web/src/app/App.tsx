@@ -40,6 +40,7 @@ import { useAttachmentUpload } from "./use-attachment-upload";
 import { useNoteRevisionRestore } from "./use-note-revision-restore";
 import { useDailyNoteOpen } from "./use-daily-note-open";
 import { useNoteMutations } from "./use-note-mutations";
+import { useNoteConflictResolution } from "./use-note-conflict-resolution";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
 import { NotesContextPanel } from "./NotesContextPanel";
 import { DatabaseContextPanel } from "./DatabaseContextPanel";
@@ -497,6 +498,28 @@ function AuthenticatedWorkspace({
     selectListView: selectMutationListView,
     completeStatusChange,
     completePermanentDelete,
+  });
+  const {
+    resolve: resolveNoteConflict,
+  } = useNoteConflictResolution({
+    draftController,
+    workspaceId,
+    role,
+    logoutPending,
+    activeDraftId,
+    activeDraftIdRef,
+    conflict: noteConflict,
+    setConflict: setNoteConflict,
+    setResolving: setResolvingConflict,
+    setServerRetryVersion,
+    setDraftTitle,
+    setDraftContent,
+    setDraftFolderId,
+    setDraftDatabaseId,
+    draftTitleRef,
+    draftContentRef,
+    setNoteMessage,
+    setNoteError,
   });
   const {
     restoringRevision,
@@ -965,47 +988,6 @@ function AuthenticatedWorkspace({
     draftTitleRef.current = result.note.title;
     draftContentRef.current = result.note.content;
     setNoteMessage("已保存");
-  };
-
-  const resolveNoteConflict = async (resolution: "local" | "server") => {
-    const conflict = noteConflict;
-    if (
-      resolvingConflict
-      || !conflict
-      || !workspaceId
-      || conflict.workspaceId !== workspaceId
-      || activeDraftIdRef.current !== conflict.entityId
-    ) return;
-
-    setResolvingConflict(true);
-    setNoteError(null);
-    try {
-      const resolved = await draftController.resolveConflict(
-        workspaceId,
-        conflict.entityId,
-        resolution,
-        conflict.server,
-      );
-      if (!resolved) throw new Error("Conflict draft is no longer available");
-
-      setNoteConflict(null);
-      if (resolution === "local") {
-        setNoteMessage("已保留本地版本，正在基于最新服务器版本重试同步。");
-        setServerRetryVersion((version) => version + 1);
-      } else {
-        setDraftTitle(conflict.server.title);
-        setDraftContent(conflict.server.content);
-        setDraftFolderId(conflict.server.folder_id);
-        setDraftDatabaseId(conflict.server.database_id);
-        draftTitleRef.current = conflict.server.title;
-        draftContentRef.current = conflict.server.content;
-        setNoteMessage("已采用服务器版本，本地草稿已更新，可继续编辑。");
-      }
-    } catch {
-      setNoteError("冲突恢复失败，本地和服务器版本均已保留。请重试。");
-    } finally {
-      setResolvingConflict(false);
-    }
   };
 
   useLayoutEffect(() => {

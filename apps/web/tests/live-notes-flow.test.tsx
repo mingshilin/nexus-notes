@@ -14,6 +14,16 @@ const session = {
 
 const findNoteTitle = () => screen.findByRole("textbox", { name: "笔记标题" }, { timeout: 3000 });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  return {
+    promise: new Promise<T>((next, fail) => { resolve = next; reject = fail; }),
+    resolve,
+    reject,
+  };
+}
+
 type NoteApiOptions = {
   createNote?: (input: { path: string; method?: string; body?: Record<string, unknown> }) => Promise<unknown>;
   listDatabases?: () => Promise<unknown>;
@@ -1054,6 +1064,50 @@ describe("live note workspace flow", () => {
     expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("远程正文");
     expect(updateNote).toHaveBeenCalledTimes(1);
     expect((await localStore.getDraft("ws-1", "local-adopt"))?.pending_patch).toBeUndefined();
+  });
+
+  it("does not let a late conflict resolution overwrite a newly selected note", async () => {
+    const base = { ...serverNoteForFlow(), id: "server-late-conflict", title: "旧服务器标题", content: "旧服务器正文", revision: 1 };
+    const latest = { ...base, title: "远程标题", content: "远程正文", revision: 2, updated_at: "2026-08-24T00:00:02.000Z" };
+    const localDraft: LocalDraft = {
+      workspace_id: "ws-1",
+      entity_id: "local-late-conflict",
+      title: "本地标题",
+      content: "本地正文",
+      updated_at: "2026-08-24T00:00:03.000Z",
+      draft_generation: 1,
+      next_patch_generation: 2,
+      server_note: base,
+      server_note_id: base.id,
+      server_revision: base.revision,
+      server_updated_at: base.updated_at,
+      pending_patch: { key: "local-late-conflict:patch:1", generation: 1, base_revision: 1, title: "本地标题", content: "本地正文", source: "manual" },
+    };
+    const other = { ...serverNoteForFlow(), id: "other-note", title: "另一篇笔记", content: "另一篇正文" };
+    const resolution = deferred<LocalDraft | null>();
+    const resolveConflict = vi.spyOn(NoteDraftController.prototype, "resolveConflict").mockImplementation(() => resolution.promise);
+    const apiClient = createApiClient({
+      listNotes: async () => ({ items: [other], next_cursor: null }),
+      updateNote: async () => {
+        throw new ApiClientError({ code: "NOTE_CONFLICT", message: "conflict", retryable: false, details: { server_note: latest } }, 409);
+      },
+    });
+    renderWorkspaceWithStore(apiClient, createDraftStore([localDraft]));
+
+    expect(await screen.findByRole("region", { name: "笔记冲突恢复" })).toHaveTextContent("远程正文");
+    fireEvent.click(screen.getByRole("button", { name: "采用服务器版本" }));
+    await waitFor(() => expect(resolveConflict).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /另一篇笔记/ }));
+    expect(await findNoteTitle()).toHaveValue("另一篇笔记");
+
+    await act(async () => {
+      resolution.resolve(localDraft);
+      await resolution.promise;
+    });
+
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("另一篇笔记"));
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("另一篇正文");
   });
 
   it("recovers only after note loading settles and never overwrites a selected server note", async () => {

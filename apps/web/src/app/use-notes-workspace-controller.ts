@@ -5,6 +5,7 @@ import type { KnowledgeClient } from "../data/knowledge-client";
 import type { NotesClient } from "../data/notes-client";
 import { NoteDraftController, type DraftSyncResult, type NoteDraftStore } from "../notes/note-draft-controller";
 import { useNoteInspectorData } from "./use-note-inspector-data";
+import type { NoteConflictState } from "./use-note-conflict-resolution";
 import { useNotesListData, type NoteListView } from "./use-notes-list-data";
 
 export interface UseNotesWorkspaceControllerParams {
@@ -44,12 +45,7 @@ export function useNotesWorkspaceController({
   const [draftDatabaseId, setDraftDatabaseId] = useState<string | null>(null);
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
   const [serverRetryVersion, setServerRetryVersion] = useState(0);
-  const [noteConflict, setNoteConflict] = useState<{
-    workspaceId: string;
-    entityId: string;
-    local: { title: string; content: string };
-    server: Note;
-  } | null>(null);
+  const [noteConflict, setNoteConflict] = useState<NoteConflictState | null>(null);
   const [resolvingConflict, setResolvingConflict] = useState(false);
   const [pendingReconcile, setPendingReconcile] = useState<{
     workspaceId: string;
