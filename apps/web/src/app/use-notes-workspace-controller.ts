@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
-import type { Note } from "@nexus/contracts";
+import type { Note, WorkspaceRoleContract } from "@nexus/contracts";
 import type { DatabaseClient } from "../data/database-client";
 import type { KnowledgeClient } from "../data/knowledge-client";
 import type { NotesClient } from "../data/notes-client";
@@ -12,6 +12,8 @@ export interface UseNotesWorkspaceControllerParams {
   knowledgeClient: KnowledgeClient;
   databaseClient: DatabaseClient;
   workspaceId?: string;
+  role?: WorkspaceRoleContract;
+  logoutPending?: boolean;
   refreshVersion: number;
   localStore: NoteDraftStore;
   draftControllerRef: MutableRefObject<NoteDraftController | null>;
@@ -22,6 +24,8 @@ export function useNotesWorkspaceController({
   knowledgeClient,
   databaseClient,
   workspaceId,
+  role = "editor",
+  logoutPending = false,
   refreshVersion,
   localStore,
   draftControllerRef,
@@ -86,6 +90,8 @@ export function useNotesWorkspaceController({
     workspaceId,
     selectedNoteId,
     creatingNote,
+    role,
+    logoutPending,
   });
   const selectedNote = notesData.notes.find((note) => note.id === selectedNoteId) ?? null;
 

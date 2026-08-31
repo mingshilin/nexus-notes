@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import type { Database, Folder, NoteLink, NoteRevision, Tag } from "@nexus/contracts";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import type { Database, Folder, NoteLink, NoteRevision, Tag, WorkspaceRoleContract } from "@nexus/contracts";
 
 import type { DatabaseClient } from "../data/database-client";
 import type { KnowledgeClient } from "../data/knowledge-client";
@@ -18,6 +18,8 @@ export interface UseNoteInspectorDataParams {
   workspaceId?: string;
   selectedNoteId: string | null;
   creatingNote: boolean;
+  role?: WorkspaceRoleContract;
+  logoutPending?: boolean;
 }
 
 export interface NoteInspectorDataState {
@@ -66,6 +68,8 @@ export function useNoteInspectorData({
   workspaceId,
   selectedNoteId,
   creatingNote,
+  role = "editor",
+  logoutPending = false,
 }: UseNoteInspectorDataParams): NoteInspectorDataState {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderLoading, setFolderLoading] = useState(Boolean(workspaceId));
@@ -90,21 +94,66 @@ export function useNoteInspectorData({
   const globalControllersRef = useRef(new Set<AbortController>());
   const noteControllersRef = useRef(new Set<AbortController>());
   const historyControllerRef = useRef<AbortController | null>(null);
-  const scopeRef = useRef({ workspaceId, selectedNoteId, creatingNote, knowledgeClient, databaseClient, notesClient });
+  const createTagMutationControllerRef = useRef<AbortController | null>(null);
+  const tagMutationControllerRef = useRef<AbortController | null>(null);
+  const linksMutationControllerRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const scopeRef = useRef({ workspaceId, selectedNoteId, creatingNote, role, logoutPending, knowledgeClient, databaseClient, notesClient });
   const noteTagIdsRef = useRef(noteTagIds);
   const tagMutationRef = useRef(new Map<string, number>());
   const linksMutationRef = useRef(new Map<string, number>());
-  scopeRef.current = { workspaceId, selectedNoteId, creatingNote, knowledgeClient, databaseClient, notesClient };
   noteTagIdsRef.current = noteTagIds;
+
+  useLayoutEffect(() => {
+    const nextScope = { workspaceId, selectedNoteId, creatingNote, role, logoutPending, knowledgeClient, databaseClient, notesClient };
+    const current = scopeRef.current;
+    const mutationScopeChanged = current.workspaceId !== nextScope.workspaceId
+      || current.selectedNoteId !== nextScope.selectedNoteId
+      || current.creatingNote !== nextScope.creatingNote
+      || current.role !== nextScope.role
+      || current.logoutPending !== nextScope.logoutPending
+      || current.knowledgeClient !== nextScope.knowledgeClient;
+    if (mutationScopeChanged) {
+      tagMutationControllerRef.current?.abort();
+      linksMutationControllerRef.current?.abort();
+      createTagMutationControllerRef.current?.abort();
+      createTagMutationControllerRef.current = null;
+      tagMutationControllerRef.current = null;
+      linksMutationControllerRef.current = null;
+      tagMutationRef.current.clear();
+      linksMutationRef.current.clear();
+      if (mountedRef.current) {
+        setNoteTagsSaving(false);
+        setNoteLinksSaving(false);
+      }
+    }
+    scopeRef.current = nextScope;
+  }, [creatingNote, databaseClient, knowledgeClient, logoutPending, notesClient, role, selectedNoteId, workspaceId]);
 
   const abortRequests = useCallback(() => {
     globalControllersRef.current.forEach((controller) => controller.abort());
     noteControllersRef.current.forEach((controller) => controller.abort());
     historyControllerRef.current?.abort();
+    createTagMutationControllerRef.current?.abort();
+    tagMutationControllerRef.current?.abort();
+    linksMutationControllerRef.current?.abort();
     globalControllersRef.current.clear();
     noteControllersRef.current.clear();
     historyControllerRef.current = null;
+    createTagMutationControllerRef.current = null;
+    tagMutationControllerRef.current = null;
+    linksMutationControllerRef.current = null;
+    tagMutationRef.current.clear();
+    linksMutationRef.current.clear();
   }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortRequests();
+    };
+  }, [abortRequests]);
 
   useEffect(() => {
     abortRequests();
@@ -269,51 +318,112 @@ export function useNoteInspectorData({
     setHistoryError(null);
   }, []);
 
+  const canMutateSelectedNote = useCallback((noteId: string) => {
+    const scope = scopeRef.current;
+    return mountedRef.current
+      && Boolean(workspaceId)
+      && role !== "viewer"
+      && !logoutPending
+      && !creatingNote
+      && selectedNoteId === noteId
+      && scope.knowledgeClient === knowledgeClient
+      && scope.workspaceId === workspaceId
+      && scope.role === role
+      && !scope.logoutPending
+      && !scope.creatingNote
+      && scope.selectedNoteId === noteId;
+  }, [creatingNote, knowledgeClient, logoutPending, role, selectedNoteId, workspaceId]);
+
   const createTag = useCallback(async (name: string) => {
-    const created = await knowledgeClient.createTag({ name, color: "" });
-    if (scopeRef.current.workspaceId === workspaceId) setTags((current) => current.some((tag) => tag.id === created.id) ? current : [...current, created].sort((left, right) => left.name.localeCompare(right.name)));
-    return created;
-  }, [knowledgeClient, workspaceId]);
+    const noteId = selectedNoteId;
+    if (!noteId || !canMutateSelectedNote(noteId) || createTagMutationControllerRef.current) {
+      throw new DOMException("Tag creation scope changed", "AbortError");
+    }
+    const controller = new AbortController();
+    createTagMutationControllerRef.current = controller;
+    try {
+      const created = await knowledgeClient.createTag({ name, color: "" }, controller.signal);
+      if (controller.signal.aborted || !canMutateSelectedNote(noteId)) {
+        throw new DOMException("Tag creation scope changed", "AbortError");
+      }
+      if (mountedRef.current) setTags((current) => current.some((tag) => tag.id === created.id) ? current : [...current, created].sort((left, right) => left.name.localeCompare(right.name)));
+      return created;
+    } catch (error: unknown) {
+      if (controller.signal.aborted || !canMutateSelectedNote(noteId)) {
+        throw new DOMException("Tag creation scope changed", "AbortError");
+      }
+      throw error;
+    } finally {
+      if (createTagMutationControllerRef.current === controller) createTagMutationControllerRef.current = null;
+    }
+  }, [canMutateSelectedNote, knowledgeClient, selectedNoteId]);
 
   const saveTags = useCallback(async (noteId: string, tagIds: string[]) => {
+    if (!canMutateSelectedNote(noteId) || tagMutationControllerRef.current) return false;
+    const controller = new AbortController();
+    tagMutationControllerRef.current = controller;
     const sequence = (tagMutationRef.current.get(noteId) ?? 0) + 1;
     tagMutationRef.current.set(noteId, sequence);
     const previous = noteTagIdsRef.current[noteId] ?? [];
-    setNoteTagIds((current) => ({ ...current, [noteId]: [...tagIds] }));
-    setNoteTagsSaving(true);
-    setNoteTagsError(null);
+    if (mountedRef.current) {
+      setNoteTagIds((current) => ({ ...current, [noteId]: [...tagIds] }));
+      setNoteTagsSaving(true);
+      setNoteTagsError(null);
+    }
     try {
-      await knowledgeClient.setNoteTags(noteId, { tag_ids: tagIds });
-      return true;
-    } catch {
-      if (tagMutationRef.current.get(noteId) === sequence) {
+      await knowledgeClient.setNoteTags(noteId, { tag_ids: tagIds }, controller.signal);
+      return mountedRef.current
+        && tagMutationRef.current.get(noteId) === sequence
+        && tagMutationControllerRef.current === controller
+        && !controller.signal.aborted
+        && canMutateSelectedNote(noteId);
+    } catch (error: unknown) {
+      if (mountedRef.current && tagMutationRef.current.get(noteId) === sequence && tagMutationControllerRef.current === controller) {
         setNoteTagIds((current) => ({ ...current, [noteId]: previous }));
-        if (scopeRef.current.workspaceId === workspaceId && scopeRef.current.selectedNoteId === noteId) {
+        if (!isAborted(error, controller.signal) && canMutateSelectedNote(noteId)) {
           setNoteTagsError("标签保存失败，请重试。当前选择已恢复。");
         }
       }
       return false;
     } finally {
-      if (tagMutationRef.current.get(noteId) === sequence && scopeRef.current.workspaceId === workspaceId && scopeRef.current.selectedNoteId === noteId) setNoteTagsSaving(false);
+      const ownsController = tagMutationControllerRef.current === controller;
+      if (ownsController) {
+        tagMutationControllerRef.current = null;
+        if (mountedRef.current && tagMutationRef.current.get(noteId) === sequence && canMutateSelectedNote(noteId)) setNoteTagsSaving(false);
+      }
     }
-  }, [knowledgeClient, workspaceId]);
+  }, [canMutateSelectedNote, knowledgeClient]);
 
   const saveLinks = useCallback(async (noteId: string, noteIds: string[]) => {
+    if (!canMutateSelectedNote(noteId) || linksMutationControllerRef.current) return false;
+    const controller = new AbortController();
+    linksMutationControllerRef.current = controller;
     const sequence = (linksMutationRef.current.get(noteId) ?? 0) + 1;
     linksMutationRef.current.set(noteId, sequence);
-    setNoteLinksSaving(true);
-    setNoteLinksError(null);
+    if (mountedRef.current) {
+      setNoteLinksSaving(true);
+      setNoteLinksError(null);
+    }
     try {
-      await knowledgeClient.setNoteLinks(noteId, { target_note_ids: noteIds });
-      if (linksMutationRef.current.get(noteId) === sequence && scopeRef.current.workspaceId === workspaceId && scopeRef.current.selectedNoteId === noteId) setLinkedNoteIds([...noteIds]);
-      return true;
-    } catch {
-      if (linksMutationRef.current.get(noteId) === sequence && scopeRef.current.workspaceId === workspaceId && scopeRef.current.selectedNoteId === noteId) setNoteLinksError("笔记链接保存失败，请重试。当前选择已保留。");
+      await knowledgeClient.setNoteLinks(noteId, { target_note_ids: noteIds }, controller.signal);
+      const current = mountedRef.current
+        && linksMutationRef.current.get(noteId) === sequence
+        && linksMutationControllerRef.current === controller
+        && !controller.signal.aborted
+        && canMutateSelectedNote(noteId);
+      if (current) setLinkedNoteIds([...noteIds]);
+      return current;
+    } catch (error: unknown) {
+      if (mountedRef.current && linksMutationRef.current.get(noteId) === sequence && linksMutationControllerRef.current === controller && !isAborted(error, controller.signal) && canMutateSelectedNote(noteId)) setNoteLinksError("笔记链接保存失败，请重试。当前选择已保留。");
       return false;
     } finally {
-      if (linksMutationRef.current.get(noteId) === sequence && scopeRef.current.workspaceId === workspaceId && scopeRef.current.selectedNoteId === noteId) setNoteLinksSaving(false);
+      const ownsController = linksMutationControllerRef.current === controller;
+      if (ownsController) {
+        linksMutationControllerRef.current = null;
+        if (mountedRef.current && linksMutationRef.current.get(noteId) === sequence && canMutateSelectedNote(noteId)) setNoteLinksSaving(false);
+      }
     }
-  }, [knowledgeClient, workspaceId]);
+  }, [canMutateSelectedNote, knowledgeClient]);
 
   return {
     folders, setFolders, folderLoading, tags, setTags, noteTagIds, setNoteTagIds,

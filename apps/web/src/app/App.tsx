@@ -281,6 +281,8 @@ function AuthenticatedWorkspace({
     knowledgeClient,
     databaseClient,
     workspaceId,
+    role,
+    logoutPending,
     refreshVersion: notesRefreshVersion,
     localStore,
     draftControllerRef,
@@ -828,11 +830,12 @@ function AuthenticatedWorkspace({
   };
 
   const createNoteTag = async (name: string) => {
-    if (!workspaceId || role === "viewer") throw new Error("当前工作区没有标签编辑权限。");
+    if (logoutPending || !workspaceId || role === "viewer") throw new Error("当前工作区没有标签编辑权限。");
     setNoteTagsError(null);
     try {
       return await createInspectorTag(name);
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
       setNoteTagsError("创建标签失败，请重试。标签名称仍保留在输入框中。");
       throw error;
     }

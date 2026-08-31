@@ -116,15 +116,16 @@ export class KnowledgeClient {
     return this.listQuery<Tag>("/api/v2/tags", "tags", signal);
   }
 
-  createTag(input: CreateTagInput) {
-    return this.command<{ tag: Tag }>("/api/v2/tags", "POST", input).then(({ tag }) => tag);
+  createTag(input: CreateTagInput, signal?: AbortSignal) {
+    return this.command<{ tag: Tag }>("/api/v2/tags", "POST", input, signal).then(({ tag }) => tag);
   }
 
-  setNoteTags(noteId: string, input: SetNoteTagsInput) {
+  setNoteTags(noteId: string, input: SetNoteTagsInput, signal?: AbortSignal) {
     return this.command<{ updated: true }>(
       `/api/v2/notes/${encodeURIComponent(noteId)}/tags`,
       "PUT",
       input,
+      signal,
     );
   }
 
@@ -136,11 +137,12 @@ export class KnowledgeClient {
     );
   }
 
-  setNoteLinks(noteId: string, input: SetNoteLinksInput) {
+  setNoteLinks(noteId: string, input: SetNoteLinksInput, signal?: AbortSignal) {
     return this.command<{ updated: true }>(
       `/api/v2/notes/${encodeURIComponent(noteId)}/links`,
       "PUT",
       input,
+      signal,
     );
   }
 

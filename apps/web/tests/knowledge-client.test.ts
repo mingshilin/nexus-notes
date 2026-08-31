@@ -216,6 +216,30 @@ describe("KnowledgeClient", () => {
     expect(api.request.mock.calls[5]?.[0].body).toEqual({ attachment_ids: ["attachment-1", "attachment-2"] });
   });
 
+  it("forwards optional abort signals to note tag and link mutations", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ updated: true })) };
+    const client = new data.KnowledgeClient(api, "ws-1");
+    const controller = new AbortController();
+
+    await client.setNoteTags("note-1", { tag_ids: ["tag-1"] }, controller.signal);
+    await client.setNoteLinks("note-1", { target_note_ids: ["note-2"] }, controller.signal);
+
+    expect(api.request.mock.calls[0]?.[0].policy.signal).toBe(controller.signal);
+    expect(api.request.mock.calls[1]?.[0].policy.signal).toBe(controller.signal);
+  });
+
+  it("forwards an optional abort signal when creating a tag", async () => {
+    const data = await loadData();
+    const api = { request: vi.fn(async () => ({ tag: { id: "tag-1", name: "Tag", color: "" } })) };
+    const client = new data.KnowledgeClient(api, "ws-1");
+    const controller = new AbortController();
+
+    await client.createTag({ name: "Tag", color: "" }, controller.signal);
+
+    expect(api.request.mock.calls[0]?.[0].policy.signal).toBe(controller.signal);
+  });
+
   it("forwards optional abort signals for attachment completion and cleanup", async () => {
     const data = await loadData();
     const api = { request: vi.fn(async () => ({ attachment: { id: "attachment-1" }, deleted: true })) };
