@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "../src/app/App";
 import { ApiClientError } from "../src/data/api-client";
@@ -205,6 +205,52 @@ describe("live note workspace flow", () => {
       method: "POST",
       body: { base_revision: 2 },
     }));
+  });
+
+  it("ignores a late revision restore after the user selects another note", async () => {
+    const first = { ...serverNoteForFlow(), id: "history-note", title: "第一篇", content: "第一篇正文", revision: 2 };
+    const second = { ...serverNoteForFlow(), id: "second-note", title: "第二篇", content: "第二篇正文", revision: 1 };
+    const revision = {
+      id: "history-revision-1",
+      workspace_id: "ws-1",
+      note_id: first.id,
+      revision: 1,
+      title: "旧标题",
+      content: "旧内容",
+      source: "manual" as const,
+      created_by: "user-1",
+      created_at: "2026-08-22T00:00:00.000Z",
+    };
+    let resolveRestore!: (value: unknown) => void;
+    const pendingRestore = new Promise<unknown>((resolve) => { resolveRestore = resolve; });
+    const apiClient = createApiClient({
+      listNotes: async () => ({ items: [first, second], next_cursor: null }),
+      listRevisions: async () => ({ items: [revision] }),
+      restoreRevision: async () => pendingRestore,
+    });
+    renderWorkspace(apiClient);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^第一篇/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开版本历史" }));
+    await screen.findByText("旧标题");
+    fireEvent.click(screen.getByRole("button", { name: "恢复版本 1" }));
+    await waitFor(() => expect(apiClient.request).toHaveBeenCalledWith(expect.objectContaining({
+      path: "/api/v2/notes/history-note/revisions/1/restore",
+      method: "POST",
+    })));
+
+    fireEvent.click(screen.getByRole("button", { name: "打开笔记列表" }));
+    fireEvent.click(screen.getByRole("button", { name: /^第二篇/ }));
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("第二篇");
+
+    await act(async () => {
+      resolveRestore({ note: { ...first, title: "旧标题", content: "旧内容", revision: 3 } });
+      await pendingRestore;
+    });
+
+    expect(screen.getByRole("textbox", { name: "笔记标题" })).toHaveValue("第二篇");
+    expect(screen.getByRole("textbox", { name: "笔记内容" })).toHaveValue("第二篇正文");
   });
 
   it("switches the selected note between Markdown preview and editing without changing its content", async () => {

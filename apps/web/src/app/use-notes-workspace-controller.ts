@@ -38,7 +38,6 @@ export function useNotesWorkspaceController({
   const [editorMode, setEditorMode] = useState<"edit" | "preview">("edit");
   const [draftFolderId, setDraftFolderId] = useState<string | null>(null);
   const [draftDatabaseId, setDraftDatabaseId] = useState<string | null>(null);
-  const [restoringRevision, setRestoringRevision] = useState<number | null>(null);
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
   const [serverRetryVersion, setServerRetryVersion] = useState(0);
   const [noteConflict, setNoteConflict] = useState<{
@@ -162,8 +161,6 @@ export function useNotesWorkspaceController({
     setDraftFolderId,
     draftDatabaseId,
     setDraftDatabaseId,
-    restoringRevision,
-    setRestoringRevision,
     activeDraftId,
     setActiveDraftId,
     serverRetryVersion,

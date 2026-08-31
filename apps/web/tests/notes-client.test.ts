@@ -187,7 +187,8 @@ describe("NotesClient", () => {
     await client.get("note-1");
     await client.quickCapture({ content: "Quick thought" });
     await client.listRevisions("note-1");
-    await client.restore("note-1", 1, { base_revision: 1 });
+    const restoreController = new AbortController();
+    await client.restore("note-1", 1, { base_revision: 1 }, restoreController.signal);
 
     expect(api.request.mock.calls.map(([options]) => [options.path, options.method ?? "GET"])).toEqual([
       ["/api/v2/notes", "POST"],
@@ -197,6 +198,7 @@ describe("NotesClient", () => {
       ["/api/v2/notes/note-1/revisions/1/restore", "POST"],
     ]);
     expect(api.request.mock.calls.every(([options]) => options.headers["x-workspace-id"] === "ws-1")).toBe(true);
+    expect(api.request.mock.calls[4]?.[0].policy.signal).toBe(restoreController.signal);
   });
 
   it("sends Web Clipper captures to the dedicated endpoint with an idempotency key", async () => {

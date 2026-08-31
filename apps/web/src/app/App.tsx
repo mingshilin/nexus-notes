@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { NoteSchema } from "@nexus/contracts";
-import type { AuthSession, AuthUserSummary, DatabaseRecord, KnowledgeDiagnostic, Note, NoteRevision, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
+import type { AuthSession, AuthUserSummary, DatabaseRecord, KnowledgeDiagnostic, Note, Profile, SyncOperation, SyncOperationResult, Tag, WorkspaceMembershipSummary, WorkspaceRoleContract } from "@nexus/contracts";
 import { AuthClient, AuthGate } from "../auth";
 import { ApiClient, ApiClientError } from "../data/api-client";
 import { KnowledgeRecoveryPanel, type RecoveryDiagnostic } from "../knowledge/KnowledgeRecoveryPanel";
@@ -37,6 +37,7 @@ import { runVerifiedDatabaseMutation } from "./use-database-workspace-data";
 import { useKnowledgeRecoveryData } from "./use-knowledge-recovery-data";
 import { useKnowledgeRecoveryActions } from "./use-knowledge-recovery-actions";
 import { useAttachmentUpload } from "./use-attachment-upload";
+import { useNoteRevisionRestore } from "./use-note-revision-restore";
 import { useNoteMutations } from "./use-note-mutations";
 import { useNotesWorkspaceController } from "./use-notes-workspace-controller";
 import { NotesContextPanel } from "./NotesContextPanel";
@@ -307,8 +308,6 @@ function AuthenticatedWorkspace({
     setDraftFolderId,
     draftDatabaseId,
     setDraftDatabaseId,
-    restoringRevision,
-    setRestoringRevision,
     activeDraftId,
     setActiveDraftId,
     serverRetryVersion,
@@ -498,6 +497,20 @@ function AuthenticatedWorkspace({
     selectListView: selectMutationListView,
     completeStatusChange,
     completePermanentDelete,
+  });
+  const {
+    restoringRevision,
+    restoreRevision: restoreSelectedRevision,
+  } = useNoteRevisionRestore({
+    notesClient,
+    workspaceId,
+    role,
+    logoutPending,
+    selectedNote,
+    installNote: installMutatedNote,
+    resetHistory,
+    setHistoryError,
+    setNoteMessage,
   });
   const {
     classifyUnfiledNotes,
@@ -733,34 +746,6 @@ function AuthenticatedWorkspace({
     setSelectedCommentId(null);
     setResolvedNotificationRecord(null);
     setActivePane("canvas");
-  };
-
-  const restoreSelectedRevision = (revision: NoteRevision) => {
-    if (logoutPending || role === "viewer" || !workspaceId || !selectedNote || restoringRevision !== null) return;
-    setRestoringRevision(revision.revision);
-    setHistoryError(null);
-    void notesClient.restore(selectedNote.id, revision.revision, {
-      base_revision: selectedNote.revision,
-    }).then((saved) => {
-      installedNotesRef.current.set(saved.id, saved);
-      setNotes((current) => [saved, ...current.filter((note) => note.id !== saved.id)]);
-      setSelectedNoteId(saved.id);
-      setCreatingNote(false);
-      setDraftTitle(saved.title);
-      setDraftContent(saved.content);
-      setDraftFolderId(saved.folder_id);
-      setDraftDatabaseId(saved.database_id);
-      draftTitleRef.current = saved.title;
-      draftContentRef.current = saved.content;
-      setNoteMessage(`已恢复版本 ${revision.revision}`);
-      resetHistory();
-      setEditorMode("edit");
-    }).catch((error: unknown) => {
-      const code = error instanceof ApiClientError ? error.code : "";
-      setHistoryError(code === "NOTE_CONFLICT"
-        ? "笔记已发生变化，历史版本没有覆盖当前内容。请重新加载历史后再试。"
-        : "版本恢复失败，当前内容仍保留。请重试。");
-    }).finally(() => setRestoringRevision(null));
   };
 
   const selectFolderFilter = (folderId: string | null) => {

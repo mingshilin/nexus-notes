@@ -141,15 +141,17 @@ export class NotesClient {
     }).then(({ items }) => items);
   }
 
-  restore(noteId: string, revision: number, input: RestoreNoteInput) {
+  restore(noteId: string, revision: number, input: RestoreNoteInput, signal?: AbortSignal) {
     return this.noteCommand<Note>(
       `/api/v2/notes/${encodeURIComponent(noteId)}/revisions/${revision}/restore`,
       "POST",
       input,
+      undefined,
+      signal,
     );
   }
 
-  private noteCommand<T extends object>(path: string, method: "POST" | "PATCH" | "DELETE", body: unknown, idempotencyKey?: string) {
+  private noteCommand<T extends object>(path: string, method: "POST" | "PATCH" | "DELETE", body: unknown, idempotencyKey?: string, signal?: AbortSignal) {
     return this.client.request<{ note: T } | T>({
       path,
       method,
@@ -160,6 +162,7 @@ export class NotesClient {
         timeoutMs: 10_000,
         retry: 0,
         idempotencyKey: idempotencyKey ?? this.createId(),
+        signal,
       },
     }).then((result) => {
       this.queryCache?.invalidate({ userId: this.userId, workspaceId: this.workspaceId, domain: "notes" });
