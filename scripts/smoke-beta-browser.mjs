@@ -573,6 +573,8 @@ async function revealMobileChrome(cdp) {
   await waitFor(cdp, "(() => { const nav=document.querySelector('.mobile-bottom-nav'); return nav?.dataset.visible === 'true' && nav.getBoundingClientRect().bottom <= window.innerHeight + 1; })()", "mobile chrome reveal");
 }
 
+const mobileChromeVisibleExpression = "(() => { const nav=document.querySelector('.mobile-bottom-nav'); return nav?.dataset.visible === 'true' && nav.getBoundingClientRect().bottom <= window.innerHeight + 1; })()";
+
 export async function prepareStandaloneAuthenticatedScenario(cdp) {
   const boundary = await waitForApplicationAuthBoundary(cdp);
   if (boundary !== "authenticated") {
@@ -581,7 +583,16 @@ export async function prepareStandaloneAuthenticatedScenario(cdp) {
       gateBlocked: true,
     });
   }
-  await revealMobileChrome(cdp);
+  let consecutiveVisibleChecks = 0;
+  for (let check = 0; check < 12; check += 1) {
+    if (consecutiveVisibleChecks === 0) await revealMobileChrome(cdp);
+    await new Promise((resolveResult) => setTimeout(resolveResult, 250));
+    consecutiveVisibleChecks = await evaluate(cdp, mobileChromeVisibleExpression)
+      ? consecutiveVisibleChecks + 1
+      : 0;
+    if (consecutiveVisibleChecks >= 4) return;
+  }
+  throw new Error("Mobile navigation did not remain visible after startup focus settled");
 }
 
 async function installLostResponseFault(cdp) {

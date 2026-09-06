@@ -280,11 +280,19 @@ describe("release browser smoke modes", () => {
     const send = vi.fn()
       .mockResolvedValueOnce({ result: { value: "authenticated" } })
       .mockResolvedValueOnce({ result: { value: true } })
+      .mockResolvedValueOnce({ result: { value: true } })
+      .mockResolvedValueOnce({ result: { value: false } })
+      .mockResolvedValueOnce({ result: { value: true } })
+      .mockResolvedValueOnce({ result: { value: true } })
+      .mockResolvedValueOnce({ result: { value: true } })
+      .mockResolvedValueOnce({ result: { value: true } })
+      .mockResolvedValueOnce({ result: { value: true } })
       .mockResolvedValueOnce({ result: { value: true } });
 
     await expect(prepareStandaloneAuthenticatedScenario({ send })).resolves.toBeUndefined();
-    expect(send).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenCalledTimes(10);
     expect(send.mock.calls[1]?.[1]?.expression).toContain("document.activeElement?.blur()");
-    expect(send.mock.calls[2]?.[1]?.expression).toContain("mobile-bottom-nav");
+    expect(send.mock.calls[4]?.[1]?.expression).toContain("document.activeElement?.blur()");
+    expect(send.mock.calls[5]?.[1]?.expression).toContain("mobile-bottom-nav");
   });
 });

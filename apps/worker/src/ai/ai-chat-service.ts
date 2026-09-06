@@ -500,7 +500,7 @@ export class AiChatService {
         }
         const response = await this.fetchImpl(apiUrl, {
           method: "POST",
-          redirect: "error",
+          redirect: "manual",
           headers: {
             accept: "application/json",
             authorization: `Bearer ${apiKey}`,

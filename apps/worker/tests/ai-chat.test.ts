@@ -63,6 +63,7 @@ describe("AI chat proxy", () => {
   it("sends the configured model and secret only from the Worker", async () => {
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       expect(init?.headers).toEqual(expect.objectContaining({ authorization: "Bearer server-only-key" }));
+      expect(init?.redirect).toBe("manual");
       const body = JSON.parse(String(init?.body));
       expect(body).toMatchObject({
         model: "beta-model",
