@@ -123,6 +123,93 @@ describe("AI chat proxy", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  it("rejects an oversized provider message before proposing or executing its tool call", async () => {
+    const proposeActions = vi.fn(async () => [{
+      action_id: "action-oversized",
+      tool: "create_note" as const,
+      summary: "创建笔记待确认",
+      input: { title: "Unsafe", content: "Body" },
+      requires_confirmation: false,
+      expires_at: "2099-01-01T00:00:00.000Z",
+    }]);
+    const executeActions = vi.fn(async () => []);
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: "x".repeat(8_001),
+        tool_calls: [{ id: "call-oversized", type: "function", function: {
+          name: "create_note", arguments: JSON.stringify({ title: "Unsafe", content: "Body" }),
+        } }],
+      } }] })),
+    });
+
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "创建" }] },
+      new AbortController().signal,
+      { proposeActions, executeActions },
+    )).rejects.toMatchObject<Partial<AiChatServiceError>>({ code: "AI_PROVIDER_INVALID_RESPONSE" });
+    expect(proposeActions).not.toHaveBeenCalled();
+    expect(executeActions).not.toHaveBeenCalled();
+  });
+
+  it("rejects too many action calls before persisting proposals", async () => {
+    const proposeActions = vi.fn(async () => []);
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: "Too many actions",
+        tool_calls: Array.from({ length: 21 }, (_, index) => ({
+          id: `call-${index}`,
+          type: "function",
+          function: { name: "create_note", arguments: JSON.stringify({ title: `Note ${index}` }) },
+        })),
+      } }] })),
+    });
+
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "创建很多笔记" }] },
+      new AbortController().signal,
+      { proposeActions },
+    )).rejects.toMatchObject<Partial<AiChatServiceError>>({ code: "AI_PROVIDER_INVALID_RESPONSE" });
+    expect(proposeActions).not.toHaveBeenCalled();
+  });
+
+  it("marks provider errors unsafe for failover once proposal side effects begin", async () => {
+    const sideEffects: string[] = [];
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: "创建中",
+        tool_calls: [{ id: "call-side-effect", type: "function", function: {
+          name: "create_note", arguments: JSON.stringify({ title: "One", content: "Body" }),
+        } }],
+      } }] })),
+    });
+
+    const error = await service.chat(
+      { messages: [{ role: "user", content: "创建" }] },
+      new AbortController().signal,
+      {
+        proposeActions: vi.fn(async () => {
+          sideEffects.push("proposal-persisted");
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "late failure", 502, false);
+        }),
+      },
+    ).catch((caught) => caught);
+
+    expect(sideEffects).toEqual(["proposal-persisted"]);
+    expect(error).toMatchObject<Partial<AiChatServiceError>>({
+      code: "AI_PROVIDER_INVALID_RESPONSE",
+      safeToFailover: false,
+    });
+  });
+
   it("executes trusted safe-write proposals through the supplied action runner", async () => {
     const fetchImpl = vi.fn(async () => Response.json({
       choices: [{

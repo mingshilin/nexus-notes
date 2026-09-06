@@ -36,13 +36,15 @@ export class AiChatServiceError extends Error {
   readonly code: string;
   readonly status: number;
   readonly retryable: boolean;
+  readonly safeToFailover: boolean;
 
-  constructor(code: string, message: string, status: number, retryable: boolean) {
+  constructor(code: string, message: string, status: number, retryable: boolean, safeToFailover = true) {
     super(message);
     this.name = "AiChatServiceError";
     this.code = code;
     this.status = status;
     this.retryable = retryable;
+    this.safeToFailover = safeToFailover;
   }
 }
 
@@ -470,6 +472,7 @@ export class AiChatService {
       timedOut = true;
       controller.abort();
     }, this.timeoutMs);
+    let actionSideEffectsStarted = false;
 
     try {
       const readEnabled = Boolean(options.readTools && options.readContext);
@@ -536,9 +539,16 @@ export class AiChatService {
         } catch {
           throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned invalid JSON", 502, false);
         }
+        const rawProviderMessage = providerMessage(payload);
+        if (rawProviderMessage && rawProviderMessage.length > 8_000) {
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider message exceeded the bounded size", 502, false);
+        }
         const toolCalls = providerToolCalls(payload, allowedTools);
         if (toolCalls === null) {
           throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned invalid tool calls", 502, false);
+        }
+        if (toolCalls.length > 20) {
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider exceeded the tool call limit", 502, false);
         }
 
         const readCalls = toolCalls.filter((call) => AiReadToolNameSchema.safeParse(call.name).success);
@@ -604,6 +614,7 @@ export class AiChatService {
           if (!options.proposeActions) {
             throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned tool calls without a proposal handler", 502, false);
           }
+          actionSideEffectsStarted = true;
           try {
             proposals = await options.proposeActions(actionCalls.map(({ name, arguments: toolArguments }) => ({ name, arguments: toolArguments })));
           } catch (error) {
@@ -630,7 +641,7 @@ export class AiChatService {
         const hasIncompleteAction = actionResults.some((result) => result.status !== "executed");
         const message = hasIncompleteAction
           ? toolResultMessage(actionResults)
-          : providerMessage(payload)
+          : rawProviderMessage
           ?? (proposals.length > 0
             ? toolFallbackMessage(proposals.length)
             : actionResults.length > 0 ? toolResultMessage(actionResults) : null);
@@ -652,9 +663,15 @@ export class AiChatService {
       throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider exceeded the read tool round limit", 502, false);
     } catch (error) {
       if (signal.aborted) throw error;
-      if (timedOut) throw new AiChatServiceError("AI_PROVIDER_TIMEOUT", "AI provider timed out", 504, true);
-      if (error instanceof AiChatServiceError) throw error;
+      if (timedOut) throw new AiChatServiceError("AI_PROVIDER_TIMEOUT", "AI provider timed out", 504, true, !actionSideEffectsStarted);
+      if (error instanceof AiChatServiceError) {
+        if (!actionSideEffectsStarted || !error.safeToFailover) throw error;
+        throw new AiChatServiceError(error.code, error.message, error.status, error.retryable, false);
+      }
       if (error instanceof AiReadToolError) throw error;
+      if (actionSideEffectsStarted) {
+        throw new AiChatServiceError("AI_ACTION_EXECUTION_FAILED", "A trusted AI action could not be completed", 502, true, false);
+      }
       throw new AiChatServiceError("AI_PROVIDER_UNAVAILABLE", "AI provider is unavailable", 502, true);
     } finally {
       clearTimeout(timeout);
