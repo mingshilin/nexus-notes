@@ -11,10 +11,12 @@ import {
   buildSafeClickPointExpression,
   enterKeyboardViewport,
   parseArgs,
+  prepareStandaloneAuthenticatedScenario,
   pressKey,
   restoreMobileGeometry,
   runAuthenticated,
   seedAuthenticatedSession,
+  waitForApplicationAuthBoundary,
 } from "../../scripts/smoke-beta-browser.mjs";
 
 describe("release browser smoke modes", () => {
@@ -258,5 +260,31 @@ describe("release browser smoke modes", () => {
       mobile: true,
     });
     expect(send).toHaveBeenNthCalledWith(4, "Emulation.setVisibleSize", { width: 390, height: 844 });
+  });
+
+  it("waits for React authentication bootstrap before standalone browser scenarios start", async () => {
+    const send = vi.fn()
+      .mockResolvedValueOnce({ result: { value: false } })
+      .mockResolvedValueOnce({ result: { value: "authenticated" } });
+
+    await expect(waitForApplicationAuthBoundary({ send }, 1_000)).resolves.toBe("authenticated");
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenLastCalledWith("Runtime.evaluate", expect.objectContaining({
+      expression: expect.stringContaining("aria-label='账户'"),
+      awaitPromise: true,
+      returnByValue: true,
+    }));
+  });
+
+  it("reveals mobile navigation before a standalone authenticated scenario navigates", async () => {
+    const send = vi.fn()
+      .mockResolvedValueOnce({ result: { value: "authenticated" } })
+      .mockResolvedValueOnce({ result: { value: true } })
+      .mockResolvedValueOnce({ result: { value: true } });
+
+    await expect(prepareStandaloneAuthenticatedScenario({ send })).resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send.mock.calls[1]?.[1]?.expression).toContain("document.activeElement?.blur()");
+    expect(send.mock.calls[2]?.[1]?.expression).toContain("mobile-bottom-nav");
   });
 });

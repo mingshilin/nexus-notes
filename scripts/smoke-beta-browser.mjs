@@ -292,6 +292,19 @@ async function waitFor(cdp, expression, label, timeoutMs = 15_000) {
   throw new Error(label + " timed out");
 }
 
+export function waitForApplicationAuthBoundary(cdp, timeoutMs = 30_000) {
+  return waitFor(
+    cdp,
+    `(() => {
+      if (document.querySelector("button[aria-label='账户']")) return "authenticated";
+      if (document.querySelector("[aria-label='账户认证']")) return "unauthenticated";
+      return false;
+    })()`,
+    "application authentication boundary",
+    timeoutMs,
+  );
+}
+
 async function waitForNode(predicate, label, timeoutMs = 15_000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -560,6 +573,17 @@ async function revealMobileChrome(cdp) {
   await waitFor(cdp, "(() => { const nav=document.querySelector('.mobile-bottom-nav'); return nav?.dataset.visible === 'true' && nav.getBoundingClientRect().bottom <= window.innerHeight + 1; })()", "mobile chrome reveal");
 }
 
+export async function prepareStandaloneAuthenticatedScenario(cdp) {
+  const boundary = await waitForApplicationAuthBoundary(cdp);
+  if (boundary !== "authenticated") {
+    throw Object.assign(new Error("An authenticated browser profile is required"), {
+      code: "AUTHENTICATED_PROFILE_REQUIRED",
+      gateBlocked: true,
+    });
+  }
+  await revealMobileChrome(cdp);
+}
+
 async function installLostResponseFault(cdp) {
   const state = { responseFailed: false, faultedRequest: null, error: null };
   const removeListener = cdp.on("Fetch.requestPaused", async (event) => {
@@ -643,13 +667,7 @@ export async function runPublicShell(cdp) {
 }
 
 export async function runNavigationPerformanceScenario(cdp) {
-  const authenticated = await evaluate(cdp, "Boolean(document.querySelector(\"button[aria-label='账户']\"))");
-  if (!authenticated) {
-    throw Object.assign(new Error("An authenticated browser profile is required for navigation performance"), {
-      code: "AUTHENTICATED_PROFILE_REQUIRED",
-      gateBlocked: true,
-    });
-  }
+  await prepareStandaloneAuthenticatedScenario(cdp);
   const destinations = [
     ["数据库", "databases"],
     ["知识整理", "knowledge"],
@@ -692,13 +710,7 @@ export async function runNavigationPerformanceScenario(cdp) {
 }
 
 export async function runAiAssistantScenario(cdp) {
-  const authenticated = await evaluate(cdp, "Boolean(document.querySelector(\"button[aria-label='账户']\"))");
-  if (!authenticated) {
-    throw Object.assign(new Error("An authenticated browser profile is required for the AI assistant flow"), {
-      code: "AUTHENTICATED_PROFILE_REQUIRED",
-      gateBlocked: true,
-    });
-  }
+  await prepareStandaloneAuthenticatedScenario(cdp);
   await getByRole(cdp, "button", "AI 助手").click();
   await getByRole(cdp, "heading", "AI 助手").waitFor();
   const unavailable = await evaluate(cdp, `(() => [...document.querySelectorAll('[role="status"]')].some((node) => /当前不可用|尚未配置/u.test(node.textContent || '')))()`);
@@ -997,6 +1009,7 @@ export async function startBrowserSession(url, options = {}) {
     await cdp.send("Runtime.enable");
     await cdp.send("Network.enable");
     await cdp.send("Emulation.setDeviceMetricsOverride", MOBILE_LAYOUT_METRICS);
+    await waitForApplicationAuthBoundary(cdp);
     return {
       cdp,
       debugPort,

@@ -207,6 +207,8 @@ function AuthenticatedWorkspace({
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [activePane, setActivePane] = useState<"context" | "canvas">("canvas");
   const { activeDomain, requestedDomain, domainPending, navigate: navigateWorkspaceDomain } = useWorkspaceNavigation("notes");
+  const requestedDomainRef = useRef(requestedDomain);
+  requestedDomainRef.current = requestedDomain;
   const [accountSubsection, setAccountSubsection] = useState<AccountSubsection>("overview");
   const workspaceClients = useWorkspaceClients(apiClient, workspaceId ?? "", user.id);
   const collaborationClient = workspaceClients.collaboration;
@@ -1118,7 +1120,7 @@ function AuthenticatedWorkspace({
       setDraftContent(draft.content);
       setNoteMessage(null);
       setNoteError("已恢复本地草稿，服务器同步失败时可重试。");
-      transitionToDomain("notes");
+      if (requestedDomainRef.current === "notes") transitionToDomain("notes");
     }).catch(() => {
       if (!cancelled) setNotesError("本地草稿恢复失败。你仍可以尝试新建笔记。");
     });

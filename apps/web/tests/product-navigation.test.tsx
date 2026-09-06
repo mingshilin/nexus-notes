@@ -410,6 +410,34 @@ describe("ProductNavigation", () => {
 });
 
 describe("App product navigation", () => {
+  it("does not let late local draft recovery override a newer domain navigation", async () => {
+    const recovery = deferred<LocalDraft[]>();
+    const localStore = {
+      ...draftStore(),
+      listDrafts: vi.fn(async () => recovery.promise),
+    };
+    render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} localStore={localStore as any} turnstileSiteKey="test" />);
+
+    const navigation = await screen.findByRole("navigation", { name: "主导航" });
+    await waitFor(() => expect(localStore.listDrafts).toHaveBeenCalledWith("ws-1"));
+    fireEvent.click(within(navigation).getByRole("button", { name: "AI 助手" }));
+    expect(await screen.findByRole("heading", { name: "AI 助手" })).toBeInTheDocument();
+
+    await act(async () => {
+      recovery.resolve([{
+        workspace_id: "ws-1",
+        entity_id: "late-local-draft",
+        title: "Late draft",
+        content: "Recovered after navigation",
+        updated_at: "2026-09-06T00:00:00.000Z",
+      }]);
+      await recovery.promise;
+    });
+
+    expect(screen.getByRole("heading", { name: "AI 助手" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "笔记标题" })).not.toBeInTheDocument();
+  });
+
   it("opens the command palette with Ctrl+K and navigates through a searched action", async () => {
     render(<App authClient={{ session: vi.fn(async () => authenticatedSession()) } as any} apiClient={appApiClient() as any} localStore={draftStore() as any} turnstileSiteKey="test" />);
 
