@@ -498,25 +498,35 @@ export class AiChatService {
         if (new TextEncoder().encode(serializedProviderPayload).byteLength > MAX_PROVIDER_REQUEST_BYTES) {
           throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider request exceeded the bounded size", 502, false);
         }
-        const response = await this.fetchImpl(apiUrl, {
-          method: "POST",
-          redirect: "manual",
-          headers: {
-            accept: "application/json",
-            authorization: `Bearer ${apiKey}`,
-            "content-type": "application/json",
-          },
-          body: serializedProviderPayload,
-          signal: controller.signal,
-        });
-        if (!response.ok) {
+        let response: Response | undefined;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            response = await this.fetchImpl(apiUrl, {
+              method: "POST",
+              redirect: "manual",
+              headers: {
+                accept: "application/json",
+                authorization: `Bearer ${apiKey}`,
+                "content-type": "application/json",
+              },
+              body: serializedProviderPayload,
+              signal: controller.signal,
+            });
+          } catch (error) {
+            if (attempt === 0 && !controller.signal.aborted) continue;
+            throw error;
+          }
+          if (response.ok) break;
+          const retryable = response.status === 429 || response.status >= 500;
+          if (attempt === 0 && retryable && !controller.signal.aborted) continue;
           throw new AiChatServiceError(
             "AI_PROVIDER_UNAVAILABLE",
             "AI provider is unavailable",
-            response.status === 429 || response.status >= 500 ? 503 : 502,
-            response.status === 429 || response.status >= 500,
+            retryable ? 503 : 502,
+            retryable,
           );
         }
+        if (!response?.ok) throw new AiChatServiceError("AI_PROVIDER_UNAVAILABLE", "AI provider is unavailable", 503, true);
 
         const responseText = await readResponseText(response, this.maxResponseBytes, controller.signal);
 

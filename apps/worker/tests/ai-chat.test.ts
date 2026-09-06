@@ -105,6 +105,24 @@ describe("AI chat proxy", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
+  it("retries one transient provider failure before processing tool output", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(new Response("temporarily unavailable", { status: 503 }))
+      .mockResolvedValueOnce(Response.json({
+        choices: [{ message: { content: "服务已恢复。" } }],
+      }));
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl,
+    });
+
+    await expect(service.chat({ messages: [{ role: "user", content: "继续" }] }, new AbortController().signal))
+      .resolves.toEqual({ message: "服务已恢复。", model: "beta-model" });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it("executes trusted safe-write proposals through the supplied action runner", async () => {
     const fetchImpl = vi.fn(async () => Response.json({
       choices: [{
