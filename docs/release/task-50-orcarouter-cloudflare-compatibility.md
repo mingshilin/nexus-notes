@@ -34,4 +34,7 @@ draft-focus effect can otherwise hide the bar between hit testing and click.
 - Provider, trusted chat, and tool execution: `15/15` passed.
 - Release smoke startup/navigation stability: `21/21` passed.
 - Full lint passed.
-- Preview deployment and real AI action validation remain required.
+- Preview `preview-0ed66eb` returned HTTP 200 from
+  `qwen/qwen3.8-27b-free`, produced a confirmation-gated `create_note`, and
+  completed the confirmation endpoint successfully in two consecutive browser
+  runs.

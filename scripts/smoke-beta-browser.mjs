@@ -14,6 +14,7 @@ const MOBILE_LAYOUT_METRICS = { width: 390, height: 844, deviceScaleFactor: 2, m
 const MOBILE_KEYBOARD_METRICS = { ...MOBILE_LAYOUT_METRICS, height: 500 };
 export const NAVIGATION_SHELL_BUDGET_MS = 100;
 export const CACHED_PAGE_BUDGET_MS = 250;
+export const NAVIGATION_POLL_INTERVAL_MS = 16;
 
 export function buildAccessibilityAuditExpression(expectedViewport = 390) {
   const expected = Number.isFinite(Number(expectedViewport)) ? Number(expectedViewport) : 390;
@@ -282,12 +283,12 @@ async function evaluate(cdp, expression) {
   return result.result.value;
 }
 
-async function waitFor(cdp, expression, label, timeoutMs = 15_000) {
+async function waitFor(cdp, expression, label, timeoutMs = 15_000, pollIntervalMs = 200) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const value = await evaluate(cdp, expression);
     if (value) return value;
-    await new Promise((resolveResult) => setTimeout(resolveResult, 200));
+    await new Promise((resolveResult) => setTimeout(resolveResult, pollIntervalMs));
   }
   throw new Error(label + " timed out");
 }
@@ -699,13 +700,13 @@ export async function runNavigationPerformanceScenario(cdp) {
   })()`);
   for (const [label, domain] of destinations) {
     await getByRole(cdp, "button", label).click();
-    await waitFor(cdp, `document.querySelector('.workspace-domain-surface')?.dataset.domain === ${JSON.stringify(domain)}`, `${label} navigation shell`, 5_000);
+    await waitFor(cdp, `document.querySelector('.workspace-domain-surface')?.dataset.domain === ${JSON.stringify(domain)}`, `${label} navigation shell`, 5_000, NAVIGATION_POLL_INTERVAL_MS);
     const shellMs = await evaluate(cdp, "window.__nexusNavigationStart === null ? null : performance.now() - window.__nexusNavigationStart");
     if (shellMs === null) throw new Error(`${label} navigation did not expose a measurable click timestamp`);
     measurements.push({ domain, shellMs: Math.round(shellMs) });
   }
   await getByRole(cdp, "button", "数据库").click();
-  await waitFor(cdp, "document.querySelector('.workspace-domain-surface')?.dataset.domain === 'databases'", "cached database navigation shell", 5_000);
+  await waitFor(cdp, "document.querySelector('.workspace-domain-surface')?.dataset.domain === 'databases'", "cached database navigation shell", 5_000, NAVIGATION_POLL_INTERVAL_MS);
   const cachedShellMs = await evaluate(cdp, "window.__nexusNavigationStart === null ? null : performance.now() - window.__nexusNavigationStart");
   if (cachedShellMs === null) throw new Error("Cached database navigation did not expose a measurable click timestamp");
   measurements.push({ domain: "databases-cached", shellMs: Math.round(cachedShellMs) });

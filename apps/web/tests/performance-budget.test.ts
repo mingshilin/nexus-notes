@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CACHED_PAGE_BUDGET_MS,
+  NAVIGATION_POLL_INTERVAL_MS,
   NAVIGATION_SHELL_BUDGET_MS,
   buildNavigationPerformanceExpression,
   parseBrowserGateOutput,
@@ -10,6 +11,7 @@ describe("browser navigation performance budgets", () => {
   it("keeps the shell and cached-page budgets explicit", () => {
     expect(NAVIGATION_SHELL_BUDGET_MS).toBe(100);
     expect(CACHED_PAGE_BUDGET_MS).toBe(250);
+    expect(NAVIGATION_POLL_INTERVAL_MS).toBeLessThanOrEqual(16);
   });
 
   it("builds a navigation timing expression without reading page content", () => {
