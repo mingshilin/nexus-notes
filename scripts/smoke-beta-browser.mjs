@@ -744,6 +744,17 @@ export async function runAiAssistantScenario(cdp) {
     });
   }
   await getByRole(cdp, "button", "确认执行").click();
+  try {
+    await waitFor(
+      cdp,
+      "Boolean(document.querySelector('.ai-chat-action-result, .ai-action-card-confirmed')) || [...document.querySelectorAll('.ai-action-card button')].some((node) => node.disabled || /确认中/u.test(node.textContent || ''))",
+      "AI action confirmation start",
+      3_000,
+      50,
+    );
+  } catch {
+    await getByRole(cdp, "button", "确认执行").click();
+  }
   await waitFor(cdp, "Boolean(document.querySelector('.ai-chat-action-result, .ai-action-card-confirmed'))", "AI action confirmation result", 35_000);
   const result = await evaluate(cdp, `(() => ({ cards: document.querySelectorAll('.ai-action-card').length, results: document.querySelectorAll('.ai-chat-action-result').length, history: Boolean(document.querySelector('.ai-action-history-list')) }))()`);
   return { proposal, result, confirmation: true };

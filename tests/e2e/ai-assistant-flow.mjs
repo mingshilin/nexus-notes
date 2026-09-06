@@ -11,6 +11,15 @@ function emit(status, reason, evidence = {}) {
   console.log(JSON.stringify({ status, scenario: "ai-assistant", reason, url, ...evidence }));
 }
 
+function failureStage(error) {
+  const message = error instanceof Error ? error.message : "";
+  if (/authenticated browser profile|authentication boundary/iu.test(message)) return "authentication";
+  if (/AI 助手|输入问题|mobile navigation/iu.test(message)) return "navigation";
+  if (/action proposal/iu.test(message)) return "proposal";
+  if (/confirmation result/iu.test(message)) return "confirmation";
+  return "unknown";
+}
+
 if (!profile) {
   emit("BLOCKED", "AUTHENTICATED_PROFILE_UNSET", { requiredEnv: ["NEXUS_NOTES_BETA_USER_DATA_DIR"] });
   process.exitCode = 2;
@@ -41,7 +50,7 @@ if (!profile) {
         emit("BLOCKED", error.code ?? "AI_FLOW_FIXTURE_UNAVAILABLE", { profile: "external" });
         process.exitCode = 2;
       } else {
-        emit("FAIL", "AI_BROWSER_FLOW_FAILED");
+        emit("FAIL", "AI_BROWSER_FLOW_FAILED", { stage: failureStage(error) });
         process.exitCode = 1;
       }
     } finally {
