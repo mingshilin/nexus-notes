@@ -430,7 +430,7 @@ describe("AIChatPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
     const confirmButtons = await screen.findAllByRole("button", { name: "确认执行" });
-    expect(confirmButtons[0]).toHaveFocus();
+    await waitFor(() => expect(confirmButtons[0]).toHaveFocus());
     expect(screen.getByText("发送项目更新邮件")).toBeInTheDocument();
     expect(screen.getByText("创建复盘笔记")).toBeInTheDocument();
 
