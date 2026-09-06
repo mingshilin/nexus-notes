@@ -981,6 +981,7 @@ button { color: inherit; }
   .editor-copy { width: min(calc(100% - 34px), 720px); padding-top: 46px; }
   .note-editor-copy { width: min(calc(100% - 34px), 900px); padding-top: 24px; padding-bottom: 56px; }
   .note-editor-copy .note-editor-surface-body > textarea { min-height: max(55dvh, 360px); }
+  .adaptive-workbench[data-mode="mobile"][data-zoomed="true"] .note-editor-copy .note-editor-surface-body > textarea { min-height: min(42dvh, 360px); }
   .editor-copy h1 { font-size: 38px; }
   .product-domain-page { width: min(calc(100% - 34px), 720px); padding-top: 46px; }
   .ai-chat-heading { gap: 12px; }
