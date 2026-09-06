@@ -49,7 +49,7 @@ import { createObservability, type ObservabilityLogger, type ObservabilityAnalyt
 import { D1ProfileRepository } from "./profile/d1-profile-repository";
 import { ProfileAvatarStore } from "./profile/profile-avatar-store";
 import { ProfileService } from "./profile/profile-service";
-import { AiChatService } from "./ai/ai-chat-service";
+import { AiChatService, AiChatServiceError } from "./ai/ai-chat-service";
 import { AiEmailOutboxRepository } from "./ai/ai-email-outbox-repository";
 import { AiEmailOutboxDispatcher } from "./ai/ai-email-outbox-dispatcher";
 import { AiEmailConsumer } from "./ai/ai-email-consumer";
@@ -407,9 +407,7 @@ function createOcrExtractor(env: BetaWorkerEnv) {
 function createAiChatService(env: BetaWorkerEnv) {
   const aiEnabled = env.AI_ENABLED?.trim().toLowerCase() === "true";
   const externalConfigured = Boolean(env.AI_CHAT_API_URL?.trim() && env.AI_CHAT_API_KEY?.trim() && env.AI_CHAT_MODEL?.trim());
-  const workersAiModel = externalConfigured
-    ? env.AI_CHAT_MODEL!.trim()
-    : "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+  const workersAiModel = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
   const workersAiFetch: typeof fetch | undefined = typeof env.AI?.run === "function"
     ? async (_input, init) => {
       const request = JSON.parse(String(init?.body ?? "{}")) as {
@@ -445,15 +443,18 @@ function createAiChatService(env: BetaWorkerEnv) {
       });
     }
     : undefined;
+  const workersAiFallback = workersAiFetch
+    ? {
+      apiUrl: "https://workers-ai.binding.invalid/v1/chat/completions",
+      apiKey: "workers-ai-binding",
+      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      fetchImpl: workersAiFetch,
+    }
+    : null;
   const fallback = externalConfigured
     ? { apiUrl: env.AI_CHAT_API_URL, apiKey: env.AI_CHAT_API_KEY, model: env.AI_CHAT_MODEL }
-    : workersAiFetch
-      ? {
-        apiUrl: "https://workers-ai.binding.invalid/v1/chat/completions",
-        apiKey: "workers-ai-binding",
-        model: workersAiModel,
-        fetchImpl: workersAiFetch,
-      }
+    : workersAiFallback
+      ? { ...workersAiFallback, model: workersAiModel }
       : { apiUrl: env.AI_CHAT_API_URL, apiKey: env.AI_CHAT_API_KEY, model: env.AI_CHAT_MODEL };
   const personal = env.USER_SECRETS_ENCRYPTION_KEY
     ? new UserAiConfigService(
@@ -527,7 +528,40 @@ function createAiChatService(env: BetaWorkerEnv) {
     ) {
       const resolved = await resolveProvider(userId);
       if (!resolved) throw new ConfigurationError("AI service is disabled");
-      return new AiChatService(resolved).chat(input, signal, options);
+      const run = (provider: ConstructorParameters<typeof AiChatService>[0]) => new AiChatService(provider).chat(input, signal, options);
+      const canFallback = (error: unknown) => error instanceof AiChatServiceError
+        && ["AI_NOT_CONFIGURED", "AI_PROVIDER_UNAVAILABLE", "AI_PROVIDER_TIMEOUT", "AI_PROVIDER_INVALID_RESPONSE"].includes(error.code);
+      let providerError: unknown;
+      try {
+        return await run(resolved);
+      } catch (error) {
+        if (!canFallback(error)) throw error;
+        providerError = error;
+      }
+
+      if (resolved.source === "personal" && aiEnabled) {
+        const sameProvider = resolved.apiUrl === fallback.apiUrl
+          && resolved.model === fallback.model
+          && resolved.apiKey === fallback.apiKey;
+        if (!sameProvider) {
+          try {
+            return await run(fallback);
+          } catch (error) {
+            if (!canFallback(error)) throw error;
+            providerError = error;
+          }
+        }
+      }
+
+      if (externalConfigured && workersAiFallback && resolved.apiUrl !== workersAiFallback.apiUrl) {
+        try {
+          return await run(workersAiFallback);
+        } catch (error) {
+          if (!canFallback(error)) throw error;
+          providerError = error;
+        }
+      }
+      throw providerError;
     },
   };
 }

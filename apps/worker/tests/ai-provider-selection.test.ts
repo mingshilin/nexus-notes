@@ -131,6 +131,69 @@ describe("AI provider selection", () => {
     expect(provider).toHaveBeenCalledWith("https://system.example/v1/chat/completions", expect.anything());
   });
 
+  it("falls back to Workers AI when the external system provider fails", async () => {
+    const test = await setup();
+    const provider = vi.fn(async () => new Response("temporarily unavailable", { status: 503 }));
+    const run = vi.fn(async () => ({ response: "来自备用 Workers AI" }));
+    vi.stubGlobal("fetch", provider);
+    const env = {
+      ...baseEnv,
+      AI_ENABLED: "true",
+      AI_CHAT_API_URL: "https://system.example/v1/chat/completions",
+      AI_CHAT_API_KEY: "system-key",
+      AI_CHAT_MODEL: "system-model",
+      AI: { run, toMarkdown: vi.fn() },
+    };
+
+    const chat = await createBetaWorker().fetch(request("/api/v2/ai/chat", {
+      method: "POST",
+      headers: { "x-workspace-id": "ws-1" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "你好" }] }),
+    }), { DB: test.db, ...env });
+
+    const chatBody = await chat.text();
+    expect(chat.status, chatBody).toBe(200);
+    expect(JSON.parse(chatBody)).toMatchObject({ data: { message: "来自备用 Workers AI" } });
+    expect(provider).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenCalledWith(
+      "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      expect.objectContaining({ messages: [{ role: "user", content: "你好" }], stream: false }),
+    );
+  });
+
+  it("falls back from a failing selected personal provider to the system provider", async () => {
+    const test = await setup();
+    const provider = vi.fn(async (input: string | URL | Request) => String(input).startsWith("https://personal.example")
+      ? new Response("temporarily unavailable", { status: 503 })
+      : Response.json({ choices: [{ message: { content: "来自系统 AI" } }] }));
+    vi.stubGlobal("fetch", provider);
+    const env = { ...baseEnv, AI_ENABLED: "true", AI_CHAT_API_URL: "https://system.example/v1/chat/completions", AI_CHAT_API_KEY: "system-key", AI_CHAT_MODEL: "system-model" };
+
+    await createBetaWorker().fetch(request("/api/v2/ai/config", {
+      method: "PUT",
+      body: JSON.stringify({ base_url: "https://personal.example/v1", model: "personal-model", api_key: "personal-key-123456", base_revision: null }),
+    }), { DB: test.db, ...env });
+    await createBetaWorker().fetch(request("/api/v2/ai/provider", {
+      method: "PATCH",
+      body: JSON.stringify({ source: "personal", base_revision: 1 }),
+    }), { DB: test.db, ...env });
+
+    const chat = await createBetaWorker().fetch(request("/api/v2/ai/chat", {
+      method: "POST",
+      headers: { "x-workspace-id": "ws-1" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "你好" }] }),
+    }), { DB: test.db, ...env });
+
+    const chatBody = await chat.text();
+    expect(chat.status, chatBody).toBe(200);
+    expect(JSON.parse(chatBody)).toMatchObject({ data: { message: "来自系统 AI" } });
+    expect(provider.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://personal.example/v1/chat/completions",
+      "https://personal.example/v1/chat/completions",
+      "https://system.example/v1/chat/completions",
+    ]);
+  });
+
   it("keeps provider selection isolated by user", async () => {
     const test = await setup();
     const userTwoToken = "provider-selection-user-two";
