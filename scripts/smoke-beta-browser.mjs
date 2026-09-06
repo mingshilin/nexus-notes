@@ -967,8 +967,7 @@ export async function runAuthenticated(cdp, options, evidence) {
 }
 
 async function runCleanupRecovery(cdp, debugPort, options) {
-  await evaluate(cdp, "document.activeElement?.blur(); document.body.focus(); true");
-  await revealMobileChrome(cdp);
+  await prepareStandaloneAuthenticatedScenario(cdp);
   await getByRole(cdp, "button", "账户").waitFor();
   const secondTarget = await openTarget(debugPort, options.url);
   const second = connect(secondTarget.webSocketDebuggerUrl);
