@@ -7,7 +7,13 @@ const PROVIDERS = [
   { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1" },
   { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1" },
   { id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
+  { id: "orcarouter", label: "OrcaRouter", baseUrl: "https://api.orcarouter.ai/v1" },
   { id: "siliconflow", label: "硅基流动", baseUrl: "https://api.siliconflow.cn/v1" },
+] as const;
+
+const ORCAROUTER_MODELS = [
+  { id: "deepseek/deepseek-v4-flash-free", label: "DeepSeek V4 Flash Free" },
+  { id: "qwen/qwen3.8-27b-free", label: "Qwen3.8 27B Free" },
 ] as const;
 
 interface Props {
@@ -21,6 +27,7 @@ export function AIConfigPanel({ client, status = null }: Props) {
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [providerPreset, setProviderPreset] = useState<(typeof PROVIDERS)[number]["id"]>("custom");
   const [pending, setPending] = useState<"provider" | "test" | "save" | "delete" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -44,6 +51,7 @@ export function AIConfigPanel({ client, status = null }: Props) {
       setProvider(preference);
       setBaseUrl(next.base_url ?? "");
       setModel(next.model ?? "");
+      setProviderPreset(PROVIDERS.find((item) => item.baseUrl && next.base_url?.startsWith(item.baseUrl))?.id ?? "custom");
     }).catch(() => {
       if (!controller.signal.aborted) setError("AI 配置加载失败，请稍后重试。");
     });
@@ -181,15 +189,21 @@ export function AIConfigPanel({ client, status = null }: Props) {
       <summary>个人 AI 配置</summary>
       <p>配置跨工作区生效。API Key 仅加密保存在服务端，页面不会重新显示明文。</p>
       <label>服务商
-        <select aria-label="AI 服务商" onChange={(event) => {
+        <select aria-label="AI 服务商" value={providerPreset} onChange={(event) => {
           const preset = PROVIDERS.find((item) => item.id === event.target.value);
-          if (preset?.baseUrl) setBaseUrl(preset.baseUrl);
-        }} defaultValue="custom">
+          if (!preset) return;
+          setProviderPreset(preset.id);
+          if (preset.baseUrl) setBaseUrl(preset.baseUrl);
+          if (preset.id === "orcarouter") setModel(ORCAROUTER_MODELS[0].id);
+        }}>
           {PROVIDERS.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
         </select>
       </label>
       <label>API 地址<input aria-label="AI API 地址" type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" /></label>
       <label>模型<input aria-label="AI 模型" value={model} onChange={(event) => setModel(event.target.value)} placeholder="model-name" /></label>
+      {providerPreset === "orcarouter" ? <div className="account-actions" aria-label="OrcaRouter 模型快捷选择">
+        {ORCAROUTER_MODELS.map((item) => <button key={item.id} type="button" aria-label={`使用 ${item.label}`} aria-pressed={model === item.id} onClick={() => setModel(item.id)}>{item.label}</button>)}
+      </div> : null}
       <label>API Key<input aria-label="AI API Key" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" placeholder={summary?.key_hint ?? "输入新的 API Key"} /></label>
       {summary?.key_hint ? <p className="ai-config-key-hint">当前密钥：{summary.key_hint}</p> : null}
       <div className="account-actions">
