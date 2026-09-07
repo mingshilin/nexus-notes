@@ -85,5 +85,7 @@ AbortSignal could leave the request waiting beyond its provider deadline.
   paths. Its two test-strengthening suggestions were incorporated and the
   20-case chat suite passed again.
 
-The earlier 622-test Worker result predates these runtime changes; the new
-full Worker run must be recorded separately before claiming full verification.
+The earlier 622-test Worker result predates these runtime changes. The fresh
+full Worker run on the cancellation fix passed: 97 files, 625 tests, exit 0
+(2026-09-08, 340.70 seconds). Remote CI and release acceptance remain separate
+gates; no production deployment was performed.
