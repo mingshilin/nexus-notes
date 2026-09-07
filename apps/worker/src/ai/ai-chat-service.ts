@@ -504,7 +504,7 @@ export class AiChatService {
         let response: Response | undefined;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           try {
-            response = await this.fetchImpl(apiUrl, {
+            response = await awaitWithAbort(() => this.fetchImpl(apiUrl, {
               method: "POST",
               redirect: "manual",
               headers: {
@@ -514,7 +514,7 @@ export class AiChatService {
               },
               body: serializedProviderPayload,
               signal: controller.signal,
-            });
+            }), controller.signal);
           } catch (error) {
             if (attempt === 0 && !controller.signal.aborted) continue;
             throw error;
@@ -614,6 +614,7 @@ export class AiChatService {
           if (!options.proposeActions) {
             throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned tool calls without a proposal handler", 502, false);
           }
+          controller.signal.throwIfAborted();
           actionSideEffectsStarted = true;
           try {
             proposals = await options.proposeActions(actionCalls.map(({ name, arguments: toolArguments }) => ({ name, arguments: toolArguments })));
@@ -626,6 +627,7 @@ export class AiChatService {
           if (!Array.isArray(proposals) || proposals.length !== actionCalls.length) {
             throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider returned an invalid tool call", 502, false);
           }
+          controller.signal.throwIfAborted();
           const autoProposals = proposals.filter((proposal) => !proposal.requires_confirmation);
           if (autoProposals.length > 0 && options.executeActions) {
             const executionResults = await options.executeActions(autoProposals);
@@ -662,7 +664,9 @@ export class AiChatService {
       }
       throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "AI provider exceeded the read tool round limit", 502, false);
     } catch (error) {
-      if (signal.aborted) throw error;
+      if (signal.aborted) {
+        throw new AiChatServiceError("AI_REQUEST_ABORTED", "AI request was cancelled", 499, false, false);
+      }
       if (timedOut) throw new AiChatServiceError("AI_PROVIDER_TIMEOUT", "AI provider timed out", 504, true, !actionSideEffectsStarted);
       if (error instanceof AiChatServiceError) {
         if (!actionSideEffectsStarted || !error.safeToFailover) throw error;
@@ -678,6 +682,20 @@ export class AiChatService {
       signal.removeEventListener("abort", abortFromCaller);
     }
   }
+}
+
+// Bound provider waits even when a binding ignores AbortSignal. Late results
+// settle only this promise and never resume the action-processing path.
+async function awaitWithAbort<T>(start: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve().then(() => {
+      signal.throwIfAborted();
+      return start();
+    }).then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 async function readResponseText(response: Response, maxBytes: number, signal?: AbortSignal) {

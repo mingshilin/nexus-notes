@@ -390,6 +390,57 @@ describe("AI chat proxy", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it.each(["error", "success"])("does not start further actions after caller cancellation during proposals: %s", async (outcome) => {
+    const caller = new AbortController();
+    const executeActions = vi.fn(async () => []);
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: "Created",
+        tool_calls: [{ id: "call-abort", type: "function", function: {
+          name: "create_note", arguments: JSON.stringify({ title: "Draft", content: "Body" }),
+        } }],
+      } }] })),
+    });
+    await expect(service.chat({ messages: [{ role: "user", content: "Create" }] }, caller.signal, {
+      proposeActions: async () => {
+        caller.abort();
+        if (outcome === "error") throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "Invalid", 502, false);
+        return [{ action_id: "action-abort", tool: "create_note", summary: "Draft", input: { title: "Draft", content: "Body" }, requires_confirmation: false, expires_at: "2099-08-25T01:00:00.000Z" }];
+      },
+      executeActions,
+    })).rejects.toMatchObject({ code: "AI_REQUEST_ABORTED", status: 499, retryable: false, safeToFailover: false });
+    expect(executeActions).not.toHaveBeenCalled();
+  });
+
+  it("bounds a provider that ignores abort and discards its late result", async () => {
+    let resolveProvider!: (response: Response) => void;
+    const proposeActions = vi.fn(async () => []);
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      timeoutMs: 5,
+      fetchImpl: vi.fn(() => new Promise<Response>((resolve) => { resolveProvider = resolve; })),
+    });
+    const result = service.chat({ messages: [{ role: "user", content: "Create" }] }, new AbortController().signal, { proposeActions });
+    const settled = await Promise.race([
+      result.then(() => "success", (error: unknown) => error),
+      new Promise<string>((resolve) => setTimeout(() => resolve("not bounded"), 50)),
+    ]);
+    resolveProvider(Response.json({ choices: [{ message: {
+      content: "Late",
+      tool_calls: [{ id: "call-late", type: "function", function: {
+        name: "create_note", arguments: JSON.stringify({ title: "Late", content: "Body" }),
+      } }],
+    } }] }));
+    await result.catch(() => undefined);
+    expect(settled).toMatchObject({ code: "AI_PROVIDER_TIMEOUT", safeToFailover: true });
+    expect(proposeActions).not.toHaveBeenCalled();
+  });
+
   it("converts a slow provider into a bounded retryable timeout", async () => {
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("provider did not respond")), 20);

@@ -529,7 +529,7 @@ function createAiChatService(env: BetaWorkerEnv) {
       const resolved = await resolveProvider(userId);
       if (!resolved) throw new ConfigurationError("AI service is disabled");
       const run = (provider: ConstructorParameters<typeof AiChatService>[0]) => new AiChatService(provider).chat(input, signal, options);
-      const canFallback = (error: unknown) => error instanceof AiChatServiceError
+      const canFallback = (error: unknown) => !signal.aborted && error instanceof AiChatServiceError
         && error.safeToFailover
         && ["AI_NOT_CONFIGURED", "AI_PROVIDER_UNAVAILABLE", "AI_PROVIDER_TIMEOUT", "AI_PROVIDER_INVALID_RESPONSE"].includes(error.code);
       let providerError: unknown;

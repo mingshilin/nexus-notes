@@ -62,3 +62,28 @@ gates; this local verification is not a release approval.
 The existing `v1.1.0` release must not be overwritten. Release naming, exposed
 provider credential rotation, and encrypted backup restoration evidence remain
 separate unresolved release work.
+
+## Cancellation And Deadline Follow-up
+
+Independent review reproduced three additional gaps: caller cancellation could
+bypass the unsafe-failover marker, cancellation during proposal persistence
+could still start automatic execution, and an inference binding ignoring
+AbortSignal could leave the request waiting beyond its provider deadline.
+
+- Caller cancellation now returns `AI_REQUEST_ABORTED` (499, not retryable,
+  not safe to fail over); provider selection also checks the caller signal.
+- Cancellation is checked before proposal persistence and again before starting
+  automatic execution. Already-started persistence is not rolled back or replayed.
+- An abort-aware wait bounds provider inference even when the binding ignores
+  cancellation. Late output cannot resume action processing; this does not
+  claim to cancel the provider's underlying computation.
+- Three regression cases failed before the runtime fix and passed afterward.
+  They cover cancellation with proposal error/success and late tool-call output
+  from a provider ignoring cancellation.
+- Focused AI suites passed 39 tests; lint and build passed again.
+- Independent follow-up review found no blocking issues in the changed runtime
+  paths. Its two test-strengthening suggestions were incorporated and the
+  20-case chat suite passed again.
+
+The earlier 622-test Worker result predates these runtime changes; the new
+full Worker run must be recorded separately before claiming full verification.
