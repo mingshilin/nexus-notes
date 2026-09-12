@@ -420,7 +420,7 @@ describe("AI chat tool protocol", () => {
     expect(count?.count).toBe(0);
   });
 
-  it("surfaces storage failures from proposeActions as provider unavailability", async () => {
+  it("surfaces proposal storage failures without allowing provider failover", async () => {
     const service = new AiChatService({
       apiUrl: "https://ai.example.test/v1/chat/completions",
       apiKey: "server-only-key",
@@ -450,6 +450,10 @@ describe("AI chat tool protocol", () => {
           throw new Error("database unavailable");
         }),
       },
-    )).rejects.toMatchObject({ code: "AI_PROVIDER_UNAVAILABLE" });
+    )).rejects.toMatchObject({
+      code: "AI_ACTION_EXECUTION_FAILED",
+      status: 502,
+      safeToFailover: false,
+    });
   });
 });

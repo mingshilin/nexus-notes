@@ -120,7 +120,7 @@ describe("database management center", () => {
     await waitFor(() => expect(client.previewCsv).toHaveBeenCalledWith("db-1", {
       csv: "Name\nLaunch\nBroken",
       header_property_ids: { Name: "name" },
-    }));
+    }, expect.any(AbortSignal)));
     expect(await within(drawer).findByText("第 3 行 · INVALID_FIELD_VALUE · 类型不匹配")).toBeInTheDocument();
     expect(within(drawer).getByText("Launch")).toBeInTheDocument();
   });

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountCenter } from "../src/account/AccountCenter";
+import { SecurityPanel } from "../src/account/SecurityPanel";
 import { ApiClientError } from "../src/data/api-client";
 import { ProfileClient } from "../src/data/profile-client";
 import { AdaptiveWorkbench } from "../src/layout/AdaptiveWorkbench";
@@ -140,6 +141,85 @@ describe("AccountCenter", () => {
     retrySessions.resolve([currentSession]);
     expect(await screen.findByText("当前会话")).toBeInTheDocument();
     expect(api.getProfile).toHaveBeenCalledOnce();
+  });
+
+  it("reuses the user and workspace scoped account cache when the center remounts", async () => {
+    const api = client();
+    const first = renderCenter({ client: api, cacheScope: "u1:ws-1" });
+    await waitFor(() => expect(screen.getByLabelText("昵称")).toHaveValue("用户"));
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledOnce());
+    first.unmount();
+
+    renderCenter({ client: api, cacheScope: "u1:ws-1" });
+    expect(screen.getByLabelText("昵称")).toHaveValue("用户");
+    expect(api.getProfile).toHaveBeenCalledOnce();
+    expect(api.listSessions).toHaveBeenCalledOnce();
+  });
+
+  it("derives a safe cache scope for compatibility callers that omit cacheScope", async () => {
+    const api = client();
+    const view = renderCenter({ client: api, currentUserId: "u1", activeWorkspaceId: "ws-1" });
+    await waitFor(() => expect(screen.getByLabelText("昵称")).toHaveValue("用户"));
+    view.rerender(<AccountCenter client={api} workspaces={[]} activeWorkspaceId="ws-2" currentUserId="u1" onWorkspaceChange={vi.fn()} onDeleted={vi.fn()} />);
+    await waitFor(() => expect(api.getProfile).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not keep the previous user's profile form after a scoped account switch", async () => {
+    const oldApi = client();
+    const nextProfile = { ...profile, id: "u2", display_name: "新用户" };
+    const nextProfileRequest = deferred<typeof profile>();
+    const nextApi = client({ getProfile: vi.fn(() => nextProfileRequest.promise) });
+    const view = renderCenter({ client: oldApi, currentUserId: "u1", activeWorkspaceId: "ws-1" });
+    await waitFor(() => expect(screen.getByLabelText("昵称")).toHaveValue("用户"));
+    view.rerender(<AccountCenter client={nextApi} workspaces={[]} activeWorkspaceId="ws-2" currentUserId="u2" onWorkspaceChange={vi.fn()} onDeleted={vi.fn()} />);
+    expect(screen.getByLabelText("昵称")).not.toHaveValue("用户");
+    nextProfileRequest.resolve(nextProfile);
+    await waitFor(() => expect(screen.getByLabelText("昵称")).toHaveValue("新用户"));
+  });
+
+  it("clears profile and security form state when only the client changes", async () => {
+    const oldApi = client();
+    const nextProfileRequest = deferred<typeof profile>();
+    const nextApi = client({ getProfile: vi.fn(() => nextProfileRequest.promise) });
+    const view = renderCenter({ client: oldApi, currentUserId: "u1", activeWorkspaceId: "ws-1" });
+    await waitFor(() => expect(screen.getByLabelText("昵称")).toHaveValue("用户"));
+    fireEvent.click(screen.getByRole("tab", { name: "安全" }));
+    fireEvent.change(screen.getByLabelText("新邮箱"), { target: { value: "old@example.test" } });
+    fireEvent.change(screen.getByLabelText("邮箱变更当前密码"), { target: { value: "old-secret" } });
+
+    view.rerender(<AccountCenter client={nextApi} workspaces={[]} activeWorkspaceId="ws-1" currentUserId="u1" onWorkspaceChange={vi.fn()} onDeleted={vi.fn()} initialTab="security" />);
+    expect(screen.getByLabelText("新邮箱")).toHaveValue("");
+    expect(screen.getByLabelText("邮箱变更当前密码")).toHaveValue("");
+    nextProfileRequest.resolve({ ...profile, display_name: "新用户" });
+    await waitFor(() => expect(screen.getByText("当前邮箱：u@example.test")).toBeInTheDocument());
+  });
+
+  it("ignores a stale revoke-all-sessions result after the security client changes", async () => {
+    const pending = deferred<{ revoked: number }>();
+    const oldApi = client({ revokeOtherSessions: vi.fn(() => pending.promise) });
+    const newApi = client({ revokeOtherSessions: vi.fn(async () => ({ revoked: 0 })) });
+    const onRefresh = vi.fn();
+    const props = {
+      profile,
+      sessions: [currentSession, otherSession],
+      loading: false,
+      error: null,
+      onRetry: vi.fn(),
+      onSessionsRefresh: onRefresh,
+      onSessionRevokeStart: vi.fn(),
+      onSessionRevokeFailed: vi.fn(),
+      onSessionRevoked: vi.fn(),
+      onProfileChange: vi.fn(),
+    };
+    const view = render(<SecurityPanel client={oldApi as never} {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "撤销其他全部会话" }));
+    view.rerender(<SecurityPanel client={newApi as never} {...props} />);
+    pending.resolve({ revoked: 2 });
+    await act(async () => { await pending.promise; });
+    expect(onRefresh).not.toHaveBeenCalled();
+    expect(screen.queryByText("已撤销 2 个其他会话。")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "撤销其他全部会话" })).toBeEnabled();
   });
 
   it("keeps a loaded sessions panel visible when profile loading fails and retries profile only", async () => {

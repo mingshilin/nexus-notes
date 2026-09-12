@@ -23,6 +23,8 @@ describe("AI policy contracts", () => {
       expect(AiToolRiskSchema.parse(entry.risk)).toBe(entry.risk);
     }
     expect(() => AiToolNameSchema.parse("execute_sql")).toThrow();
+    expect(() => AiToolNameSchema.parse("change_permissions")).toThrow();
+    expect(() => AiToolNameSchema.parse("delete_database")).toThrow();
     expect(AI_TOOL_CATALOG.filter((entry) => entry.risk === "safe_write").map((entry) => entry.name)).toEqual([
       "create_note", "create_reminder", "create_notification",
     ]);

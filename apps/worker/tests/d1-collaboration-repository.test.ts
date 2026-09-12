@@ -303,6 +303,40 @@ describe("D1CollaborationRepository comments and notifications", () => {
       .rejects.toMatchObject({ code: "NOTIFICATION_IDEMPOTENCY_CONFLICT", status: 409 });
   });
 
+  it("scopes notification reads and mutations to the active workspace", async () => {
+    const { db, repository } = await setup();
+    await db.batch([
+      db.prepare(
+        `INSERT INTO notifications
+         (id, workspace_id, user_id, type, payload_json, deep_link, read_at, revision, created_at, updated_at, dedupe_key)
+         VALUES ('workspace-one-notification', 'ws-1', 'user-2', 'task_assigned', '{}', '/', NULL, 1, ?, ?, 'task:one')`,
+      ).bind(now, now),
+      db.prepare(
+        `INSERT INTO notifications
+         (id, workspace_id, user_id, type, payload_json, deep_link, read_at, revision, created_at, updated_at, dedupe_key)
+         VALUES ('workspace-two-notification', 'ws-2', 'user-2', 'task_assigned', '{}', '/', NULL, 1, ?, ?, 'task:two')`,
+      ).bind(now, now),
+    ]);
+
+    expect((await repository.listNotifications(editor, { limit: 10 })).items.map((item: any) => item.id))
+      .toEqual(["workspace-one-notification"]);
+    expect((await repository.listNotifications(ownerWs2, { limit: 10 })).items.map((item: any) => item.id))
+      .toEqual(["workspace-two-notification"]);
+    expect(await repository.unreadCount(editor)).toEqual({ unread_count: 1 });
+    expect(await repository.unreadCount(ownerWs2)).toEqual({ unread_count: 1 });
+
+    await expect(repository.readNotifications(editor, {
+      notification_ids: ["workspace-two-notification"],
+      base_revisions: { "workspace-two-notification": 1 },
+    })).rejects.toMatchObject({ code: "NOTIFICATION_NOT_FOUND", status: 404 });
+
+    await repository.readAllNotifications(editor);
+    expect(await db.prepare("SELECT read_at FROM notifications WHERE id = 'workspace-one-notification'").first())
+      .toMatchObject({ read_at: expect.any(String) });
+    expect(await db.prepare("SELECT read_at FROM notifications WHERE id = 'workspace-two-notification'").first())
+      .toEqual({ read_at: null });
+  });
+
   it("requires comment parents to belong to the same workspace target", async () => {
     const { repository } = await setup();
     const parent = await repository.createComment(editor, {

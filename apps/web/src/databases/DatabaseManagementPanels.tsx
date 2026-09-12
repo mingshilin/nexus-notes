@@ -5,6 +5,7 @@ import type {
   DatabaseStats,
   FieldPermission,
 } from "@nexus/contracts";
+import { useState } from "react";
 import type { CollaborationMember } from "../data/collaboration-client";
 
 const roleLabel = {
@@ -130,10 +131,12 @@ export function DatabaseCsvManager({
   properties,
   mappings,
   preview,
+  previewError,
   disabled,
   onCsvChange,
   onMappingChange,
   onPreview,
+  onRetry,
   onImport,
   onExport,
 }: {
@@ -141,24 +144,36 @@ export function DatabaseCsvManager({
   properties: readonly DatabaseProperty[];
   mappings: Readonly<Record<string, string>>;
   preview: CsvPreview | null;
+  previewError?: string | null;
   disabled: boolean;
   onCsvChange(value: string): void;
   onMappingChange(header: string, propertyId: string): void;
   onPreview(): void;
+  onRetry?(): void;
   onImport(): void;
   onExport(): void;
 }) {
   const headers = parseCsvHeaders(csv);
   const mappingComplete = headers.length > 0 && headers.every((header) => mappings[header]);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const handleCsvChange = (value: string) => {
+    setFileError(null);
+    onCsvChange(value);
+  };
   const readFile = async (file: File | undefined) => {
     if (!file) return;
-    onCsvChange(await file.text());
+    try {
+      handleCsvChange(await file.text());
+    } catch {
+      setFileError("CSV 文件读取失败，请重新选择文件或直接粘贴内容。");
+    }
   };
   return (
     <section className="database-csv-manager" aria-label="CSV 表单">
       <h2>导入与导出</h2>
       <label>选择 CSV 文件<input aria-label="选择 CSV 文件" type="file" accept=".csv,text/csv" onChange={(event) => void readFile(event.target.files?.[0])} /></label>
-      <label>CSV 内容<textarea value={csv} onChange={(event) => onCsvChange(event.target.value)} /></label>
+      {fileError ? <p className="database-operation-error" role="alert">{fileError}</p> : null}
+      <label>CSV 内容<textarea value={csv} onChange={(event) => handleCsvChange(event.target.value)} /></label>
       {headers.length ? <fieldset className="database-csv-mapping"><legend>字段映射</legend>{headers.map((header) =>
         <label key={header}>{header}<select aria-label={`字段映射 ${header}`} value={mappings[header] ?? ""} onChange={(event) => onMappingChange(header, event.target.value)}>
           <option value="">忽略</option>
@@ -170,6 +185,10 @@ export function DatabaseCsvManager({
         <button type="button" disabled={disabled || !preview || preview.errors.length > 0} onClick={onImport}>确认导入</button>
         <button type="button" disabled={disabled || properties.length === 0} onClick={onExport}>导出当前视图 CSV</button>
       </div>
+      {previewError ? <div className="database-csv-preview-error" role="alert">
+        <p>{previewError}</p>
+        {onRetry ? <button type="button" disabled={disabled} onClick={onRetry}>重试 CSV 预览</button> : null}
+      </div> : null}
       {preview ? <section className="database-csv-preview" aria-label="CSV 预览">
         <p>共 {preview.total_rows} 行，预览 {preview.rows.length} 行。</p>
         {preview.errors.length ? <ul className="database-csv-errors">{preview.errors.map((error) =>

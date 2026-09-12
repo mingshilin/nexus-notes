@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createElement } from "react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { createElement, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ApiClientError } from "../src/data/api-client";
@@ -46,15 +46,28 @@ function collaboration(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => { resolve = nextResolve; });
+  return { promise, resolve };
+}
+
 describe("collaboration center", () => {
   it("replaces the notes placeholder, opens notifications from the unread button, and marks a deep link read", async () => {
     const { App } = await import("../src/index") as Record<string, any>;
     const authClient = { session: vi.fn(async () => ({ user: { id: "user-1", email: "ming@example.com", displayName: "Ming" }, workspaces: [{ id: "ws-1", name: "Nexus", slug: "nexus", role: "owner", revision: 1 }], active_workspace_id: "ws-1" })) };
+    const currentNote = {
+      id: "note-1", workspace_id: "ws-1", folder_id: null, database_id: null,
+      created_by: "user-1", updated_by: "user-1", title: "当前笔记", content: "正文",
+      status: "active", is_favorite: false, is_pinned: false, daily_date: null,
+      revision: 1, created_at: now, updated_at: now,
+    };
     const apiClient = { request: vi.fn(async ({ path, method }: { path: string; method?: string }) => {
       if (path.startsWith("/api/v2/attachments")) return { items: [], next_cursor: null };
       if (path.startsWith("/api/v2/knowledge/diagnostics")) return { items: [], next_cursor: null };
       if (path === "/api/v2/notifications/unread") return { unread_count: 1 };
       if (path === "/api/v2/notifications?limit=25") return { items: [notification], next_cursor: null };
+      if (path.startsWith("/api/v2/notes?")) return { items: [currentNote], next_cursor: null };
       if (path === "/api/v2/notifications/notification-1/read" && method === "POST") return { notification_ids: [notification.id], read_at: now };
       if (path === "/api/v2/members") return { items: [member] };
       if (path === "/api/v2/invitations") return { items: [invitation] };
@@ -169,11 +182,11 @@ describe("collaboration center", () => {
 
     expect(await screen.findByText("Lin")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Lin 的角色"), { target: { value: "viewer" } });
-    await waitFor(() => expect(client.updateMemberRole).toHaveBeenCalledWith("user-2", { role: "viewer", base_revision: 2 }));
+    await waitFor(() => expect(client.updateMemberRole).toHaveBeenCalledWith("user-2", { role: "viewer", base_revision: 2 }, expect.any(AbortSignal)));
     fireEvent.change(screen.getByLabelText("邀请邮箱"), { target: { value: "new@example.com" } });
     fireEvent.change(screen.getByLabelText("邀请角色"), { target: { value: "editor" } });
     fireEvent.click(screen.getByRole("button", { name: "发送邀请" }));
-    await waitFor(() => expect(client.createInvitation).toHaveBeenCalledWith({ email: "new@example.com", role: "editor", expires_in_hours: 72 }));
+    await waitFor(() => expect(client.createInvitation).toHaveBeenCalledWith({ email: "new@example.com", role: "editor", expires_in_hours: 72 }, expect.any(AbortSignal)));
     expect(await screen.findByRole("dialog", { name: "一次性邀请链接" })).toHaveTextContent("此链接仅显示一次");
     fireEvent.click(within(screen.getByRole("dialog", { name: "一次性邀请链接" })).getByRole("button", { name: "关闭" }));
 
@@ -183,7 +196,7 @@ describe("collaboration center", () => {
     fireEvent.change(screen.getByLabelText("评论内容"), { target: { value: "请 Lin 复核" } });
     fireEvent.click(screen.getByLabelText("提及 Lin"));
     fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
-    await waitFor(() => expect(client.createComment).toHaveBeenCalledWith(expect.objectContaining({ target_type: "note", target_id: "note-1", body: "请 Lin 复核", mention_user_ids: ["user-2"] })));
+    await waitFor(() => expect(client.createComment).toHaveBeenCalledWith(expect.objectContaining({ target_type: "note", target_id: "note-1", body: "请 Lin 复核", mention_user_ids: ["user-2"] }), expect.any(AbortSignal)));
   });
 
   it("creates and revokes protected shares, and renders activity/audit metadata defensively", async () => {
@@ -203,11 +216,11 @@ describe("collaboration center", () => {
     fireEvent.change(screen.getByLabelText("分享密码"), { target: { value: "password-123" } });
     fireEvent.change(screen.getByLabelText("有效小时"), { target: { value: "48" } });
     fireEvent.click(screen.getByRole("button", { name: "创建分享" }));
-    await waitFor(() => expect(client.createShare).toHaveBeenCalledWith({ entity_type: "note", entity_id: "note-2", password: "password-123", expires_in_hours: 48 }));
+    await waitFor(() => expect(client.createShare).toHaveBeenCalledWith({ entity_type: "note", entity_id: "note-2", password: "password-123", expires_in_hours: 48 }, expect.any(AbortSignal)));
     expect(await screen.findByRole("dialog", { name: "一次性分享链接" })).toHaveTextContent("此链接仅显示一次");
     fireEvent.click(within(screen.getByRole("dialog", { name: "一次性分享链接" })).getByRole("button", { name: "关闭" }));
     fireEvent.click(screen.getByRole("button", { name: "撤销分享 note-1" }));
-    await waitFor(() => expect(client.revokeShare).toHaveBeenCalledWith("share-1", 1));
+    await waitFor(() => expect(client.revokeShare).toHaveBeenCalledWith("share-1", 1, expect.any(AbortSignal)));
 
     fireEvent.click(screen.getByRole("button", { name: "活动与审计" }));
     expect(await screen.findByText("note.updated")).toBeInTheDocument();
@@ -215,6 +228,122 @@ describe("collaboration center", () => {
     expect(screen.getAllByText("[已隐藏]").length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText("raw-secret")).not.toBeInTheDocument();
     expect(screen.queryByText("raw-password")).not.toBeInTheDocument();
+  });
+
+  it("does not surface a completed share command in a different section", async () => {
+    const { CollaborationCenter } = await import("../src/index") as Record<string, any>;
+    const pendingShare = deferred<{ share: typeof share; token: string }>();
+    const client = collaboration({ createShare: vi.fn(() => pendingShare.promise) });
+    render(createElement(CollaborationCenter, {
+      client, workspaceId: "ws-1", userId: "user-1", role: "owner",
+      shareTargets: [{ type: "note", id: "note-1", label: "Public Beta 重写计划" }],
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "公开分享" }));
+    await screen.findByLabelText("分享对象");
+    fireEvent.click(screen.getByRole("button", { name: "创建分享" }));
+    fireEvent.click(screen.getByRole("button", { name: "活动与审计" }));
+    await screen.findByText("note.updated");
+
+    await act(async () => {
+      pendingShare.resolve({ share: { ...share, id: "share-after-navigation", entity_id: "note-after-navigation" }, token: "s".repeat(43) });
+      await pendingShare.promise;
+    });
+    expect(screen.queryByRole("dialog", { name: "一次性分享链接" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "公开分享" }));
+    expect(await screen.findByText("note-after-navigation")).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "一次性分享链接" })).toHaveTextContent("此链接仅显示一次");
+    fireEvent.click(within(screen.getByRole("dialog", { name: "一次性分享链接" })).getByRole("button", { name: "关闭" }));
+    fireEvent.click(screen.getByRole("button", { name: "活动与审计" }));
+    fireEvent.click(screen.getByRole("button", { name: "公开分享" }));
+    expect(screen.queryByRole("dialog", { name: "一次性分享链接" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer a data-read retry for a failed collaboration mutation", async () => {
+    const { CollaborationCenter } = await import("../src/index") as Record<string, any>;
+    const client = collaboration({ createShare: vi.fn(async () => { throw new Error("offline"); }) });
+    render(createElement(CollaborationCenter, {
+      client, workspaceId: "ws-1", userId: "user-1", role: "owner",
+      initialSection: "shares",
+      shareTargets: [{ type: "note", id: "note-1", label: "Public Beta 重写计划" }],
+    }));
+
+    await screen.findByLabelText("分享对象");
+    fireEvent.click(screen.getByRole("button", { name: "创建分享" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("协作服务暂时不可用");
+    expect(screen.queryByRole("button", { name: "重试协作数据" })).not.toBeInTheDocument();
+  });
+
+  it("invalidates the old workspace cache when an in-flight mutation is abandoned", async () => {
+    const { CollaborationCenter } = await import("../src/index") as Record<string, any>;
+    const pendingShare = deferred<{ share: typeof share; token: string }>();
+    const client = collaboration({
+      createShare: vi.fn(() => pendingShare.promise),
+      listShares: vi.fn(async () => [share]),
+    });
+    const view = render(createElement(CollaborationCenter, {
+      client, workspaceId: "ws-1", userId: "user-1", role: "owner",
+      initialSection: "shares",
+      shareTargets: [{ type: "note", id: "note-1", label: "Public Beta 重写计划" }],
+    }));
+    await screen.findByText("note-1");
+    fireEvent.click(screen.getByRole("button", { name: "创建分享" }));
+
+    view.rerender(createElement(CollaborationCenter, {
+      client, workspaceId: "ws-2", userId: "user-1", role: "owner",
+      initialSection: "shares",
+      shareTargets: [{ type: "note", id: "note-1", label: "Public Beta 重写计划" }],
+    }));
+    await waitFor(() => expect(client.listShares).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      pendingShare.resolve({ share: { ...share, id: "share-committed-after-switch" }, token: "s".repeat(43) });
+      await pendingShare.promise;
+    });
+    view.rerender(createElement(CollaborationCenter, {
+      client, workspaceId: "ws-1", userId: "user-1", role: "owner",
+      initialSection: "shares",
+      shareTargets: [{ type: "note", id: "note-1", label: "Public Beta 重写计划" }],
+    }));
+    await waitFor(() => expect(client.listShares).toHaveBeenCalledTimes(3));
+  });
+
+  it("clears tokens and invalidates pending mutations when permissions are downgraded", async () => {
+    const { CollaborationCenter } = await import("../src/index") as Record<string, any>;
+    const firstShare = { share, token: "s".repeat(43) };
+    const pendingShare = deferred<{ share: typeof share; token: string }>();
+    let pendingSignal: AbortSignal | undefined;
+    const client = collaboration({
+      listShares: vi.fn(async () => [share]),
+      createShare: vi.fn()
+        .mockResolvedValueOnce(firstShare)
+        .mockImplementationOnce((_input: unknown, signal: AbortSignal) => { pendingSignal = signal; return pendingShare.promise; }),
+    });
+    const props = {
+      client, workspaceId: "ws-1", userId: "user-1", initialSection: "shares" as const,
+      shareTargets: [{ type: "note" as const, id: "note-1", label: "Public Beta 重写计划" }],
+    };
+    const view = render(createElement(CollaborationCenter, { ...props, role: "owner" }));
+    await screen.findByText("note-1");
+    fireEvent.click(screen.getByRole("button", { name: "创建分享" }));
+    expect(await screen.findByRole("dialog", { name: "一次性分享链接" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "创建分享" }));
+    await waitFor(() => expect(client.createShare).toHaveBeenCalledTimes(2));
+
+    view.rerender(createElement(CollaborationCenter, { ...props, role: "viewer" }));
+    expect(pendingSignal?.aborted).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "一次性分享链接" })).not.toBeInTheDocument();
+    expect(await screen.findByText("查看者无法访问公开分享管理。" )).toBeInTheDocument();
+    await act(async () => {
+      pendingShare.resolve({ share: { ...share, id: "late-share" }, token: "t".repeat(43) });
+      await pendingShare.promise;
+    });
+    expect(screen.queryByRole("dialog", { name: "一次性分享链接" })).not.toBeInTheDocument();
+
+    view.rerender(createElement(CollaborationCenter, { ...props, role: "owner" }));
+    await waitFor(() => expect(client.listShares).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("dialog", { name: "一次性分享链接" })).not.toBeInTheDocument();
   });
 
   it("exposes loading/empty/permission/conflict/rate-limit/network and Presence-unavailable states", async () => {
@@ -233,6 +362,73 @@ describe("collaboration center", () => {
     expect(collaborationErrorMessage({ status: 409, code: "REVISION_CONFLICT" })).toMatch("冲突");
     expect(collaborationErrorMessage({ status: 429, code: "RATE_LIMITED" })).toMatch("频繁");
     expect(collaborationErrorMessage({ code: "NETWORK_ERROR" })).toMatch("网络");
+  });
+
+  it("keeps a failed comments read recoverable without clearing the previous thread", async () => {
+    const recovered = deferred<typeof comment[]>();
+    const client = collaboration({
+      listComments: vi.fn()
+        .mockResolvedValueOnce([comment])
+        .mockRejectedValueOnce(new Error("offline"))
+        .mockReturnValueOnce(recovered.promise),
+    });
+    const { CollaborationCenter } = await import("../src/collaboration/CollaborationCenter");
+    render(createElement(CollaborationCenter, {
+      client,
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "owner",
+      initialSection: "comments",
+      commentTargets: [{ type: "note", id: "note-1", label: "笔记" }],
+    }));
+    expect(await screen.findByText("请查看这个段落")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("协作服务暂时不可用");
+    expect(screen.getByText("请查看这个段落")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试协作数据" }));
+    recovered.resolve([comment]);
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(client.listComments).toHaveBeenCalledTimes(3);
+  });
+
+  it("ignores a stale presence callback after the collaboration client changes", async () => {
+    let oldCallbacks: { onStatus?: (status: string) => void; onParticipants?: (items: unknown[]) => void } = {};
+    const oldClient = collaboration({
+      connectPresence: vi.fn((callbacks) => {
+        oldCallbacks = callbacks;
+        return { sendPresence: vi.fn(), sendTyping: vi.fn(), disconnect: vi.fn() };
+      }),
+    });
+    const newClient = collaboration({
+      connectPresence: vi.fn((callbacks) => {
+        callbacks.onStatus?.("connected");
+        callbacks.onParticipants?.([]);
+        return { sendPresence: vi.fn(), sendTyping: vi.fn(), disconnect: vi.fn() };
+      }),
+    });
+    const { CollaborationCenter } = await import("../src/collaboration/CollaborationCenter");
+    const view = render(createElement(CollaborationCenter, { client: oldClient as never, workspaceId: "ws-1", userId: "user-1", role: "owner" }));
+    await screen.findByText("Lin");
+    view.rerender(createElement(CollaborationCenter, { client: newClient as never, workspaceId: "ws-2", userId: "user-1", role: "owner" }));
+    await act(async () => {
+      oldCallbacks.onStatus?.("connected");
+      oldCallbacks.onParticipants?.([{ user_id: "old-user", display_name: "旧空间用户", state: "active" }]);
+    });
+    expect(screen.queryByText("旧空间用户")).not.toBeInTheDocument();
+  });
+
+  it("deduplicates rapid collaboration mutations before pending state re-renders", async () => {
+    const pending = deferred<typeof member>();
+    const api = collaboration({ updateMemberRole: vi.fn(() => pending.promise) });
+    const { CollaborationCenter } = await import("../src/collaboration/CollaborationCenter");
+    render(createElement(CollaborationCenter, { client: api as never, workspaceId: "ws-1", userId: "user-1", role: "owner" }));
+    const role = await screen.findByRole("combobox", { name: "Lin 的角色" });
+    act(() => {
+      fireEvent.change(role, { target: { value: "viewer" } });
+      fireEvent.change(role, { target: { value: "editor" } });
+    });
+    expect(api.updateMemberRole).toHaveBeenCalledOnce();
+    pending.resolve({ ...member, role: "viewer" });
   });
 
   it("retains notification cursors and supports selected, single, all-read, and exact deep targets", async () => {
@@ -254,13 +450,59 @@ describe("collaboration center", () => {
 
     fireEvent.click(screen.getByLabelText("选择通知 notification-1"));
     fireEvent.click(screen.getByRole("button", { name: "将所选通知标为已读" }));
-    await waitFor(() => expect(client.readNotifications).toHaveBeenCalledWith({ notification_ids: ["notification-1"], base_revisions: { "notification-1": 1 } }));
+    await waitFor(() => expect(client.readNotifications).toHaveBeenCalledWith({ notification_ids: ["notification-1"], base_revisions: { "notification-1": 1 } }, expect.any(AbortSignal)));
     fireEvent.click(screen.getByRole("button", { name: "标记通知 notification-2 已读" }));
-    await waitFor(() => expect(client.readNotification).toHaveBeenCalledWith("notification-2", 1));
+    await waitFor(() => expect(client.readNotification).toHaveBeenCalledWith("notification-2", 1, expect.any(AbortSignal)));
     fireEvent.click(screen.getByRole("button", { name: "全部标为已读" }));
     await waitFor(() => expect(client.readAllNotifications).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getAllByRole("link", { name: "打开 mention" })[1]!);
     expect(onDeepLink).toHaveBeenCalledWith({ targetType: "database_record", targetId: "record-9", commentId: "comment-9" });
+  });
+
+  it("completes marking a notification read before a deep-link navigation closes the dialog", async () => {
+    const read = deferred<{ notification_ids: string[]; read_at: string }>();
+    const client = collaboration({ readNotification: vi.fn(() => read.promise) });
+    const onRead = vi.fn();
+    const onDeepLink = vi.fn();
+    const { NotificationCenter } = await import("../src/collaboration/NotificationCenter");
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return createElement(NotificationCenter, {
+        client: client as never,
+        open,
+        unreadCount: 1,
+        onClose: () => setOpen(false),
+        onNotificationRead: onRead,
+        onDeepLink: (target) => { onDeepLink(target); setOpen(false); },
+      });
+    }
+    render(createElement(Harness));
+    fireEvent.click(await screen.findByRole("link", { name: "打开 mention" }));
+    await waitFor(() => expect(client.readNotification).toHaveBeenCalledWith("notification-1", 1, expect.any(AbortSignal)));
+    expect(onDeepLink).not.toHaveBeenCalled();
+    read.resolve({ notification_ids: ["notification-1"], read_at: now });
+    await waitFor(() => expect(onRead).toHaveBeenCalledWith(1));
+    expect(onDeepLink).toHaveBeenCalledWith({ targetType: "note", targetId: "note-1", commentId: "comment-1" });
+  });
+
+  it("does not navigate when marking an unread deep link read fails", async () => {
+    const onDeepLink = vi.fn();
+    const client = collaboration({
+      readNotification: vi.fn(async () => { throw new Error("offline"); }),
+    });
+    const { NotificationCenter } = await import("../src/collaboration/NotificationCenter");
+    render(createElement(NotificationCenter, {
+      client: client as never,
+      open: true,
+      unreadCount: 1,
+      onClose: vi.fn(),
+      onDeepLink,
+    }));
+
+    fireEvent.click(await screen.findByRole("link", { name: "打开 mention" }));
+    await waitFor(() => expect(client.readNotification).toHaveBeenCalled());
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(onDeepLink).not.toHaveBeenCalled();
   });
 
   it("enforces the viewer request matrix while keeping readable comments and activity", async () => {

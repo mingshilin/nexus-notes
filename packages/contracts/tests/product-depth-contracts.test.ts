@@ -54,6 +54,24 @@ describe("product depth contracts", () => {
     expect(api.ReminderListQuerySchema.parse({ status: "overdue", limit: 25 })).toMatchObject({ status: "overdue", limit: 25 });
   });
 
+  it("describes bounded reminder delivery status without exposing delivery payloads", async () => {
+    const api = await contracts();
+    expect(api.ReminderDeliverySchema.parse({
+      id: "delivery-1",
+      workspace_id: "ws-1",
+      reminder_id: "reminder-1",
+      occurrence_at: "2026-08-25T01:00:00.000Z",
+      channel: "email",
+      status: "failed",
+      attempt_count: 2,
+      last_error_code: "EMAIL_RETRYABLE",
+      created_at: "2026-08-25T01:00:00.000Z",
+      updated_at: "2026-08-25T01:01:00.000Z",
+    })).toMatchObject({ status: "failed", attempt_count: 2 });
+    expect(api.ReminderDeliveryListResponseSchema.safeParse({ items: [], next_cursor: null }).success).toBe(true);
+    expect(api.RetryReminderDeliveryInputSchema.parse({})).toEqual({});
+  });
+
   it("exposes masked personal AI configuration and never accepts a key in summaries", async () => {
     const api = await contracts();
     const summary = {
@@ -90,5 +108,22 @@ describe("product depth contracts", () => {
       keys: { p256dh: "A".repeat(43), auth: "B".repeat(22) },
       device_name: "Chrome",
     }).success).toBe(false);
+  });
+
+  it("keeps external calendar connections and events bounded", async () => {
+    const api = await contracts();
+    expect(api.CalendarConnectionSummarySchema.parse({
+      id: "calendar-1", provider: "google", status: "active", last_synced_at: null, last_error_code: null,
+    })).toMatchObject({ provider: "google", status: "active" });
+    expect(api.CalendarConnectResponseSchema.parse({ provider: "outlook", status: "unconfigured" })).toEqual({
+      provider: "outlook", status: "unconfigured",
+    });
+    expect(api.CalendarEventsQuerySchema.safeParse({ from: "2026-08-01", to: "2026-08-31" }).success).toBe(true);
+    expect(api.CalendarEventSchema.safeParse({
+      id: "event-1", connection_id: "calendar-1", provider: "google", provider_event_id: "evt-1",
+      title: "Review", starts_at: "2026-08-25T01:00:00.000Z", ends_at: "2026-08-25T02:00:00.000Z",
+      timezone: "Asia/Shanghai", all_day: false, status: "confirmed", updated_at: "2026-08-25T00:00:00.000Z",
+    }).success).toBe(true);
+    expect(api.CalendarEventsQuerySchema.safeParse({ from: "2026-01-01", to: "2026-04-01" }).success).toBe(false);
   });
 });

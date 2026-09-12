@@ -9,6 +9,7 @@ import type {
   GraphResponse,
   NoteLink,
   Reminder,
+  ReminderDelivery,
   ReminderListQuery,
   SavedSearch,
   SavedSearchInput,
@@ -93,6 +94,17 @@ export interface KnowledgeRepository {
   getCalendarFeed(context: WorkspaceContext, query: CalendarFeedQuery): Promise<CalendarFeed>;
 }
 
+export interface ReminderDeliveryRepository {
+  listDeliveries(workspaceId: string, userId: string, reminderId: string, limit?: number): Promise<ReminderDelivery[]>;
+  retryDelivery(input: {
+    workspaceId: string;
+    userId: string;
+    reminderId: string;
+    deliveryId: string;
+    now: string;
+  }): Promise<ReminderDelivery | null>;
+}
+
 export class KnowledgeServiceError extends Error {
   readonly retryable = false;
 
@@ -112,10 +124,13 @@ export class KnowledgeService {
 
   constructor(
     private readonly repository: KnowledgeRepository,
-    options: { clock?: () => Date } = {},
+    options: { clock?: () => Date; deliveryRepository?: ReminderDeliveryRepository } = {},
   ) {
     this.clock = options.clock ?? (() => new Date());
+    this.deliveryRepository = options.deliveryRepository;
   }
+
+  private readonly deliveryRepository?: ReminderDeliveryRepository;
 
   async search(context: KnowledgeActorContext, request: SearchRequest) {
     const result = await this.repository.search(context.workspaceId, request);
@@ -210,6 +225,32 @@ export class KnowledgeService {
 
   getCalendarFeed(context: WorkspaceContext, query: CalendarFeedQuery) {
     return this.repository.getCalendarFeed(context, query);
+  }
+
+  async listReminderDeliveries(context: KnowledgeActorContext, reminderId: string) {
+    if (!this.deliveryRepository) {
+      throw new KnowledgeServiceError("REMINDER_DELIVERY_UNAVAILABLE", "Reminder delivery status is unavailable", 503);
+    }
+    return this.deliveryRepository.listDeliveries(context.workspaceId, context.userId, reminderId);
+  }
+
+  async retryReminderDelivery(context: KnowledgeActorContext, reminderId: string, deliveryId: string) {
+    if (!this.deliveryRepository) {
+      throw new KnowledgeServiceError("REMINDER_DELIVERY_UNAVAILABLE", "Reminder delivery retry is unavailable", 503);
+    }
+    const delivery = await this.deliveryRepository.retryDelivery({
+      workspaceId: context.workspaceId,
+      userId: context.userId,
+      reminderId,
+      deliveryId,
+      now: this.clock().toISOString(),
+    });
+    if (delivery) return delivery;
+    const existing = await this.deliveryRepository.listDeliveries(context.workspaceId, context.userId, reminderId);
+    if (!existing.some((item) => item.id === deliveryId)) {
+      throw new KnowledgeServiceError("REMINDER_DELIVERY_NOT_FOUND", "Reminder delivery not found", 404);
+    }
+    throw new KnowledgeServiceError("REMINDER_DELIVERY_NOT_RETRYABLE", "Only failed reminder deliveries can be retried", 409);
   }
 
   async createReminder(context: KnowledgeActorContext, input: CreateReminderInput) {

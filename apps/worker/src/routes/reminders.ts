@@ -16,6 +16,7 @@ interface Registry<TEnv> {
 type Service = Pick<
   KnowledgeService,
   "listReminders" | "listReminderPage" | "createReminder" | "updateReminder" | "snoozeReminder" | "deleteReminder"
+  | "listReminderDeliveries" | "retryReminderDelivery"
 >;
 
 export function registerReminderRoutes<TEnv>(registry: Registry<TEnv>, createService: (env: TEnv) => Service) {
@@ -59,5 +60,17 @@ export function registerReminderRoutes<TEnv>(registry: Registry<TEnv>, createSer
       await createService(env).deleteReminder(workspace!, params.reminderId!, body);
       return { data: { deleted: true } };
     },
+  });
+  registry.register({
+    method: "GET", path: "/api/v2/reminders/:reminderId/deliveries", auth: "workspace",
+    handler: async ({ env, workspace, params }) => ({
+      data: { items: await createService(env).listReminderDeliveries(workspace!, params.reminderId!) },
+    }),
+  });
+  registry.register({
+    method: "POST", path: "/api/v2/reminders/:reminderId/deliveries/:deliveryId/retry", auth: "workspace",
+    handler: async ({ env, workspace, params }) => ({
+      data: { delivery: await createService(env).retryReminderDelivery(workspace!, params.reminderId!, params.deliveryId!) },
+    }),
   });
 }

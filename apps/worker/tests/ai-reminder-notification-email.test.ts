@@ -158,6 +158,25 @@ describe("AI reminder, notification, and system email workflow", () => {
     );
   });
 
+  it("auto-runs trusted low-risk reminders and in-app notifications", async () => {
+    const { orchestrator, execution, createReminder } = await setup();
+    const reminder = await orchestrator.propose(context(), {
+      name: "create_reminder",
+      arguments: { title: "Follow up", remind_at: "2026-08-29T09:00:00.000Z" },
+    }, { trusted: true });
+    const notification = await orchestrator.propose(context(), {
+      name: "create_notification",
+      arguments: { title: "Notice", body_text: "Review this" },
+    }, { trusted: true });
+
+    expect(reminder.requires_confirmation).toBe(false);
+    expect(notification.requires_confirmation).toBe(false);
+    await expect(orchestrator.execute(context(), reminder.action_id, execution)).resolves.toMatchObject({ status: "executed" });
+    await expect(orchestrator.execute(context(), notification.action_id, execution)).resolves.toMatchObject({ status: "executed" });
+    expect(createReminder).toHaveBeenCalledOnce();
+    expect(execution.collaborationRepository.createNotification).toHaveBeenCalledOnce();
+  });
+
   it("requires confirmation for external mail and rechecks self/member recipients", async () => {
     const { orchestrator, execution, checkedRecipients } = await setup();
     const self = await orchestrator.propose(context(), {

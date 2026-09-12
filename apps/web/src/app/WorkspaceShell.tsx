@@ -17,6 +17,7 @@ export interface WorkspaceShellProps extends Omit<AdaptiveWorkbenchProps, "child
   activeDomain: ProductDomain;
   requestedDomain: ProductDomain;
   domainPending: boolean;
+  persistentLayer?: ReactNode;
   children: ReactNode;
 }
 
@@ -24,13 +25,14 @@ export function WorkspaceShell({
   activeDomain,
   requestedDomain,
   domainPending,
+  persistentLayer,
   children,
   ...workbenchProps
 }: WorkspaceShellProps) {
   const changingDomain = domainPending && requestedDomain !== activeDomain;
   const busy = domainPending || changingDomain;
   return (
-    <AdaptiveWorkbench {...workbenchProps}>
+    <AdaptiveWorkbench {...workbenchProps} persistentLayer={persistentLayer}>
       <div
         className="workspace-domain-surface"
         data-domain={changingDomain ? requestedDomain : activeDomain}

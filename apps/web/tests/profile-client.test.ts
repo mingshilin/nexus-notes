@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProfileClient } from "../src/data/profile-client";
+import { WorkspaceQueryCache } from "../src/data/workspace-query-cache";
 
 const profile = {
   id: "u1",
@@ -22,6 +23,36 @@ const session = {
 };
 
 describe("ProfileClient", () => {
+  it("shares five-minute account overview cache across remounted clients", async () => {
+    const overview = {
+      counts: { workspaces: 1, sessions: 1, notes: 10, databases: 2, upcoming_reminders: 3 },
+      profile_complete: true, ai_configured: false, recent_activity: [],
+    };
+    const request = vi.fn(async () => overview);
+    const queryCache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const options = { userId: "u1", workspaceId: "ws-1", queryCache };
+    const first = new ProfileClient({ request } as never, options);
+    const remounted = new ProfileClient({ request } as never, options);
+
+    await expect(first.getOverview()).resolves.toEqual(overview);
+    await expect(remounted.getOverview()).resolves.toEqual(overview);
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it("shares global profile data across workspace clients and invalidates it after a profile mutation", async () => {
+    const request = vi.fn(async (options: { method?: string }) => options.method === "PATCH" ? profile : profile);
+    const queryCache = new WorkspaceQueryCache({ now: () => 1_000 });
+    const first = new ProfileClient({ request } as never, { userId: "u1", workspaceId: "ws-1", queryCache, createId: () => "profile-update" });
+    const second = new ProfileClient({ request } as never, { userId: "u1", workspaceId: "ws-2", queryCache, createId: () => "profile-update-2" });
+
+    await first.getProfile();
+    await second.getProfile();
+    expect(request).toHaveBeenCalledOnce();
+    await first.updateProfile({ display_name: "Updated" });
+    await second.getProfile();
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
   it("maps every user-scoped operation to its path, method, and policy without workspace headers", async () => {
     const request = vi.fn(async (options: { path: string }) => {
       if (options.path === "/api/v2/profile/sessions") return { items: [session] };

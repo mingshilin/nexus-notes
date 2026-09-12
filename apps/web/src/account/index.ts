@@ -13,6 +13,7 @@ export type AiControlClientLike = Pick<ApiClient, "getAiTrustedMode" | "updateAi
 
 export interface AccountCenterProps {
   client: ProfileClientLike;
+  cacheScope?: string;
   ai?: AiControlClientLike;
   collaboration?: CollaborationClientLike;
   operations?: OperationsClientLike;

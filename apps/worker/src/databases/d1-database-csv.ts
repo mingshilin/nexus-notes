@@ -135,6 +135,7 @@ export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
     }
     const references = referenceCollector.items();
     await this.validateReferenceItems(context, references);
+    const taskDatabase = await this.taskDatabaseDescriptor(context.workspaceId, databaseId, fields.properties);
     const now = this.now();
     const records = normalizedRows.map((values) => ({
       id: this.id(), workspace_id: context.workspaceId, database_id: databaseId, note_id: null,
@@ -171,6 +172,21 @@ export class D1DatabaseCsvRepository extends DatabaseRepositoryBase {
          FROM json_each(?)`,
       ).bind(JSON.stringify(rows))),
     );
+    statements.push(...this.taskNotificationStatements({
+      context,
+      databaseId,
+      properties: fields.properties,
+      records: records.map((record) => ({
+        id: record.id,
+        revision: record.revision,
+        previousValues: {},
+        nextValues: record.values,
+        isCreate: true,
+      })),
+      now,
+      taskDatabase,
+      condition: operation ? this.operationCondition(operation.operationId) : undefined,
+    }));
     statements.push(...this.referenceGuards(context, references));
     statements.push(...this.auditStatements(context, "database.csv_imported", "database", databaseId, 1, now, operation ? this.operationCondition(operation.operationId) : undefined, undefined, {
       imported_count: records.length,

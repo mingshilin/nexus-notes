@@ -7,6 +7,7 @@ import { NotesClient } from "../data/notes-client";
 import { OperationsClient } from "../data/operations-client";
 import { ProfileClient } from "../data/profile-client";
 import type { ApiClient } from "../data/api-client";
+import { workspaceQueryCacheFor } from "../data/workspace-query-cache";
 
 export interface WorkspaceClients {
   collaboration: CollaborationClient;
@@ -20,28 +21,48 @@ export interface WorkspaceClients {
 interface WorkspaceClientScope {
   apiClient: ApiClient;
   workspaceId: string;
+  userId: string;
   clients: WorkspaceClients;
 }
 
-function createWorkspaceClients(apiClient: ApiClient, workspaceId: string): WorkspaceClients {
+export type RouteCollaborationScope = "public-share" | "invite-redemption";
+
+const routeClientRegistry = new WeakMap<object, Map<RouteCollaborationScope, CollaborationClient>>();
+
+function createWorkspaceClients(apiClient: ApiClient, workspaceId: string, userId: string): WorkspaceClients {
+  const queryCache = workspaceQueryCacheFor(apiClient);
   return {
     collaboration: new CollaborationClient(apiClient, workspaceId),
-    databases: new DatabaseClient(apiClient, workspaceId),
-    knowledge: new KnowledgeClient(apiClient, workspaceId),
-    notes: new NotesClient(apiClient, workspaceId),
+    databases: new DatabaseClient(apiClient, workspaceId, { userId, queryCache }),
+    knowledge: new KnowledgeClient(apiClient, workspaceId, { userId, queryCache }),
+    notes: new NotesClient(apiClient, workspaceId, { userId, queryCache }),
     operations: new OperationsClient(apiClient, workspaceId),
-    profile: new ProfileClient(apiClient),
+    profile: new ProfileClient(apiClient, { userId, workspaceId, queryCache }),
   };
 }
 
-export function useWorkspaceClients(apiClient: ApiClient, workspaceId: string) {
+export function useWorkspaceClients(apiClient: ApiClient, workspaceId: string, userId = "anonymous") {
   const scope = useRef<WorkspaceClientScope | null>(null);
-  if (scope.current?.apiClient !== apiClient || scope.current.workspaceId !== workspaceId) {
+  if (scope.current?.apiClient !== apiClient || scope.current.workspaceId !== workspaceId || scope.current.userId !== userId) {
     scope.current = {
       apiClient,
       workspaceId,
-      clients: createWorkspaceClients(apiClient, workspaceId),
+      userId,
+      clients: createWorkspaceClients(apiClient, workspaceId, userId),
     };
   }
   return scope.current.clients;
+}
+
+export function routeCollaborationClientFor(apiClient: ApiClient, scope: RouteCollaborationScope) {
+  let clients = routeClientRegistry.get(apiClient);
+  if (!clients) {
+    clients = new Map();
+    routeClientRegistry.set(apiClient, clients);
+  }
+  const existing = clients.get(scope);
+  if (existing) return existing;
+  const created = new CollaborationClient(apiClient, scope);
+  clients.set(scope, created);
+  return created;
 }

@@ -4,6 +4,28 @@ import { describe, expect, it, vi } from "vitest";
 import { AIConfigPanel } from "../src/ai/AIConfigPanel";
 
 describe("AI provider selection UI", () => {
+  it("offers OrcaRouter with the two verified free model presets", async () => {
+    const request = vi.fn(async (input: { path: string }) => {
+      if (input.path === "/api/v2/ai/provider") return { source: "system", revision: 1 };
+      if (input.path === "/api/v2/ai/config") return { configured: false, source: "unconfigured" };
+      throw new Error(`unexpected ${input.path}`);
+    });
+
+    render(<AIConfigPanel client={{ request } as never} />);
+
+    const provider = await screen.findByRole("combobox", { name: "AI 服务商" });
+    fireEvent.change(provider, { target: { value: "orcarouter" } });
+
+    expect(screen.getByLabelText("AI API 地址")).toHaveValue("https://api.orcarouter.ai/v1");
+    expect(screen.getByLabelText("AI 模型")).toHaveValue("deepseek/deepseek-v4-flash-free");
+
+    fireEvent.click(screen.getByRole("button", { name: "使用 Qwen3.8 27B Free" }));
+    expect(screen.getByLabelText("AI 模型")).toHaveValue("qwen/qwen3.8-27b-free");
+
+    fireEvent.click(screen.getByRole("button", { name: "使用 DeepSeek V4 Flash Free" }));
+    expect(screen.getByLabelText("AI 模型")).toHaveValue("deepseek/deepseek-v4-flash-free");
+  });
+
   it("selects system or personal AI and persists the user choice", async () => {
     const request = vi.fn(async (input: { path: string; method?: string; body?: unknown }) => {
       if (input.path === "/api/v2/ai/provider" && input.method === "PATCH") {

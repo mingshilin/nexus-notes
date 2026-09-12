@@ -24,8 +24,6 @@ const entityBoundTools: ReadonlySet<AiToolName> = new Set([
   "update_database_record",
   "apply_template",
   "complete_reminder",
-  "change_permissions",
-  "delete_database",
 ]);
 
 export class AiPolicyError extends Error {

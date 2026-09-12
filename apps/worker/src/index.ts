@@ -30,6 +30,15 @@ export { TurnstileVerifier } from "./auth/turnstile";
 export { D1NoteRepository } from "./notes/d1-note-repository";
 export { D1DatabaseRepository } from "./databases/d1-database-repository";
 export {
+  TASK_NOTIFICATION_TYPES,
+  buildTaskNotificationIntents,
+  createTaskNotificationWriter,
+  detectTaskDatabase,
+  hasTaskPropertyBlueprint,
+  prepareTaskNotificationStatements,
+  taskNotificationDedupeKey,
+} from "./databases/task-notifications";
+export {
   D1CollaborationRepository,
   CollaborationRepositoryError,
 } from "./collaboration/d1-collaboration-repository";
@@ -56,6 +65,10 @@ export { PushService } from "./push/push-service";
 export { ReminderDeliveryConsumer } from "./push/reminder-delivery-consumer";
 export { ReminderOutboxDispatcher } from "./push/reminder-outbox-dispatcher";
 export { WebPushSender } from "./push/web-push-sender";
+export { CalendarService, CalendarServiceError } from "./calendar/calendar-service";
+export { D1CalendarRepository } from "./calendar/d1-calendar-repository";
+export { createGoogleCalendarProvider, createOutlookCalendarProvider } from "./calendar/calendar-providers";
+export { registerCalendarRoutes } from "./calendar/calendar-routes";
 export { OcrConsumer } from "./attachments/ocr-consumer";
 export { OcrOutboxDispatcher } from "./attachments/ocr-outbox-dispatcher";
 export { registerAuthRoutes } from "./routes/auth";
@@ -116,4 +129,5 @@ export { D1AiConfigRepository } from "./ai/d1-ai-config-repository";
 export { UserAiConfigService, UserAiConfigError, normalizeAiEndpoint } from "./ai/user-ai-config-service";
 export { D1AccountRepository, AccountRepositoryError } from "./account/d1-account-repository";
 export { createBetaWorker } from "./bootstrap";
+export { resolveCalendarConfig } from "./bootstrap";
 export type { BetaWorkerEnv } from "./routes/health";

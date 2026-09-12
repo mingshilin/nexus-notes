@@ -1,15 +1,16 @@
 import type { Notification } from "@nexus/contracts";
 import { Bell, X } from "lucide-react";
-import { useEffect, useState } from "react";
 
 import type { CollaborationClient } from "../data/collaboration-client";
 import { ModalDialog } from "./CollaborationModal";
-import { collaborationErrorMessage, type NotificationTarget } from "./collaboration-types";
+import type { NotificationTarget } from "./collaboration-types";
+import { useNotificationCenterData } from "./use-notification-center-data";
 
 export interface NotificationCenterProps {
   client: CollaborationClient;
   open: boolean;
   unreadCount: number;
+  cacheScope?: string;
   opener?: HTMLElement | null;
   onClose(): void;
   onNotificationRead?(count: number): void;
@@ -36,86 +37,44 @@ export function notificationTargetFromDeepLink(deepLink: string, payload: Record
   };
 }
 
-export function NotificationCenter({ client, open, unreadCount, opener = null, onClose, onNotificationRead, onDeepLink }: NotificationCenterProps) {
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    setSelectedIds(new Set());
-    void client.listNotifications({ limit: 25, signal: controller.signal }).then((page) => {
-      if (controller.signal.aborted) return;
-      setNotifications(page.items);
-      setNextCursor(page.next_cursor);
-    }).catch((reason: unknown) => {
-      if (!controller.signal.aborted) setError(collaborationErrorMessage(reason));
-    }).finally(() => {
-      if (!controller.signal.aborted) setLoading(false);
-    });
-    return () => controller.abort();
-  }, [client, open]);
+export function NotificationCenter({ client, open, unreadCount, cacheScope, opener = null, onClose, onNotificationRead, onDeepLink }: NotificationCenterProps) {
+  const {
+    notifications,
+    nextCursor,
+    selectedIds,
+    loading,
+    pending,
+    error,
+    setSelectedIds,
+    markNotificationRead,
+    readSelected: readSelectedData,
+    readAll: readAllData,
+    loadMore: loadMoreData,
+  } = useNotificationCenterData({ client, open, cacheScope });
 
   if (!open) return null;
-  const markRead = (ids: string[], readAt: string) => {
-    setNotifications((current) => current.map((item) => ids.includes(item.id) ? { ...item, read_at: readAt } : item));
-    setSelectedIds((current) => new Set([...current].filter((id) => !ids.includes(id))));
-    onNotificationRead?.(ids.length);
-  };
-  const run = async (command: () => Promise<void>) => {
-    if (pending) return;
-    setPending(true);
-    setError(null);
-    try {
-      await command();
-    } catch (reason) {
-      setError(collaborationErrorMessage(reason));
-    } finally {
-      setPending(false);
-    }
+  const markSingleNotificationRead = async (notification: Notification) => {
+    const result = await markNotificationRead(notification.id, notification.revision);
+    if (result) onNotificationRead?.(result.notification_ids.length);
   };
   const openNotification = async (notification: Notification) => {
     const target = notificationTargetFromDeepLink(notification.deep_link, notification.payload);
-    if (target) onDeepLink?.(target);
-    try {
-      if (!notification.read_at) {
-        const result = await client.readNotification(notification.id, notification.revision);
-        markRead([notification.id], result.read_at);
-      }
-    } catch (reason) {
-      setError(collaborationErrorMessage(reason));
+    if (!notification.read_at) {
+      const result = await markNotificationRead(notification.id, notification.revision);
+      if (!result) return;
+      onNotificationRead?.(result.notification_ids.length);
     }
+    if (target) onDeepLink?.(target);
   };
-  const loadMore = () => run(async () => {
-    if (!nextCursor) return;
-    const page = await client.listNotifications({ cursor: nextCursor, limit: 25 });
-    setNotifications((current) => {
-      const existing = new Set(current.map((item) => item.id));
-      return [...current, ...page.items.filter((item) => !existing.has(item.id))];
-    });
-    setNextCursor(page.next_cursor);
-  });
-  const readSelected = () => run(async () => {
-    const selected = notifications.filter((item) => selectedIds.has(item.id) && !item.read_at);
-    if (!selected.length) return;
-    const result = await client.readNotifications({
-      notification_ids: selected.map((item) => item.id),
-      base_revisions: Object.fromEntries(selected.map((item) => [item.id, item.revision])),
-    });
-    markRead(result.notification_ids, result.read_at);
-  });
-  const readAll = () => run(async () => {
-    const result = await client.readAllNotifications();
-    setNotifications((current) => current.map((item) => ({ ...item, read_at: item.read_at ?? result.read_at })));
-    setSelectedIds(new Set());
-    onNotificationRead?.(result.count);
-  });
+  const loadMore = () => void loadMoreData();
+  const readSelected = async () => {
+    const count = await readSelectedData();
+    if (count) onNotificationRead?.(count);
+  };
+  const readAll = async () => {
+    const count = await readAllData();
+    if (count) onNotificationRead?.(count);
+  };
 
   return <ModalDialog
     label="通知中心"
@@ -141,10 +100,7 @@ export function NotificationCenter({ client, open, unreadCount, opener = null, o
         })} /><strong>{notification.type}</strong></label><time>{new Date(notification.created_at).toLocaleString()}</time></div>
         <div className="notification-row-actions">
           <a href={notification.deep_link} onClick={(event) => { event.preventDefault(); void openNotification(notification); }}>打开 {notification.type}</a>
-          {!notification.read_at ? <button type="button" aria-label={`标记通知 ${notification.id} 已读`} disabled={pending} onClick={() => void run(async () => {
-            const result = await client.readNotification(notification.id, notification.revision);
-            markRead(result.notification_ids, result.read_at);
-          })}>标记已读</button> : null}
+           {!notification.read_at ? <button type="button" aria-label={`标记通知 ${notification.id} 已读`} disabled={pending} onClick={() => void markSingleNotificationRead(notification)}>标记已读</button> : null}
         </div>
       </article>)}</div>
       {nextCursor ? <button className="notification-load-more" type="button" disabled={pending} onClick={() => void loadMore()}>加载更多通知</button> : null}

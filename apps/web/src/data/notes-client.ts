@@ -11,13 +11,17 @@ import type {
 } from "@nexus/contracts";
 
 import type { ApiClient } from "./api-client";
+import type { WorkspaceQueryCache } from "./workspace-query-cache";
 
 export interface NotesClientOptions {
   createId(): string;
+  userId?: string;
+  queryCache?: WorkspaceQueryCache;
 }
 
 export interface NoteCommandOptions {
   idempotencyKey?: string;
+  signal?: AbortSignal;
 }
 
 export interface NoteListOptions {
@@ -34,6 +38,8 @@ export interface NoteListOptions {
 
 export class NotesClient {
   private readonly createId: () => string;
+  private readonly userId?: string;
+  private readonly queryCache?: WorkspaceQueryCache;
 
   constructor(
     private readonly client: Pick<ApiClient, "request">,
@@ -41,6 +47,8 @@ export class NotesClient {
     options: Partial<NotesClientOptions> = {},
   ) {
     this.createId = options.createId ?? (() => crypto.randomUUID());
+    this.userId = options.userId;
+    this.queryCache = options.queryCache;
   }
 
   list(options: NoteListOptions = {}) {
@@ -65,47 +73,51 @@ export class NotesClient {
     if (options.favorite !== undefined) filterParts.push(String(options.favorite));
     if (options.pinned !== undefined) filterParts.push(String(options.pinned));
     const filterKey = filterParts.join(":");
-    return this.client.request<{ items: Note[]; next_cursor: string | null }>({
-      path: `/api/v2/notes?${params.toString()}`,
+    const path = `/api/v2/notes?${params.toString()}`;
+    const load = (signal?: AbortSignal) => this.client.request<{ items: Note[]; next_cursor: string | null }>({
+      path,
       headers: this.headers(),
       requestClass: "query",
       policy: {
         timeoutMs: 8_000,
         retry: 2,
         dedupeKey: `notes:${this.workspaceId}:${cursorKey}:${limit}${filterKey === "::" ? "" : `:${filterKey}`}`,
-        signal: options.signal,
+        signal,
       },
     });
+    return this.shared(`list:${path}`, load, options.signal) ?? load(options.signal);
   }
 
   get(noteId: string, signal?: AbortSignal) {
-    return this.client.request<{ note: Note }>({
-      path: `/api/v2/notes/${encodeURIComponent(noteId)}`,
+    const path = `/api/v2/notes/${encodeURIComponent(noteId)}`;
+    const load = (requestSignal?: AbortSignal) => this.client.request<{ note: Note }>({
+      path,
       headers: this.headers(),
       requestClass: "query",
       policy: {
         timeoutMs: 8_000,
         retry: 2,
         dedupeKey: `note:${this.workspaceId}:${noteId}`,
-        signal,
+        signal: requestSignal,
       },
     }).then(({ note }) => note);
+    return this.shared(`note:${noteId}`, load, signal) ?? load(signal);
   }
 
   create(input: CreateNoteInput, options: NoteCommandOptions = {}) {
-    return this.noteCommand<Note>("/api/v2/notes", "POST", input, options.idempotencyKey);
+    return this.noteCommand<Note>("/api/v2/notes", "POST", input, options.idempotencyKey, options.signal);
   }
 
-  openOrCreateDaily(dailyDate: DailyNoteInput["daily_date"]) {
-    return this.noteCommand<Note>("/api/v2/notes/daily", "POST", { daily_date: dailyDate });
+  openOrCreateDaily(dailyDate: DailyNoteInput["daily_date"], signal?: AbortSignal) {
+    return this.noteCommand<Note>("/api/v2/notes/daily", "POST", { daily_date: dailyDate }, undefined, signal);
   }
 
   update(noteId: string, input: UpdateNoteInput, options: NoteCommandOptions = {}) {
-    return this.noteCommand<Note>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "PATCH", input, options.idempotencyKey);
+    return this.noteCommand<Note>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "PATCH", input, options.idempotencyKey, options.signal);
   }
 
-  deletePermanently(noteId: string, input: DeleteNoteInput) {
-    return this.noteCommand<{ deleted: true }>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "DELETE", input);
+  deletePermanently(noteId: string, input: DeleteNoteInput, signal?: AbortSignal) {
+    return this.noteCommand<{ deleted: true }>(`/api/v2/notes/${encodeURIComponent(noteId)}`, "DELETE", input, undefined, signal);
   }
 
   quickCapture(input: QuickCaptureInput) {
@@ -113,7 +125,7 @@ export class NotesClient {
   }
 
   clipperCapture(input: ClipperInput, options: NoteCommandOptions = {}) {
-    return this.noteCommand<Note>("/api/v2/clipper/capture", "POST", input, options.idempotencyKey);
+    return this.noteCommand<Note>("/api/v2/clipper/capture", "POST", input, options.idempotencyKey, options.signal);
   }
 
   listRevisions(noteId: string, signal?: AbortSignal) {
@@ -130,15 +142,17 @@ export class NotesClient {
     }).then(({ items }) => items);
   }
 
-  restore(noteId: string, revision: number, input: RestoreNoteInput) {
+  restore(noteId: string, revision: number, input: RestoreNoteInput, signal?: AbortSignal) {
     return this.noteCommand<Note>(
       `/api/v2/notes/${encodeURIComponent(noteId)}/revisions/${revision}/restore`,
       "POST",
       input,
+      undefined,
+      signal,
     );
   }
 
-  private noteCommand<T extends object>(path: string, method: "POST" | "PATCH" | "DELETE", body: unknown, idempotencyKey?: string) {
+  private noteCommand<T extends object>(path: string, method: "POST" | "PATCH" | "DELETE", body: unknown, idempotencyKey?: string, signal?: AbortSignal) {
     return this.client.request<{ note: T } | T>({
       path,
       method,
@@ -149,8 +163,21 @@ export class NotesClient {
         timeoutMs: 10_000,
         retry: 0,
         idempotencyKey: idempotencyKey ?? this.createId(),
+        signal,
       },
-    }).then((result) => "note" in result ? result.note : result as T);
+    }).then((result) => {
+      this.queryCache?.invalidate({ userId: this.userId, workspaceId: this.workspaceId, domain: "notes" });
+      return "note" in result ? result.note : result as T;
+    });
+  }
+
+  private shared<T>(query: string, load: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal) {
+    if (!this.queryCache || !this.userId) return null;
+    return this.queryCache.get(
+      { userId: this.userId, workspaceId: this.workspaceId, domain: "notes", query },
+      (requestSignal) => load(requestSignal),
+      { ttlMs: 30_000, signal },
+    );
   }
 
   private headers() {

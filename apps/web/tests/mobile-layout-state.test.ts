@@ -46,4 +46,18 @@ describe("mobile layout state", () => {
     expect(calculateKeyboardInset(844, { height: 524, offsetTop: 20 })).toBe(300);
     expect(calculateKeyboardInset(844, { height: 422, offsetTop: 0, scale: 2 })).toBe(0);
   });
+
+  it("keeps navigation visible for a shrunken viewport until text entry is focused", async () => {
+    const web = await loadWeb();
+    const createState = web.createMobileChromeState as () => unknown;
+    const reduce = web.reduceMobileChrome as (state: unknown, event: unknown) => { visible: boolean };
+
+    let state = createState();
+    state = reduce(state, { type: "keyboard", inset: 344 });
+    expect(state.visible).toBe(true);
+    state = reduce(state, { type: "text-focus", focused: true });
+    expect(state.visible).toBe(false);
+    state = reduce(state, { type: "keyboard", inset: 344 });
+    expect(state.visible).toBe(false);
+  });
 });

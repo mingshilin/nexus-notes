@@ -1,5 +1,5 @@
-import type { AccountSession, Profile } from "@nexus/contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import type { Profile } from "@nexus/contracts";
+import { useEffect, useState } from "react";
 import { ProfilePanel } from "./ProfilePanel";
 import { SecurityPanel } from "./SecurityPanel";
 import { WorkspacePanel } from "./WorkspacePanel";
@@ -9,6 +9,7 @@ import { AccountOverviewPanel } from "./AccountOverviewPanel";
 import { PreferencesPanel } from "./PreferencesPanel";
 import { AIActionHistoryPanel } from "../ai/AIActionHistoryPanel";
 import { AITrustedModePanel } from "../ai/AITrustedModePanel";
+import { useAccountCenterData } from "./use-account-center-data";
 
 const tabs: Array<{ id: AccountTab; label: string }> = [
   { id: "overview", label: "总览" },
@@ -20,88 +21,23 @@ const tabs: Array<{ id: AccountTab; label: string }> = [
   { id: "ai", label: "AI 控制" },
 ];
 
-function isAbort(error: unknown, signal: AbortSignal) {
-  return signal.aborted || (error instanceof DOMException && error.name === "AbortError");
-}
-
-export function AccountCenter({ client, ai, collaboration, operations, workspaces, activeWorkspaceId, currentUserId, onWorkspaceChange, onCreateWorkspace, onPrepareDelete, onDeleteFailed, onDeleted, onProfileChange, initialTab = "profile" }: AccountCenterProps) {
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [profileLoading, setProfileLoading] = useState(true);
-  const [profileError, setProfileError] = useState<string | null>(null);
-  const [profileRetry, setProfileRetry] = useState(0);
-  const [sessions, setSessions] = useState<AccountSession[]>([]);
-  const [sessionsLoading, setSessionsLoading] = useState(true);
-  const [sessionsError, setSessionsError] = useState<string | null>(null);
-  const sessionsVersionRef = useRef(0);
-  const sessionsControllerRef = useRef<AbortController | null>(null);
-  const mountedRef = useRef(false);
+export function AccountCenter({ client, cacheScope, ai, collaboration, operations, workspaces, activeWorkspaceId, currentUserId, onWorkspaceChange, onCreateWorkspace, onPrepareDelete, onDeleteFailed, onDeleted, onProfileChange, initialTab = "profile" }: AccountCenterProps) {
+  const resolvedCacheScope = cacheScope ?? `${currentUserId ?? "anonymous"}:${activeWorkspaceId ?? ""}`;
+  const accountData = useAccountCenterData({ client: client as never, cacheScope: resolvedCacheScope });
   const [activeTab, setActiveTab] = useState<AccountTab>(initialTab);
 
   useEffect(() => setActiveTab(initialTab), [initialTab]);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; };
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let active = true;
-    setProfileLoading(true);
-    setProfileError(null);
-    void client.getProfile(controller.signal).then((next) => {
-      if (!active || controller.signal.aborted) return;
-      setProfile(next);
-    }).catch((error: unknown) => {
-      if (active && !isAbort(error, controller.signal)) setProfileError("个人资料加载失败，请重试。");
-    }).finally(() => {
-      if (active && !controller.signal.aborted) setProfileLoading(false);
-    });
-    return () => { active = false; controller.abort(); };
-  }, [client, profileRetry]);
-
-  const invalidateSessions = useCallback(() => {
-    sessionsVersionRef.current += 1;
-    sessionsControllerRef.current?.abort();
-    sessionsControllerRef.current = null;
-    if (mountedRef.current) setSessionsLoading(false);
-  }, []);
-
-  const loadSessions = useCallback(() => {
-    invalidateSessions();
-    const version = sessionsVersionRef.current;
-    const controller = new AbortController();
-    sessionsControllerRef.current = controller;
-    setSessionsLoading(true);
-    setSessionsError(null);
-    void Promise.resolve().then(() => client.listSessions(controller.signal)).then((next) => {
-      if (version !== sessionsVersionRef.current || controller.signal.aborted) return;
-      setSessions(next);
-    }).catch((error: unknown) => {
-      if (version === sessionsVersionRef.current && !isAbort(error, controller.signal)) setSessionsError("会话加载失败，请重试。");
-    }).finally(() => {
-      if (version === sessionsVersionRef.current && !controller.signal.aborted) setSessionsLoading(false);
-    });
-  }, [client, invalidateSessions]);
-
-  useEffect(() => {
-    loadSessions();
-    return invalidateSessions;
-  }, [loadSessions, invalidateSessions]);
-
   const handleProfileChange = (next: Profile) => {
-    setProfile(next);
-    setProfileError(null);
-    onProfileChange?.(next);
+    if (accountData.setProfile(next)) onProfileChange?.(next);
   };
 
-  const refreshSessions = () => loadSessions();
+  const refreshSessions = () => accountData.refreshSessions();
   const handleSessionRevoked = (sessionId: string) => {
-    setSessions((current) => current.filter((session) => session.id !== sessionId));
-    loadSessions();
+    if (accountData.setSessions((current) => current.filter((session) => session.id !== sessionId))) accountData.refreshSessions();
   };
   const handleSessionRevokeFailed = () => {
-    loadSessions();
+    accountData.refreshSessions();
   };
 
   const moveTab = (event: React.KeyboardEvent<HTMLButtonElement>) => {
@@ -128,8 +64,8 @@ export function AccountCenter({ client, ai, collaboration, operations, workspace
       </div>
       <div className="account-panels">
         <div hidden={activeTab !== "overview"}><AccountOverviewPanel client={client} active={activeTab === "overview"} onOpenAiControls={() => setActiveTab("ai")} /></div>
-        <div hidden={activeTab !== "profile"}><ProfilePanel client={client} profile={profile} loading={profileLoading} error={profileError} onRetry={() => setProfileRetry((retry) => retry + 1)} onProfileChange={handleProfileChange} /></div>
-        <div hidden={activeTab !== "security"}><SecurityPanel active={activeTab === "security"} client={client} profile={profile} sessions={sessions} loading={sessionsLoading} error={sessionsError} onRetry={refreshSessions} onSessionsRefresh={refreshSessions} onSessionRevokeStart={invalidateSessions} onSessionRevokeFailed={handleSessionRevokeFailed} onSessionRevoked={handleSessionRevoked} onProfileChange={handleProfileChange} /></div>
+        <div hidden={activeTab !== "profile"}><ProfilePanel key={`profile-${resolvedCacheScope}-${accountData.scopeVersion}`} client={client} profile={accountData.profile} loading={accountData.profileLoading} error={accountData.profileError} onRetry={accountData.retryProfile} onProfileChange={handleProfileChange} /></div>
+        <div hidden={activeTab !== "security"}><SecurityPanel key={`security-${resolvedCacheScope}-${accountData.scopeVersion}`} active={activeTab === "security"} client={client} profile={accountData.profile} sessions={accountData.sessions} loading={accountData.sessionsLoading} error={accountData.sessionsError} onRetry={refreshSessions} onSessionsRefresh={refreshSessions} onSessionRevokeStart={accountData.invalidateSessions} onSessionRevokeFailed={handleSessionRevokeFailed} onSessionRevoked={handleSessionRevoked} onProfileChange={handleProfileChange} /></div>
         <div hidden={activeTab !== "workspace"}><WorkspacePanel workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} client={collaboration} currentUserId={currentUserId} onWorkspaceChange={onWorkspaceChange} onCreateWorkspace={onCreateWorkspace} /></div>
         <div hidden={activeTab !== "preferences"}><PreferencesPanel client={client} active={activeTab === "preferences"} /></div>
         <div hidden={activeTab !== "privacy"}><DataPrivacyPanel active={activeTab === "privacy"} client={client} operations={operations} activeWorkspaceId={activeWorkspaceId} onPrepareDelete={onPrepareDelete} onDeleteFailed={onDeleteFailed} onDeleted={onDeleted} /></div>

@@ -34,9 +34,6 @@ describe("AI tool policy", () => {
     expect(() => evaluateAiToolPolicy({
       tool: "get_note", trusted: false, target: "workspace", externalRecipient: false,
     })).toThrowError(expect.objectContaining({ code: "AI_TOOL_SELECTED_CONTEXT_REQUIRED" }));
-    expect(() => evaluateAiToolPolicy({
-      tool: "delete_database", trusted: true, target: "workspace", externalRecipient: false,
-    })).toThrowError(expect.objectContaining({ code: "AI_TOOL_SELECTED_CONTEXT_REQUIRED" }));
     expect(evaluateAiToolPolicy({
       tool: "get_note", trusted: false, target: "current", externalRecipient: false,
     })).toEqual({ risk: "read", requiresConfirmation: false });
@@ -84,7 +81,7 @@ describe("AI tool policy", () => {
 
   it("keeps the policy mapping synchronized with every catalog entry", () => {
     for (const entry of AI_TOOL_CATALOG) {
-      const target = ["get_note", "get_database_record", "update_note", "move_note", "archive_note", "restore_note", "delete_note", "apply_tag", "create_database_record", "update_database_record", "apply_template", "complete_reminder", "change_permissions", "delete_database"].includes(entry.name) ? "selected" as const : "workspace" as const;
+      const target = ["get_note", "get_database_record", "update_note", "move_note", "archive_note", "restore_note", "delete_note", "apply_tag", "create_database_record", "update_database_record", "apply_template", "complete_reminder"].includes(entry.name) ? "selected" as const : "workspace" as const;
       expect(evaluateAiToolPolicy({ tool: entry.name, trusted: true, target, externalRecipient: false }).risk).toBe(entry.risk);
     }
   });

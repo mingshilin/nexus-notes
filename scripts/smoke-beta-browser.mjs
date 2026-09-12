@@ -14,6 +14,7 @@ const MOBILE_LAYOUT_METRICS = { width: 390, height: 844, deviceScaleFactor: 2, m
 const MOBILE_KEYBOARD_METRICS = { ...MOBILE_LAYOUT_METRICS, height: 500 };
 export const NAVIGATION_SHELL_BUDGET_MS = 100;
 export const CACHED_PAGE_BUDGET_MS = 250;
+export const NAVIGATION_POLL_INTERVAL_MS = 16;
 
 export function buildAccessibilityAuditExpression(expectedViewport = 390) {
   const expected = Number.isFinite(Number(expectedViewport)) ? Number(expectedViewport) : 390;
@@ -79,7 +80,7 @@ export function parseArgs(argv) {
     publicShell: false,
     authenticated: false,
     cleanupRecovery: false,
-    authModeExplicit: process.env.NEXUS_NOTES_BETA_REQUIRE_AUTH === "1",
+    authModeExplicit: false,
     requireAuth: process.env.NEXUS_NOTES_BETA_REQUIRE_AUTH !== "0",
     userDataDir: process.env[PROFILE_ENV],
     avatarFile: process.env[AVATAR_ENV],
@@ -101,7 +102,13 @@ export function parseArgs(argv) {
   if (options.cleanupRecovery && options.publicShell) {
     throw new Error("Conflicting browser smoke modes: --cleanup-recovery requires authenticated mode");
   }
-  if (options.publicShell) options.requireAuth = false;
+  if (options.publicShell) {
+    options.requireAuth = false;
+    // Public-shell checks must never inherit authenticated browser state.
+    options.userDataDir = undefined;
+    options.avatarFile = undefined;
+    options.sessionToken = undefined;
+  }
   return options;
 }
 
@@ -166,12 +173,13 @@ export function externalPath(value, label, kind = "file") {
   return canonical;
 }
 
-function printSkip(reason) {
+function printBlocked(reason, requiredEnv = [PROFILE_ENV]) {
   console.log(JSON.stringify({
-    status: "SKIP",
+    status: "BLOCKED",
     reason,
-    requiredEnv: [PROFILE_ENV, AVATAR_ENV],
+    requiredEnv,
     optionalBootstrapEnv: SESSION_ENV,
+    profile: "external",
     authenticated: false,
   }));
 }
@@ -275,14 +283,27 @@ async function evaluate(cdp, expression) {
   return result.result.value;
 }
 
-async function waitFor(cdp, expression, label, timeoutMs = 15_000) {
+async function waitFor(cdp, expression, label, timeoutMs = 15_000, pollIntervalMs = 200) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const value = await evaluate(cdp, expression);
     if (value) return value;
-    await new Promise((resolveResult) => setTimeout(resolveResult, 200));
+    await new Promise((resolveResult) => setTimeout(resolveResult, pollIntervalMs));
   }
   throw new Error(label + " timed out");
+}
+
+export function waitForApplicationAuthBoundary(cdp, timeoutMs = 30_000) {
+  return waitFor(
+    cdp,
+    `(() => {
+      if (document.querySelector("button[aria-label='账户']")) return "authenticated";
+      if (document.querySelector("[aria-label='账户认证']")) return "unauthenticated";
+      return false;
+    })()`,
+    "application authentication boundary",
+    timeoutMs,
+  );
 }
 
 async function waitForNode(predicate, label, timeoutMs = 15_000) {
@@ -553,6 +574,32 @@ async function revealMobileChrome(cdp) {
   await waitFor(cdp, "(() => { const nav=document.querySelector('.mobile-bottom-nav'); return nav?.dataset.visible === 'true' && nav.getBoundingClientRect().bottom <= window.innerHeight + 1; })()", "mobile chrome reveal");
 }
 
+const mobileChromeVisibleExpression = "(() => { const nav=document.querySelector('.mobile-bottom-nav'); return nav?.dataset.visible === 'true' && nav.getBoundingClientRect().bottom <= window.innerHeight + 1; })()";
+
+export async function assertAuthenticatedBrowser(cdp) {
+  const boundary = await waitForApplicationAuthBoundary(cdp);
+  if (boundary !== "authenticated") {
+    throw Object.assign(new Error("An authenticated browser profile is required"), {
+      code: "AUTHENTICATED_PROFILE_REQUIRED",
+      gateBlocked: true,
+    });
+  }
+}
+
+export async function prepareStandaloneAuthenticatedScenario(cdp) {
+  await assertAuthenticatedBrowser(cdp);
+  let consecutiveVisibleChecks = 0;
+  for (let check = 0; check < 12; check += 1) {
+    if (consecutiveVisibleChecks === 0) await revealMobileChrome(cdp);
+    await new Promise((resolveResult) => setTimeout(resolveResult, 250));
+    consecutiveVisibleChecks = await evaluate(cdp, mobileChromeVisibleExpression)
+      ? consecutiveVisibleChecks + 1
+      : 0;
+    if (consecutiveVisibleChecks >= 4) return;
+  }
+  throw new Error("Mobile navigation did not remain visible after startup focus settled");
+}
+
 async function installLostResponseFault(cdp) {
   const state = { responseFailed: false, faultedRequest: null, error: null };
   const removeListener = cdp.on("Fetch.requestPaused", async (event) => {
@@ -636,13 +683,7 @@ export async function runPublicShell(cdp) {
 }
 
 export async function runNavigationPerformanceScenario(cdp) {
-  const authenticated = await evaluate(cdp, "Boolean(document.querySelector(\"button[aria-label='账户']\"))");
-  if (!authenticated) {
-    throw Object.assign(new Error("An authenticated browser profile is required for navigation performance"), {
-      code: "AUTHENTICATED_PROFILE_REQUIRED",
-      gateBlocked: true,
-    });
-  }
+  await prepareStandaloneAuthenticatedScenario(cdp);
   const destinations = [
     ["数据库", "databases"],
     ["知识整理", "knowledge"],
@@ -663,13 +704,13 @@ export async function runNavigationPerformanceScenario(cdp) {
   })()`);
   for (const [label, domain] of destinations) {
     await getByRole(cdp, "button", label).click();
-    await waitFor(cdp, `document.querySelector('.workspace-domain-surface')?.dataset.domain === ${JSON.stringify(domain)}`, `${label} navigation shell`, 5_000);
+    await waitFor(cdp, `document.querySelector('.workspace-domain-surface')?.dataset.domain === ${JSON.stringify(domain)}`, `${label} navigation shell`, 5_000, NAVIGATION_POLL_INTERVAL_MS);
     const shellMs = await evaluate(cdp, "window.__nexusNavigationStart === null ? null : performance.now() - window.__nexusNavigationStart");
     if (shellMs === null) throw new Error(`${label} navigation did not expose a measurable click timestamp`);
     measurements.push({ domain, shellMs: Math.round(shellMs) });
   }
   await getByRole(cdp, "button", "数据库").click();
-  await waitFor(cdp, "document.querySelector('.workspace-domain-surface')?.dataset.domain === 'databases'", "cached database navigation shell", 5_000);
+  await waitFor(cdp, "document.querySelector('.workspace-domain-surface')?.dataset.domain === 'databases'", "cached database navigation shell", 5_000, NAVIGATION_POLL_INTERVAL_MS);
   const cachedShellMs = await evaluate(cdp, "window.__nexusNavigationStart === null ? null : performance.now() - window.__nexusNavigationStart");
   if (cachedShellMs === null) throw new Error("Cached database navigation did not expose a measurable click timestamp");
   measurements.push({ domain: "databases-cached", shellMs: Math.round(cachedShellMs) });
@@ -685,13 +726,7 @@ export async function runNavigationPerformanceScenario(cdp) {
 }
 
 export async function runAiAssistantScenario(cdp) {
-  const authenticated = await evaluate(cdp, "Boolean(document.querySelector(\"button[aria-label='账户']\"))");
-  if (!authenticated) {
-    throw Object.assign(new Error("An authenticated browser profile is required for the AI assistant flow"), {
-      code: "AUTHENTICATED_PROFILE_REQUIRED",
-      gateBlocked: true,
-    });
-  }
+  await prepareStandaloneAuthenticatedScenario(cdp);
   await getByRole(cdp, "button", "AI 助手").click();
   await getByRole(cdp, "heading", "AI 助手").waitFor();
   const unavailable = await evaluate(cdp, `(() => [...document.querySelectorAll('[role="status"]')].some((node) => /当前不可用|尚未配置/u.test(node.textContent || '')))()`);
@@ -713,6 +748,17 @@ export async function runAiAssistantScenario(cdp) {
     });
   }
   await getByRole(cdp, "button", "确认执行").click();
+  try {
+    await waitFor(
+      cdp,
+      "Boolean(document.querySelector('.ai-chat-action-result, .ai-action-card-confirmed')) || [...document.querySelectorAll('.ai-action-card button')].some((node) => node.disabled || /确认中/u.test(node.textContent || ''))",
+      "AI action confirmation start",
+      3_000,
+      50,
+    );
+  } catch {
+    await getByRole(cdp, "button", "确认执行").click();
+  }
   await waitFor(cdp, "Boolean(document.querySelector('.ai-chat-action-result, .ai-action-card-confirmed'))", "AI action confirmation result", 35_000);
   const result = await evaluate(cdp, `(() => ({ cards: document.querySelectorAll('.ai-action-card').length, results: document.querySelectorAll('.ai-chat-action-result').length, history: Boolean(document.querySelector('.ai-action-history-list')) }))()`);
   return { proposal, result, confirmation: true };
@@ -925,8 +971,7 @@ export async function runAuthenticated(cdp, options, evidence) {
 }
 
 async function runCleanupRecovery(cdp, debugPort, options) {
-  await evaluate(cdp, "document.activeElement?.blur(); document.body.focus(); true");
-  await revealMobileChrome(cdp);
+  await prepareStandaloneAuthenticatedScenario(cdp);
   await getByRole(cdp, "button", "账户").waitFor();
   const secondTarget = await openTarget(debugPort, options.url);
   const second = connect(secondTarget.webSocketDebuggerUrl);
@@ -990,6 +1035,7 @@ export async function startBrowserSession(url, options = {}) {
     await cdp.send("Runtime.enable");
     await cdp.send("Network.enable");
     await cdp.send("Emulation.setDeviceMetricsOverride", MOBILE_LAYOUT_METRICS);
+    await waitForApplicationAuthBoundary(cdp);
     return {
       cdp,
       debugPort,
@@ -1017,14 +1063,30 @@ export async function startBrowserSession(url, options = {}) {
 
 async function run() {
   const options = parseArgs(process.argv.slice(2));
-  const authReady = Boolean(options.userDataDir && options.avatarFile);
-  if (!options.publicShell && !authReady) {
-    printSkip(options.userDataDir ? "AVATAR_FIXTURE_UNSET" : "AUTH_FIXTURE_UNSET");
+  if (!options.publicShell && !options.userDataDir) {
+    printBlocked("AUTHENTICATED_PROFILE_UNSET");
     process.exitCode = 2;
     return;
   }
-  if (options.userDataDir) options.userDataDir = externalPath(options.userDataDir, PROFILE_ENV, "directory");
-  if (options.avatarFile) options.avatarFile = externalPath(options.avatarFile, AVATAR_ENV, "file");
+  try {
+    if (options.userDataDir) options.userDataDir = externalPath(options.userDataDir, PROFILE_ENV, "directory");
+  } catch {
+    printBlocked("AUTHENTICATED_PROFILE_INVALID", [PROFILE_ENV]);
+    process.exitCode = 2;
+    return;
+  }
+  if (!options.publicShell && !options.avatarFile) {
+    printBlocked("AVATAR_FIXTURE_UNSET", [AVATAR_ENV]);
+    process.exitCode = 2;
+    return;
+  }
+  try {
+    if (options.avatarFile) options.avatarFile = externalPath(options.avatarFile, AVATAR_ENV, "file");
+  } catch {
+    printBlocked("AUTHENTICATED_FIXTURE_INVALID", [AVATAR_ENV]);
+    process.exitCode = 2;
+    return;
+  }
   const browserPath = await findBrowser();
   const debugPort = port();
   const temporaryProfile = options.userDataDir ? null : mkdtempSync(join(tmpdir(), "nexus-beta-browser-"));
@@ -1062,6 +1124,7 @@ async function run() {
     }
     console.log(JSON.stringify({ status: "PASS", scenario: "public-shell", evidence: { ...publicEvidence, diagnostics: diagnostics.state } }));
     if (options.publicShell) return;
+    await assertAuthenticatedBrowser(cdp);
     console.log(JSON.stringify({ status: "PASS", scenario: "authenticated-phase1", evidence: await runAuthenticated(cdp, options, evidence) }));
     if (options.cleanupRecovery) {
       console.log(JSON.stringify({ status: "PASS", scenario: "authenticated-cleanup-recovery", evidence: await runCleanupRecovery(cdp, debugPort, options) }));
@@ -1079,6 +1142,11 @@ async function run() {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   run().catch((error) => {
+    if (error?.gateBlocked) {
+      printBlocked(error.code ?? "AUTHENTICATED_PROFILE_REQUIRED");
+      process.exitCode = 2;
+      return;
+    }
     console.error(JSON.stringify({ status: "FAIL", reason: error instanceof Error ? error.message : String(error) }));
     process.exit(1);
   });

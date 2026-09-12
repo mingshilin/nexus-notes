@@ -63,6 +63,7 @@ describe("AI chat proxy", () => {
   it("sends the configured model and secret only from the Worker", async () => {
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       expect(init?.headers).toEqual(expect.objectContaining({ authorization: "Bearer server-only-key" }));
+      expect(init?.redirect).toBe("manual");
       const body = JSON.parse(String(init?.body));
       expect(body).toMatchObject({
         model: "beta-model",
@@ -102,6 +103,111 @@ describe("AI chat proxy", () => {
     await expect(service.chat({ messages: [{ role: "user", content: "整理我的任务" }] }, new AbortController().signal))
       .resolves.toEqual({ message: "先列出三个最重要的任务。", model: "beta-model" });
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("retries one transient provider failure before processing tool output", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(new Response("temporarily unavailable", { status: 503 }))
+      .mockResolvedValueOnce(Response.json({
+        choices: [{ message: { content: "服务已恢复。" } }],
+      }));
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl,
+    });
+
+    await expect(service.chat({ messages: [{ role: "user", content: "继续" }] }, new AbortController().signal))
+      .resolves.toEqual({ message: "服务已恢复。", model: "beta-model" });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects an oversized provider message before proposing or executing its tool call", async () => {
+    const proposeActions = vi.fn(async () => [{
+      action_id: "action-oversized",
+      tool: "create_note" as const,
+      summary: "创建笔记待确认",
+      input: { title: "Unsafe", content: "Body" },
+      requires_confirmation: false,
+      expires_at: "2099-01-01T00:00:00.000Z",
+    }]);
+    const executeActions = vi.fn(async () => []);
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: "x".repeat(8_001),
+        tool_calls: [{ id: "call-oversized", type: "function", function: {
+          name: "create_note", arguments: JSON.stringify({ title: "Unsafe", content: "Body" }),
+        } }],
+      } }] })),
+    });
+
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "创建" }] },
+      new AbortController().signal,
+      { proposeActions, executeActions },
+    )).rejects.toMatchObject<Partial<AiChatServiceError>>({ code: "AI_PROVIDER_INVALID_RESPONSE" });
+    expect(proposeActions).not.toHaveBeenCalled();
+    expect(executeActions).not.toHaveBeenCalled();
+  });
+
+  it("rejects too many action calls before persisting proposals", async () => {
+    const proposeActions = vi.fn(async () => []);
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: "Too many actions",
+        tool_calls: Array.from({ length: 21 }, (_, index) => ({
+          id: `call-${index}`,
+          type: "function",
+          function: { name: "create_note", arguments: JSON.stringify({ title: `Note ${index}` }) },
+        })),
+      } }] })),
+    });
+
+    await expect(service.chat(
+      { messages: [{ role: "user", content: "创建很多笔记" }] },
+      new AbortController().signal,
+      { proposeActions },
+    )).rejects.toMatchObject<Partial<AiChatServiceError>>({ code: "AI_PROVIDER_INVALID_RESPONSE" });
+    expect(proposeActions).not.toHaveBeenCalled();
+  });
+
+  it("marks provider errors unsafe for failover once proposal side effects begin", async () => {
+    const sideEffects: string[] = [];
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: "创建中",
+        tool_calls: [{ id: "call-side-effect", type: "function", function: {
+          name: "create_note", arguments: JSON.stringify({ title: "One", content: "Body" }),
+        } }],
+      } }] })),
+    });
+
+    const error = await service.chat(
+      { messages: [{ role: "user", content: "创建" }] },
+      new AbortController().signal,
+      {
+        proposeActions: vi.fn(async () => {
+          sideEffects.push("proposal-persisted");
+          throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "late failure", 502, false);
+        }),
+      },
+    ).catch((caught) => caught);
+
+    expect(sideEffects).toEqual(["proposal-persisted"]);
+    expect(error).toMatchObject<Partial<AiChatServiceError>>({
+      code: "AI_PROVIDER_INVALID_RESPONSE",
+      safeToFailover: false,
+    });
   });
 
   it("executes trusted safe-write proposals through the supplied action runner", async () => {
@@ -282,6 +388,57 @@ describe("AI chat proxy", () => {
     await expect(service.chat({ messages: [{ role: "user", content: "你好" }] }, new AbortController().signal))
       .rejects.toMatchObject<Partial<AiChatServiceError>>({ code: "AI_NOT_CONFIGURED", status: 503 });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each(["error", "success"])("does not start further actions after caller cancellation during proposals: %s", async (outcome) => {
+    const caller = new AbortController();
+    const executeActions = vi.fn(async () => []);
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      fetchImpl: vi.fn(async () => Response.json({ choices: [{ message: {
+        content: "Created",
+        tool_calls: [{ id: "call-abort", type: "function", function: {
+          name: "create_note", arguments: JSON.stringify({ title: "Draft", content: "Body" }),
+        } }],
+      } }] })),
+    });
+    await expect(service.chat({ messages: [{ role: "user", content: "Create" }] }, caller.signal, {
+      proposeActions: async () => {
+        caller.abort();
+        if (outcome === "error") throw new AiChatServiceError("AI_PROVIDER_INVALID_RESPONSE", "Invalid", 502, false);
+        return [{ action_id: "action-abort", tool: "create_note", summary: "Draft", input: { title: "Draft", content: "Body" }, requires_confirmation: false, expires_at: "2099-08-25T01:00:00.000Z" }];
+      },
+      executeActions,
+    })).rejects.toMatchObject({ code: "AI_REQUEST_ABORTED", status: 499, retryable: false, safeToFailover: false });
+    expect(executeActions).not.toHaveBeenCalled();
+  });
+
+  it("bounds a provider that ignores abort and discards its late result", async () => {
+    let resolveProvider!: (response: Response) => void;
+    const proposeActions = vi.fn(async () => []);
+    const service = new AiChatService({
+      apiUrl: "https://ai.example.test/v1/chat/completions",
+      apiKey: "server-only-key",
+      model: "beta-model",
+      timeoutMs: 5,
+      fetchImpl: vi.fn(() => new Promise<Response>((resolve) => { resolveProvider = resolve; })),
+    });
+    const result = service.chat({ messages: [{ role: "user", content: "Create" }] }, new AbortController().signal, { proposeActions });
+    const settled = await Promise.race([
+      result.then(() => "success", (error: unknown) => error),
+      new Promise<string>((resolve) => setTimeout(() => resolve("not bounded"), 50)),
+    ]);
+    resolveProvider(Response.json({ choices: [{ message: {
+      content: "Late",
+      tool_calls: [{ id: "call-late", type: "function", function: {
+        name: "create_note", arguments: JSON.stringify({ title: "Late", content: "Body" }),
+      } }],
+    } }] }));
+    await result.catch(() => undefined);
+    expect(settled).toMatchObject({ code: "AI_PROVIDER_TIMEOUT", safeToFailover: true });
+    expect(proposeActions).not.toHaveBeenCalled();
   });
 
   it("converts a slow provider into a bounded retryable timeout", async () => {

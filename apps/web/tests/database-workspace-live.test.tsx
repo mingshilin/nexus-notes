@@ -14,6 +14,17 @@ const authenticatedSession = {
   active_workspace_id: "ws-1",
 };
 
+function isolatedDraftStore() {
+  return {
+    saveDraft: vi.fn(async () => undefined),
+    mutateDraft: vi.fn(async () => null),
+    getDraft: vi.fn(async () => null),
+    listDrafts: vi.fn(async () => []),
+    removeDraft: vi.fn(async () => undefined),
+    destroy: vi.fn(async () => undefined),
+  };
+}
+
 describe("live database workspace", () => {
   it("loads databases only after navigation and renders the workspace-bound first page", async () => {
     const authClient = { session: vi.fn(async () => authenticatedSession) };
@@ -25,7 +36,7 @@ describe("live database workspace", () => {
       };
       return { items: [], next_cursor: null };
     }) };
-    render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+    render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={isolatedDraftStore() as any} turnstileSiteKey="test" />);
 
     await screen.findByRole("heading", { name: "Public Beta 重写计划" });
     expect(apiClient.request.mock.calls.map(([options]) => options.path)).not.toContain("/api/v2/databases/bootstrap?limit=50");
@@ -60,7 +71,7 @@ describe("live database workspace", () => {
       } : { items: [], selected_database_id: null, bundle: null, records: { items: [], next_cursor: null } };
       return { items: [] };
     }) };
-    render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+    render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={isolatedDraftStore() as any} turnstileSiteKey="test" />);
     await screen.findByRole("heading", { name: "Public Beta 重写计划" });
     fireEvent.click(screen.getByRole("button", { name: "数据库" }));
     expect(await screen.findByRole("heading", { name: "创建第一个数据库" })).toBeInTheDocument();
@@ -84,7 +95,7 @@ describe("live database workspace", () => {
       if (path === "/api/v2/databases/db-1/records?cursor=board-next&view_id=board&limit=100") return { items: [later], next_cursor: null };
       return { items: [], next_cursor: null };
     }) };
-    render(<App authClient={authClient as any} apiClient={apiClient as any} turnstileSiteKey="test" />);
+    render(<App authClient={authClient as any} apiClient={apiClient as any} localStore={isolatedDraftStore() as any} turnstileSiteKey="test" />);
     await screen.findByRole("heading", { name: "Public Beta 重写计划" });
     fireEvent.click(screen.getByRole("button", { name: "数据库" }));
     await screen.findByTestId("board-card-record-1");
