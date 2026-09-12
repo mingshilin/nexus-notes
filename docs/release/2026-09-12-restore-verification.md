@@ -36,3 +36,59 @@ no authenticated real-browser acceptance was completed. No authentication was
 bypassed and no browser session stores were read. Latest-source Preview
 deployment, authenticated UI/AI acceptance, provider credential rotation,
 encrypted backup restoration, and release identity remain open release gates.
+
+## Local Encryption Follow-up
+
+At 15:44 Asia/Shanghai, five files from the existing September 6 production
+backup (SQL, manifests and referenced R2 objects) were copied into encrypted
+files under the repository-external directory
+`D:\mingSL\Documents\nexus-notes-release-evidence\backups\encrypted-local-20260912-154436`.
+Windows DPAPI CurrentUser protection was used. Every encrypted file was read
+back and decrypted in memory; all SHA-256 comparisons matched its source.
+Original files were not changed or deleted. No backup contents were logged.
+
+This proves local encryption round-trip only. Recovery depends on the Windows
+user's DPAPI material; it is not a portable off-machine disaster-recovery copy,
+does not refresh the September 6 snapshot, and does not prove D1 restoration.
+
+A separate Miniflare local D1 restore was started using all 27 migrations and
+one batch of the parsed backup statements. As of 15:45 its Node/workerd process
+was still live with no result. Treat the D1 gate as pending, not passed. No
+remote database was targeted.
+
+## D1 Runtime Diagnosis
+
+The initial uninstrumented restore was explicitly stopped with Ctrl+C after
+remaining live without output. A subsequent staged probe parsed the backup
+successfully (104,208 bytes of JSON-encoded SQL) but stalled at
+`Miniflare.getD1Database`, before any migrations or restore batch ran.
+The workerd loopback HTTP listener returned 200 for its empty test handler.
+The Node-side 60-second timer also did not report completion; the probe was
+explicitly stopped rather than reported as passed or left indefinitely running.
+
+This narrows the observed problem to local D1 binding initialization, not the
+backup contents. It does not prove the root cause or successful D1 restoration.
+No remote DB, browser state, or application records were modified. Production
+dependency audit was rerun during diagnosis and reported zero vulnerabilities.
+
+## Completed Local D1 Restore
+
+At 15:54 the same snapshot was successfully restored using the repository's
+Vitest/Miniflare environment rather than a standalone Node TypeScript command.
+All 27 migrations and a batch of 227 prepared backup statements completed.
+`PRAGMA foreign_key_check` returned zero violations; 9 users and 44 notes
+matched the earlier SQLite restoration. D1 denies `PRAGMA integrity_check`
+with SQLITE_AUTH, so physical integrity remains the separately recorded
+SQLite result, not a claimed D1 query result.
+
+Reproduce from `apps/worker` with `npx vitest run --config vitest.restore.config.ts`
+and `NEXUS_RESTORE_STATEMENTS_FILE` pointing to the explicitly prepared external
+JSON statement array. The file is required, cannot live under the repository,
+and is intentionally not supplied to public CI. The dedicated acceptance test
+is not included in the ordinary test glob. Failed imports omit private SQL.
+
+Prepared JSON SHA-256:
+`9cfeec3ee45e5096a539e39c01ea8382bda02fe1fbb083af27c17e019ca304eb`.
+The statements file is outside Git and derived from the existing plain backup;
+it is not itself encrypted. This validates local D1 compatibility, not a remote
+restore, updated production snapshot, portable recovery, or external secrets.
