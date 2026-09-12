@@ -576,7 +576,7 @@ async function revealMobileChrome(cdp) {
 
 const mobileChromeVisibleExpression = "(() => { const nav=document.querySelector('.mobile-bottom-nav'); return nav?.dataset.visible === 'true' && nav.getBoundingClientRect().bottom <= window.innerHeight + 1; })()";
 
-export async function prepareStandaloneAuthenticatedScenario(cdp) {
+export async function assertAuthenticatedBrowser(cdp) {
   const boundary = await waitForApplicationAuthBoundary(cdp);
   if (boundary !== "authenticated") {
     throw Object.assign(new Error("An authenticated browser profile is required"), {
@@ -584,6 +584,10 @@ export async function prepareStandaloneAuthenticatedScenario(cdp) {
       gateBlocked: true,
     });
   }
+}
+
+export async function prepareStandaloneAuthenticatedScenario(cdp) {
+  await assertAuthenticatedBrowser(cdp);
   let consecutiveVisibleChecks = 0;
   for (let check = 0; check < 12; check += 1) {
     if (consecutiveVisibleChecks === 0) await revealMobileChrome(cdp);
@@ -1120,6 +1124,7 @@ async function run() {
     }
     console.log(JSON.stringify({ status: "PASS", scenario: "public-shell", evidence: { ...publicEvidence, diagnostics: diagnostics.state } }));
     if (options.publicShell) return;
+    await assertAuthenticatedBrowser(cdp);
     console.log(JSON.stringify({ status: "PASS", scenario: "authenticated-phase1", evidence: await runAuthenticated(cdp, options, evidence) }));
     if (options.cleanupRecovery) {
       console.log(JSON.stringify({ status: "PASS", scenario: "authenticated-cleanup-recovery", evidence: await runCleanupRecovery(cdp, debugPort, options) }));
@@ -1137,6 +1142,11 @@ async function run() {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   run().catch((error) => {
+    if (error?.gateBlocked) {
+      printBlocked(error.code ?? "AUTHENTICATED_PROFILE_REQUIRED");
+      process.exitCode = 2;
+      return;
+    }
     console.error(JSON.stringify({ status: "FAIL", reason: error instanceof Error ? error.message : String(error) }));
     process.exit(1);
   });

@@ -11,6 +11,7 @@ import {
   buildSafeClickPointExpression,
   enterKeyboardViewport,
   parseArgs,
+  assertAuthenticatedBrowser,
   prepareStandaloneAuthenticatedScenario,
   pressKey,
   restoreMobileGeometry,
@@ -20,6 +21,20 @@ import {
 } from "../../scripts/smoke-beta-browser.mjs";
 
 describe("release browser smoke modes", () => {
+  it("rejects an expired profile before attempting note mutations", async () => {
+    const send = vi.fn().mockResolvedValue({ result: { value: "unauthenticated" } });
+    await expect(assertAuthenticatedBrowser({ send })).rejects.toMatchObject({
+      code: "AUTHENTICATED_PROFILE_REQUIRED",
+      gateBlocked: true,
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows an authenticated browser past the preflight", async () => {
+    const send = vi.fn().mockResolvedValue({ result: { value: "authenticated" } });
+    await expect(assertAuthenticatedBrowser({ send })).resolves.toBeUndefined();
+  });
+
   function runAuthenticatedGate(args: string[]) {
     const env = { ...process.env };
     delete env.NEXUS_NOTES_BETA_USER_DATA_DIR;
